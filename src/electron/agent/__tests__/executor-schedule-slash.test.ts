@@ -24,6 +24,7 @@ describe("TaskExecutor /schedule slash command handling", () => {
       updateTaskStatus: vi.fn(),
       completeTask: vi.fn(),
       getTaskEvents: vi.fn().mockReturnValue([]),
+      requestApproval: vi.fn().mockResolvedValue(true),
     };
 
     executor.toolRegistry = {
@@ -133,5 +134,237 @@ describe("TaskExecutor /schedule slash command handling", () => {
     await expect(
       (TaskExecutor as Any).prototype.maybeHandleScheduleSlashCommand.call(executor),
     ).rejects.toThrow(/Invalid interval/i);
+  });
+});
+
+describe("TaskExecutor /simplify and /batch normalization", () => {
+  function createExecutor(prompt: string, toolImpl: (name: string, input: Any) => Any) {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+
+    executor.task = {
+      id: "task-2",
+      title: "Slash command test",
+      prompt,
+      createdAt: Date.now() - 1000,
+    };
+
+    executor.workspace = {
+      id: "workspace-1",
+      path: "/tmp",
+      isTemp: false,
+      permissions: { read: true, write: true, delete: true, network: true, shell: true },
+    };
+
+    executor.daemon = {
+      logEvent: vi.fn(),
+      updateTaskStatus: vi.fn(),
+      completeTask: vi.fn(),
+      getTaskEvents: vi.fn().mockReturnValue([]),
+    };
+
+    executor.toolRegistry = {
+      executeTool: vi.fn(async (name: string, input: Any) => toolImpl(name, input)),
+    };
+
+    executor.saveConversationSnapshot = vi.fn();
+    executor.conversationHistory = [];
+    executor.lastAssistantOutput = null;
+    executor.lastNonVerificationOutput = null;
+    executor.taskCompleted = false;
+
+    return executor as TaskExecutor & {
+      toolRegistry: { executeTool: ReturnType<typeof vi.fn> };
+    };
+  }
+
+  it("normalizes `/simplify` into deterministic use_skill execution", async () => {
+    const executor = createExecutor("/simplify", (name, input) => {
+      expect(name).toBe("use_skill");
+      expect(input).toEqual({
+        skill_id: "simplify",
+        parameters: {},
+      });
+      return {
+        success: true,
+        expanded_prompt: "Simplify prompt expanded",
+      };
+    });
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
+      executor,
+    );
+
+    expect(handled).toBe(true);
+    expect(executor.task.prompt).toBe("Simplify prompt expanded");
+  });
+
+  it("normalizes `/batch` with flags into deterministic use_skill execution", async () => {
+    const executor = createExecutor(
+      "/batch migrate docs to template --parallel 6 --domain writing --external confirm",
+      (name, input) => {
+        expect(name).toBe("use_skill");
+        expect(input).toEqual({
+          skill_id: "batch",
+          parameters: {
+            objective: "migrate docs to template",
+            parallel: 6,
+            domain: "writing",
+            external: "confirm",
+          },
+        });
+        return {
+          success: true,
+          expanded_prompt: "Batch prompt expanded",
+        };
+      },
+    );
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
+      executor,
+    );
+
+    expect(handled).toBe(true);
+    expect(executor.task.prompt).toBe("Batch prompt expanded");
+  });
+
+  it("enforces `/batch` external policy default to confirm when omitted", async () => {
+    const executor = createExecutor("/batch migrate docs", (name, input) => {
+      expect(name).toBe("use_skill");
+      expect(input).toEqual({
+        skill_id: "batch",
+        parameters: {
+          objective: "migrate docs",
+          external: "confirm",
+        },
+      });
+      return {
+        success: true,
+        expanded_prompt: "Batch prompt expanded",
+      };
+    });
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
+      executor,
+    );
+
+    expect(handled).toBe(true);
+    expect(executor.task.prompt).toBe("Batch prompt expanded");
+  });
+
+  it("rejects `/batch` without an objective", async () => {
+    const executor = createExecutor("/batch", (_name, _input) => {
+      throw new Error("use_skill should not be called");
+    });
+
+    await expect(
+      (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(executor),
+    ).rejects.toThrow(/Missing objective for \/batch/i);
+  });
+
+  it("applies `external=none` by restricting side-effect external tools", async () => {
+    const executor = createExecutor("/batch migrate docs --external none", (name, input) => {
+      expect(name).toBe("use_skill");
+      expect(input).toEqual({
+        skill_id: "batch",
+        parameters: {
+          objective: "migrate docs",
+          external: "none",
+        },
+      });
+      return {
+        success: true,
+        expanded_prompt: "Batch prompt expanded",
+      };
+    });
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
+      executor,
+    );
+
+    expect(handled).toBe(true);
+    expect(executor.task.agentConfig?.toolRestrictions).toEqual(
+      expect.arrayContaining(["gmail_action", "notion_action", "voice_call"]),
+    );
+  });
+
+  it("blocks side-effect external tools when `/batch external=none` policy is active", async () => {
+    const executor = createExecutor("noop", (_name, _input) => ({ success: true }));
+    executor.slashBatchExternalPolicy = "none";
+    executor.slashBatchExternalConfirmGranted = false;
+
+    const blocked = await (TaskExecutor as Any).prototype.maybeBlockToolByBatchExternalPolicy.call(
+      executor,
+      { id: "tool-1", name: "gmail_action", input: { action: "send_message" } },
+      false,
+    );
+
+    expect(blocked).toBeTruthy();
+    const payload = JSON.parse(String(blocked.content));
+    expect(payload.blocked).toBe(true);
+    expect(payload.reason).toBe("batch_external_none_policy");
+  });
+
+  it("requires explicit non-auto approval for `/batch external=confirm` side effects", async () => {
+    const executor = createExecutor("noop", (_name, _input) => ({ success: true }));
+    executor.slashBatchExternalPolicy = "confirm";
+    executor.slashBatchExternalConfirmGranted = false;
+    executor.daemon.requestApproval = vi.fn().mockResolvedValue(true);
+
+    const first = await (TaskExecutor as Any).prototype.maybeBlockToolByBatchExternalPolicy.call(
+      executor,
+      { id: "tool-2", name: "gmail_action", input: { action: "send_message" } },
+      false,
+    );
+    expect(first).toBeNull();
+    expect(executor.daemon.requestApproval).toHaveBeenCalledWith(
+      "task-2",
+      "external_service",
+      expect.stringContaining("/batch"),
+      expect.objectContaining({
+        tool: "gmail_action",
+      }),
+      { allowAutoApprove: false },
+    );
+
+    const second = await (TaskExecutor as Any).prototype.maybeBlockToolByBatchExternalPolicy.call(
+      executor,
+      { id: "tool-3", name: "gmail_action", input: { action: "send_message" } },
+      false,
+    );
+    expect(second).toBeNull();
+    expect(executor.daemon.requestApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not block read-only external actions under `/batch external=none`", async () => {
+    const executor = createExecutor("noop", (_name, _input) => ({ success: true }));
+    executor.slashBatchExternalPolicy = "none";
+    executor.slashBatchExternalConfirmGranted = false;
+
+    const blocked = await (TaskExecutor as Any).prototype.maybeBlockToolByBatchExternalPolicy.call(
+      executor,
+      { id: "tool-4", name: "gmail_action", input: { action: "list_messages" } },
+      false,
+    );
+
+    expect(blocked).toBeNull();
+  });
+
+  it("supports inline `then run /simplify` chaining", async () => {
+    const executor = createExecutor("Refactor this module then run /simplify", (name, input) => {
+      expect(name).toBe("use_skill");
+      expect(input.skill_id).toBe("simplify");
+      return {
+        success: true,
+        expanded_prompt: "Expanded simplify workflow",
+      };
+    });
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
+      executor,
+    );
+
+    expect(handled).toBe(true);
+    expect(executor.task.prompt).toContain("Refactor this module");
+    expect(executor.task.prompt).toContain("Expanded simplify workflow");
   });
 });

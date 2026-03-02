@@ -24,6 +24,20 @@ import {
 /** Manifest filename */
 const MANIFEST_FILENAME = "cowork.plugin.json";
 
+function normalizeLegacyAuthor(author?: string): string | undefined {
+  if (typeof author !== "string") return author;
+  const trimmed = author.trim();
+  if (!trimmed) return undefined;
+  return /^cowork-oss$/i.test(trimmed) ? "CoWork OS" : trimmed;
+}
+
+function normalizeManifestBranding(manifest: PluginManifest): PluginManifest {
+  return {
+    ...manifest,
+    author: normalizeLegacyAuthor(manifest.author),
+  };
+}
+
 /** Default extensions directories */
 const getDefaultExtensionsDirs = (): string[] => {
   const dirs: string[] = [];
@@ -176,9 +190,10 @@ export async function discoverPlugins(dirs?: string[]): Promise<PluginDiscoveryR
         const manifest = JSON.parse(manifestContent);
 
         if (validateManifest(manifest)) {
+          const normalizedManifest = normalizeManifestBranding(manifest);
           results.push({
             path: pluginDir,
-            manifest,
+            manifest: normalizedManifest,
           });
         }
       } catch (error) {
@@ -215,10 +230,11 @@ export async function loadPlugin(pluginPath: string): Promise<PluginLoadResult> 
         error: new Error("Invalid plugin manifest"),
       };
     }
+    const normalizedManifest = normalizeManifestBranding(manifest);
 
     // Check platform compatibility
-    if (manifest.platform?.os) {
-      if (!manifest.platform.os.includes(process.platform)) {
+    if (normalizedManifest.platform?.os) {
+      if (!normalizedManifest.platform.os.includes(process.platform)) {
         return {
           success: false,
           error: new Error(`Plugin does not support platform: ${process.platform}`),
@@ -227,16 +243,16 @@ export async function loadPlugin(pluginPath: string): Promise<PluginLoadResult> 
     }
 
     // Declarative-only plugins (no main entry point)
-    if (!manifest.main) {
+    if (!normalizedManifest.main) {
       const declarativePlugin: Plugin = {
-        manifest,
+        manifest: normalizedManifest,
         register: async () => {
           // Registration of declarative content is handled by the registry
         },
       };
 
       const loadedPlugin: LoadedPlugin = {
-        manifest,
+        manifest: normalizedManifest,
         instance: declarativePlugin,
         path: pluginPath,
         state: "loaded",
@@ -247,7 +263,7 @@ export async function loadPlugin(pluginPath: string): Promise<PluginLoadResult> 
     }
 
     // Resolve entry point
-    const entryPoint = path.join(pluginPath, manifest.main);
+    const entryPoint = path.join(pluginPath, normalizedManifest.main);
     if (!fs.existsSync(entryPoint)) {
       return {
         success: false,
@@ -269,10 +285,10 @@ export async function loadPlugin(pluginPath: string): Promise<PluginLoadResult> 
     }
 
     // Attach manifest to plugin
-    plugin.manifest = manifest;
+    plugin.manifest = normalizedManifest;
 
     const loadedPlugin: LoadedPlugin = {
-      manifest,
+      manifest: normalizedManifest,
       instance: plugin,
       path: pluginPath,
       state: "loaded",

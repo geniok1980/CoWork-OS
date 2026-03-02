@@ -109,17 +109,17 @@ export function CommandOutput({
     <div className="command-output-container">
       <div className="command-output-header">
         <div className="command-output-title">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <path d="M4 17l6-6-6-6M12 19h8" />
-          </svg>
-          <span className="command-text">{command}</span>
+          <div className="command-window-controls" aria-hidden="true">
+            <span className="command-window-dot close" />
+            <span className="command-window-dot minimize" />
+            <span className="command-window-dot zoom" />
+          </div>
+          <span className="command-prompt-glyph" aria-hidden="true">
+            &gt;_
+          </span>
+          <span className="command-text" title={command}>
+            {command}
+          </span>
         </div>
         <div className="command-output-actions">
           {isRunning && taskId && !stopClicked && (

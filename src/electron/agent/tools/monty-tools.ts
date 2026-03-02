@@ -110,7 +110,8 @@ export class MontyTools {
         name: "monty_run",
         description:
           "Run deterministic, sandboxed Python-subset code (Monty) for fast local computation and post-processing. " +
-          "The input object is available as `input` inside the script. No file/network/shell access.",
+          "The input object is available as `input` inside the script. No file/network/shell access. " +
+          "For simple character/word/line counting, prefer count_text or text_metrics instead.",
         input_schema: {
           type: "object",
           properties: {

@@ -53,6 +53,24 @@ describe("ChannelGateway daemon listeners", () => {
     agentDaemon = new EventEmitter();
   });
 
+  const emitTimeline = (
+    timelineType: string,
+    taskId: string,
+    legacyType: string,
+    payload: Record<string, unknown> = {},
+  ) => {
+    agentDaemon.emit(timelineType, {
+      taskId,
+      payload: {
+        legacyType,
+        ...payload,
+      },
+      timestamp: Date.now(),
+      schemaVersion: 2,
+      status: timelineType === "timeline_step_finished" ? "completed" : "in_progress",
+    });
+  };
+
   it("prefers task_completed.resultSummary over last streamed assistant message", () => {
     const db = createMockDb();
     const gateway = new ChannelGateway(db, { agentDaemon: agentDaemon as Any });
@@ -61,12 +79,10 @@ describe("ChannelGateway daemon listeners", () => {
     router.sendTaskUpdate = vi.fn();
     router.handleTaskCompletion = vi.fn();
 
-    agentDaemon.emit("assistant_message", {
-      taskId: "t1",
+    emitTimeline("timeline_step_updated", "t1", "assistant_message", {
       message: "Some streamed content that is not the final summary.",
     });
-    agentDaemon.emit("task_completed", {
-      taskId: "t1",
+    emitTimeline("timeline_step_finished", "t1", "task_completed", {
       resultSummary: "Final summary from daemon.",
     });
 
@@ -84,9 +100,9 @@ describe("ChannelGateway daemon listeners", () => {
     const first = "First streamed message (short).";
     const second = "Second streamed message that is longer and should win.";
 
-    agentDaemon.emit("assistant_message", { taskId: "t2", message: first });
-    agentDaemon.emit("assistant_message", { taskId: "t2", message: second });
-    agentDaemon.emit("task_completed", { taskId: "t2" });
+    emitTimeline("timeline_step_updated", "t2", "assistant_message", { message: first });
+    emitTimeline("timeline_step_updated", "t2", "assistant_message", { message: second });
+    emitTimeline("timeline_step_finished", "t2", "task_completed");
 
     expect(router.handleTaskCompletion).toHaveBeenCalledWith("t2", second);
   });
@@ -101,9 +117,39 @@ describe("ChannelGateway daemon listeners", () => {
 
     const streamed = "Here is the actual result the user should see.";
 
-    agentDaemon.emit("assistant_message", { taskId: "t3", message: streamed });
-    agentDaemon.emit("task_completed", { taskId: "t3", message: "Task completed successfully" });
+    emitTimeline("timeline_step_updated", "t3", "assistant_message", { message: streamed });
+    emitTimeline("timeline_step_finished", "t3", "task_completed", {
+      message: "Task completed successfully",
+    });
 
     expect(router.handleTaskCompletion).toHaveBeenCalledWith("t3", streamed);
+  });
+
+  it("publishes evidence links only for key-claim evidence events", () => {
+    const db = createMockDb();
+    const gateway = new ChannelGateway(db, { agentDaemon: agentDaemon as Any });
+
+    const router = (gateway as Any).router;
+    router.sendTaskUpdate = vi.fn();
+
+    emitTimeline("timeline_evidence_attached", "t4", "citations_collected", {
+      gate: "key_claim_evidence_gate",
+      keyClaims: ["Median comp is higher than the current offer."],
+      evidenceRefs: [
+        {
+          sourceUrlOrPath: "https://example.com/comp-survey",
+          snippet: "Median total compensation is $500k.",
+        },
+      ],
+    });
+
+    expect(router.sendTaskUpdate).toHaveBeenCalledWith(
+      "t4",
+      expect.stringContaining("Evidence links for key claims"),
+    );
+    expect(router.sendTaskUpdate).toHaveBeenCalledWith(
+      "t4",
+      expect.stringContaining("https://example.com/comp-survey"),
+    );
   });
 });

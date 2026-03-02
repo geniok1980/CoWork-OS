@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Skills for Unity, Unreal Engine, and Godot game development including scripting, performance optimization, shader development, and build pipelines",
   "type": "pack",
-  "author": "CoWork-OSS",
+  "author": "CoWork OS",
   "keywords": ["gamedev", "unity", "unreal", "godot", "shaders", "performance", "game-engine", "c-sharp", "cpp", "gdscript"],
   "icon": "🎮",
   "category": "Engineering",

@@ -210,6 +210,11 @@ export function PluginStore({ onClose, onInstalled }: PluginStoreProps) {
   };
 
   const pageCount = Math.ceil(total / 12);
+  const normalizeAuthor = (author?: string): string => {
+    const trimmed = typeof author === "string" ? author.trim() : "";
+    if (!trimmed) return "Unknown";
+    return /^cowork-oss$/i.test(trimmed) ? "CoWork OS" : trimmed;
+  };
 
   return (
     <div className="ps-overlay">
@@ -417,7 +422,7 @@ export function PluginStore({ onClose, onInstalled }: PluginStoreProps) {
                   <span className="ps-card-icon">{entry.icon || "📦"}</span>
                   <div className="ps-card-meta">
                     <span className="ps-card-name">{entry.displayName}</span>
-                    <span className="ps-card-author">by {entry.author}</span>
+                    <span className="ps-card-author">by {normalizeAuthor(entry.author)}</span>
                   </div>
                 </div>
                 <p className="ps-card-desc">{entry.description}</p>

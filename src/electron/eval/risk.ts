@@ -30,12 +30,18 @@ const SHELL_MUTATION_PATTERN =
 
 const TEST_TOOL_HINTS = new Set(["vitest", "jest", "pytest", "go_test", "cargo_test", "mvn_test"]);
 
+function getEffectiveEventType(event: TaskEvent): string {
+  return typeof event.legacyType === "string" && event.legacyType.length > 0
+    ? event.legacyType
+    : event.type;
+}
+
 function toTaskPrompt(task: Pick<Task, "title" | "prompt">): string {
   return `${task.title || ""}\n${task.prompt || ""}`.trim();
 }
 
 function getEventToolName(event: TaskEvent): string {
-  if (!event || event.type !== "tool_call") return "";
+  if (!event || getEffectiveEventType(event) !== "tool_call") return "";
   const tool = (event.payload?.tool || event.payload?.name || "").toString().trim();
   return tool;
 }
@@ -57,11 +63,12 @@ function collectChangedPaths(events: TaskEvent[], outputSummary?: TaskOutputSumm
   };
 
   for (const event of events) {
+    const eventType = getEffectiveEventType(event);
     if (
-      event.type !== "file_created" &&
-      event.type !== "file_modified" &&
-      event.type !== "file_deleted" &&
-      event.type !== "artifact_created"
+      eventType !== "file_created" &&
+      eventType !== "file_modified" &&
+      eventType !== "file_deleted" &&
+      eventType !== "artifact_created"
     ) {
       continue;
     }
@@ -78,7 +85,7 @@ function collectChangedPaths(events: TaskEvent[], outputSummary?: TaskOutputSumm
 
 function hasTestEvidence(events: TaskEvent[]): boolean {
   for (const event of events) {
-    if (event.type !== "tool_call") continue;
+    if (getEffectiveEventType(event) !== "tool_call") continue;
     const tool = getEventToolName(event);
     if (tool === "run_command") {
       const command = getRunCommandFromEvent(event);
@@ -93,7 +100,7 @@ function hasTestEvidence(events: TaskEvent[]): boolean {
 function countToolFailures(events: TaskEvent[]): { repeated: boolean; maxCount: number } {
   const failureCounts = new Map<string, number>();
   for (const event of events) {
-    if (event.type !== "tool_error") continue;
+    if (getEffectiveEventType(event) !== "tool_error") continue;
     const tool = (event.payload?.tool || "unknown").toString().trim() || "unknown";
     failureCounts.set(tool, (failureCounts.get(tool) || 0) + 1);
   }
@@ -103,7 +110,7 @@ function countToolFailures(events: TaskEvent[]): { repeated: boolean; maxCount: 
 
 function hasShellOrGitMutation(events: TaskEvent[]): boolean {
   for (const event of events) {
-    if (event.type !== "tool_call") continue;
+    if (getEffectiveEventType(event) !== "tool_call") continue;
     const tool = getEventToolName(event);
     if (!tool) continue;
     if (tool.startsWith("git_")) return true;

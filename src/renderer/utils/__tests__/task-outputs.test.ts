@@ -19,6 +19,7 @@ function makeEvent(
     id: `event-${timestamp}-${type}`,
     taskId: "task-1",
     timestamp,
+    schemaVersion: 2,
     type,
     payload,
   };
@@ -76,6 +77,22 @@ describe("task output summary utilities", () => {
     expect(summary?.created).toEqual(["artifacts/screenshot.png"]);
     expect(summary?.outputCount).toBe(1);
     expect(getPrimaryOutputFileName(summary)).toBe("screenshot.png");
+  });
+
+  it("includes timeline_artifact_emitted as output evidence", () => {
+    const events: TaskEvent[] = [
+      makeEvent(
+        "timeline_artifact_emitted",
+        { path: "/workspace/artifacts/final-report.pdf", label: "final-report.pdf" },
+        55,
+      ),
+    ];
+
+    const summary = deriveTaskOutputSummaryFromEvents(events);
+    expect(summary).not.toBeNull();
+    expect(summary?.created).toEqual(["/workspace/artifacts/final-report.pdf"]);
+    expect(summary?.outputCount).toBe(1);
+    expect(getPrimaryOutputFileName(summary)).toBe("final-report.pdf");
   });
 
   it("formats filename-only labels and output folder context", () => {

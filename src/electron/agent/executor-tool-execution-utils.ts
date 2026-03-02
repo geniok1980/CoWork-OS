@@ -1,5 +1,163 @@
 import { truncateToolResult } from "./context-manager";
 import type { LLMToolResult } from "./llm";
+import { canonicalizeToolName } from "./tool-semantics";
+
+export interface NormalizedToolFailureReason {
+  message: string;
+  kind?: string;
+  display?: string;
+  code?: string;
+}
+
+export interface ToolInputValidationResult {
+  input: Any;
+  error: string | null;
+  repairable: boolean;
+  repaired: boolean;
+  repairReason?: string;
+}
+
+const QUERY_STOPWORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "to",
+  "in",
+  "of",
+  "for",
+  "and",
+  "or",
+  "with",
+  "on",
+  "at",
+  "from",
+  "by",
+  "if",
+  "then",
+  "also",
+  "this",
+  "that",
+  "these",
+  "those",
+  "step",
+  "task",
+  "create",
+  "build",
+  "write",
+  "implement",
+  "generate",
+  "file",
+  "files",
+  "script",
+  "results",
+  "output",
+]);
+
+function deriveSearchQueryFromContext(context: string): string {
+  const tokens = String(context || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_./-]+/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(
+      (token) =>
+        token.length >= 3 &&
+        !QUERY_STOPWORDS.has(token) &&
+        !/^\d+$/.test(token) &&
+        !token.startsWith("http"),
+    );
+  return tokens.slice(0, 6).join(" ");
+}
+
+export function preflightValidateAndRepairToolInput(opts: {
+  toolName: string;
+  input: Any;
+  contextText?: string;
+}): ToolInputValidationResult {
+  const toolName = String(opts.toolName || "");
+  let input: Any =
+    opts.input && typeof opts.input === "object" && !Array.isArray(opts.input) ? { ...opts.input } : {};
+  let repaired = false;
+  let repairable = false;
+  const repairReasons: string[] = [];
+
+  if (toolName === "search_files") {
+    repairable = true;
+    if (typeof input.path !== "string" || input.path.trim().length === 0) {
+      input.path = ".";
+      repaired = true;
+      repairReasons.push('defaulted path to "."');
+    }
+    const query = typeof input.query === "string" ? input.query.trim() : "";
+    if (!query) {
+      const derivedQuery = deriveSearchQueryFromContext(opts.contextText || "");
+      if (!derivedQuery) {
+        return {
+          input,
+          error: "search_files requires a non-empty query",
+          repairable: false,
+          repaired,
+          repairReason: repairReasons.join("; ") || undefined,
+        };
+      }
+      input.query = derivedQuery;
+      repaired = true;
+      repairReasons.push(`derived query from context: "${derivedQuery}"`);
+    }
+  } else if (toolName === "glob") {
+    repairable = true;
+    if (typeof input.path !== "string" || input.path.trim().length === 0) {
+      input.path = ".";
+      repaired = true;
+      repairReasons.push('defaulted path to "."');
+    }
+    if (typeof input.pattern !== "string" || input.pattern.trim().length === 0) {
+      input.pattern = "**/*";
+      repaired = true;
+      repairReasons.push('defaulted pattern to "**/*"');
+    }
+  } else if (toolName === "read_file") {
+    repairable = true;
+    if (typeof input.path !== "string" || input.path.trim().length === 0) {
+      const candidatePath = [input.filename, input.file, input.target]
+        .map((candidate) => (typeof candidate === "string" ? candidate.trim() : ""))
+        .find(Boolean);
+      if (candidatePath) {
+        input.path = candidatePath;
+        repaired = true;
+        repairReasons.push("normalized alternate path field");
+      }
+    }
+  } else if (toolName === "write_file") {
+    repairable = true;
+    if ((typeof input.path !== "string" || input.path.trim().length === 0) && typeof input.filename === "string") {
+      input.path = input.filename;
+      repaired = true;
+      repairReasons.push("normalized filename -> path");
+    }
+    if (typeof input.content !== "string" || input.content.length === 0) {
+      const altContent = input.contents || input.text || input.body || input.data;
+      if (typeof altContent === "string" && altContent.length > 0) {
+        input.content = altContent;
+        delete input.contents;
+        delete input.text;
+        delete input.body;
+        delete input.data;
+        repaired = true;
+        repairReasons.push("normalized alternate content field");
+      }
+    }
+  }
+
+  const error = getToolInputValidationError(toolName, input);
+  return {
+    input,
+    error,
+    repairable,
+    repaired,
+    repairReason: repairReasons.join("; ") || undefined,
+  };
+}
 
 export function formatToolInputForLog(input: Any, maxLength = 200): string {
   try {
@@ -51,9 +209,10 @@ export function buildNormalizedToolResult(opts: {
   }
 
   const resultIsError = Boolean(opts.result && opts.result.success === false);
-  const toolFailureReason = resultIsError
-    ? opts.getToolFailureReason(opts.result, "Tool execution failed")
-    : "";
+  const normalizedFailure = resultIsError
+    ? normalizeToolFailureReason(opts.result, "Tool execution failed")
+    : null;
+  const toolFailureReason = normalizedFailure?.message || "";
 
   return {
     toolResult: {
@@ -62,6 +221,9 @@ export function buildNormalizedToolResult(opts: {
       content: resultIsError
         ? JSON.stringify({
             error: toolFailureReason,
+            ...(normalizedFailure?.kind ? { kind: normalizedFailure.kind } : {}),
+            ...(normalizedFailure?.display ? { display: normalizedFailure.display } : {}),
+            ...(normalizedFailure?.code ? { code: normalizedFailure.code } : {}),
             ...(opts.result?.url ? { url: opts.result.url } : {}),
           })
         : sanitizedResult,
@@ -200,6 +362,49 @@ export function buildDuplicateToolResult(opts: {
   };
 }
 
+const CLOUD_ACTION_READ_ONLY_ACTIONS = new Set([
+  "get_current_user",
+  "search",
+  "get_file",
+  "get_folder",
+  "list_folder_items",
+  "list_folder",
+  "list_children",
+  "get_item",
+  "get_item_metadata",
+  "list_drives",
+  "list_sites",
+  "list_lists",
+  "list_messages",
+  "list_events",
+  "download_file",
+]);
+
+const READ_ONLY_ACTION_PREFIX = /^(get_|list_|search|read_|query_|describe_|check_)/;
+const MUTATING_ACTION_PREFIX = /^(create_|update_|delete_|remove_|move_|copy_|rename_|upload_|write_|set_|add_|append_|patch_|modify_)/;
+
+function isReadOnlyCloudAction(action: string): boolean {
+  const normalized = String(action || "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (CLOUD_ACTION_READ_ONLY_ACTIONS.has(normalized)) return true;
+  if (MUTATING_ACTION_PREFIX.test(normalized)) return false;
+  return READ_ONLY_ACTION_PREFIX.test(normalized);
+}
+
+export function isEffectivelyIdempotentToolCall(opts: {
+  toolName: string;
+  input: Any;
+  isIdempotentTool: (toolName: string) => boolean;
+}): boolean {
+  if (opts.isIdempotentTool(opts.toolName)) return true;
+  if (!opts.toolName.endsWith("_action")) return false;
+
+  const action =
+    opts.input && typeof opts.input.action === "string" ? String(opts.input.action) : "";
+  if (!action) return false;
+  return isReadOnlyCloudAction(action);
+}
+
 export function buildCancellationToolResult(opts: {
   toolUseId: string;
   cancelled: boolean;
@@ -285,27 +490,64 @@ export function recordToolFailureOutcome(opts: {
 }
 
 export function getToolInputValidationError(toolName: string, input: Any): string | null {
-  if (toolName === "create_document") {
+  const canonicalToolName = canonicalizeToolName(toolName);
+
+  if (canonicalToolName === "create_document") {
     if (!input?.filename) return "create_document requires a filename";
-    if (!input?.format) return "create_document requires a format (docx or pdf)";
-    if (!input?.content) return "create_document requires content";
+    // create_document requires format; generate_document is valid with markdown/sections.
+    if (toolName === "create_document" && !input?.format) {
+      return "create_document requires a format (docx or pdf)";
+    }
+    if (toolName === "create_document" && !input?.content) return "create_document requires content";
+    if (toolName === "generate_document" && !input?.markdown && !input?.sections) {
+      return "generate_document requires markdown or sections";
+    }
   }
   if (toolName === "write_file") {
-    if (!input?.path) return "write_file requires a path";
-    if (!input?.content)
+    if (typeof input?.path !== "string" || input.path.trim().length === 0)
+      return "write_file requires a path";
+    if (typeof input?.content !== "string" || input.content.length === 0)
       return (
         "write_file requires a non-empty 'content' parameter (string). " +
         "If the content is very long, split it: write the first half with write_file, " +
         "then append the rest with edit_file."
       );
   }
-  if (toolName === "create_spreadsheet") {
+  if (toolName === "read_file") {
+    if (typeof input?.path !== "string" || input.path.trim().length === 0) {
+      return "read_file requires a non-empty path";
+    }
+  }
+  if (toolName === "search_files") {
+    if (typeof input?.query !== "string" || input.query.trim().length === 0) {
+      return "search_files requires a non-empty query";
+    }
+  }
+  if (toolName === "glob") {
+    if (typeof input?.path !== "string" || input.path.trim().length === 0) {
+      return "glob requires a non-empty path";
+    }
+    if (typeof input?.pattern !== "string" || input.pattern.trim().length === 0) {
+      return "glob requires a non-empty pattern";
+    }
+  }
+  if (canonicalToolName === "create_spreadsheet") {
     if (!input?.filename) return "create_spreadsheet requires a filename";
     if (!input?.sheets) return "create_spreadsheet requires sheets";
   }
-  if (toolName === "create_presentation") {
+  if (canonicalToolName === "create_presentation") {
     if (!input?.filename) return "create_presentation requires a filename";
     if (!input?.slides) return "create_presentation requires slides";
+  }
+  if (toolName === "count_text" || toolName === "text_metrics") {
+    const hasText = typeof input?.text === "string";
+    const hasPath = typeof input?.path === "string" && input.path.trim().length > 0;
+    if (!hasText && !hasPath) {
+      return `${toolName} requires either 'text' or 'path'`;
+    }
+    if (hasText && hasPath) {
+      return `${toolName} requires either 'text' or 'path', not both`;
+    }
   }
   if (toolName === "canvas_push") {
     return null;
@@ -343,14 +585,46 @@ export function isHardToolFailure(toolName: string, result: Any, failureReason =
 }
 
 export function getToolFailureReason(result: Any, fallback: string): string {
-  if (typeof result?.error === "string" && result.error.trim()) {
-    return result.error;
+  return normalizeToolFailureReason(result, fallback).message;
+}
+
+export function normalizeToolFailureReason(result: Any, fallback: string): NormalizedToolFailureReason {
+  const fallbackMessage = typeof fallback === "string" && fallback.trim() ? fallback : "unknown error";
+  const errorValue = result?.error;
+
+  if (typeof errorValue === "string" && errorValue.trim()) {
+    return { message: errorValue.trim() };
   }
-  if (typeof result?.terminationReason === "string") {
-    return `termination: ${result.terminationReason}`;
+
+  if (errorValue && typeof errorValue === "object") {
+    const errorObj = errorValue as Record<string, unknown>;
+    const message =
+      typeof errorObj.message === "string" && errorObj.message.trim()
+        ? errorObj.message.trim()
+        : typeof errorObj.display === "string" && errorObj.display.trim()
+          ? errorObj.display.trim()
+          : typeof errorObj.kind === "string" && errorObj.kind.trim()
+            ? `${errorObj.kind.trim()} error`
+            : "";
+    if (message) {
+      return {
+        message,
+        kind: typeof errorObj.kind === "string" ? errorObj.kind : undefined,
+        display: typeof errorObj.display === "string" ? errorObj.display : undefined,
+        code: typeof errorObj.code === "string" ? errorObj.code : undefined,
+      };
+    }
+  }
+
+  if (typeof result?.reason === "string" && result.reason.trim()) {
+    return { message: result.reason.trim() };
+  }
+
+  if (typeof result?.terminationReason === "string" && result.terminationReason.trim()) {
+    return { message: `termination: ${result.terminationReason}` };
   }
   if (typeof result?.exitCode === "number") {
-    return `exit code ${result.exitCode}`;
+    return { message: `exit code ${result.exitCode}` };
   }
-  return fallback;
+  return { message: fallbackMessage };
 }

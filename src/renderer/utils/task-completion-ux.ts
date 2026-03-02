@@ -99,16 +99,25 @@ export function buildTaskCompletionToast(options: {
   taskTitle?: string;
   outputSummary?: TaskOutputSummary | null;
   actionDependencies?: CompletionToastActionDependencies;
+  terminalStatus?: "ok" | "partial_success" | "needs_user_action" | "failed" | string;
 }): Omit<ToastNotification, "id"> {
-  const { taskId, taskTitle, outputSummary, actionDependencies } = options;
+  const { taskId, taskTitle, outputSummary, actionDependencies, terminalStatus } = options;
+  const isNeedsUserAction = terminalStatus === "needs_user_action";
+  const isWarningCompletion = isNeedsUserAction || terminalStatus === "partial_success";
+  const title = isNeedsUserAction
+    ? "Task complete - action required"
+    : isWarningCompletion
+      ? "Task complete (warnings)"
+      : "Task complete";
+  const toastType: ToastNotification["type"] = isWarningCompletion ? "warning" : "success";
 
   if (hasTaskOutputs(outputSummary)) {
     const actions = actionDependencies
       ? createCompletionOutputToastActions(outputSummary.primaryOutputPath, actionDependencies)
       : undefined;
     return {
-      type: "success",
-      title: "Task complete",
+      type: toastType,
+      title,
       message: buildCompletionOutputMessage(outputSummary),
       taskId,
       ...(actions && actions.length > 0 ? { actions } : {}),
@@ -116,8 +125,8 @@ export function buildTaskCompletionToast(options: {
   }
 
   return {
-    type: "success",
-    title: "Task complete",
+    type: toastType,
+    title,
     message: taskTitle || "Task finished successfully",
     taskId,
   };

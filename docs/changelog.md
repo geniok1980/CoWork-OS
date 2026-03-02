@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Universal global skills `/simplify` and `/batch`**: two bundled, domain-agnostic slash commands available in desktop and gateway channels. `/simplify` targets quality simplification passes; `/batch` targets parallelizable migration/transform workflows across code, research, writing, operations, and general tasks.
+- **Inline slash chaining**: normal messages can now chain workflow execution with patterns like `... then run /simplify` or `... then run /batch ...` in the same task context.
+- **Shared slash parser/normalizer**: centralized parsing in `src/shared/skill-slash-commands.ts` for direct slash commands and inline chains, with URL/path false-positive protection and robust flag validation.
 - **DuckDuckGo free search fallback**: built-in web search provider that requires no API key. Works out of the box by scraping DuckDuckGo's HTML endpoint. Automatically used as a last-resort fallback when paid providers fail or are not configured. The `web_search` tool is now always available — users no longer need to configure a search provider to use web search.
 - **Polymarket prediction market skill**: query odds, trending markets, price momentum, orderbook depth, open interest, trade history, and resolution timelines across Gamma, CLOB, and Data APIs — no authentication required. Includes formatted output with percentages, volume breakdowns, and multi-outcome event support.
 - **Humanizer writing skill**: rewrite AI-generated text to sound natural and human-written. Detects and removes 50+ LLM tells across 7 layers — vocabulary, sentence mechanics, paragraph structure, emotional register, content depth, document architecture, and tone. Includes flagged word lists, 6 tone presets, and a systematic 7-step rewriting process.
@@ -22,13 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Renderer completion UX helper layer**: shared utilities now centralize output-derivation fallback, completion attention rules, and panel/badge behavior for deterministic testing.
 
 ### Changed
+- **Gateway routing for slash skills**: `/simplify` and `/batch` now have first-class command handlers with usage/help responses on invalid input, while forwarding normalized command text to desktop executor as the single execution source of truth.
+- **Desktop composer slash pass-through**: Enter/Tab no longer auto-select slash dropdown entries when input is an exact `/simplify...` or `/batch...` invocation, preserving direct command send behavior.
+- **Help and channel UX text**: compact/full command help now includes `/simplify` and `/batch`; WhatsApp natural phrase normalization maps common simplify/batch phrases to slash commands.
 - **Output detection precedence**: output detection now prefers created outputs and only uses modified outputs as fallback when no created outputs are detected.
 - **Right-panel files UX**: Files rows remain filename-only, with a primary output highlight, output count badge, and an explicit location context line (folder or “Workspace root”).
 - **Timeline completion details**: `task_completed` now shows an “Output ready” detail card with `Open file`, `Show in Finder`, and `View in Files` actions when outputs are present.
 - **Task status mapping consistency**: `artifact_created` now maps to `executing` in shared status mapping to keep progress indicators coherent.
 
 ### Fixed
+- **Inline chain punctuation handling**: chaining now recognizes punctuation-terminated forms (for example, `then run /simplify.`) instead of silently skipping.
+- **`/batch` objective enforcement**: parser and docs now enforce required objective semantics for `/batch <objective>`.
+- **`/batch` external-effects guardrails**: runtime policy enforcement now supports deterministic blocking/approval behavior:
+  - `external=none` blocks known side-effect external tool calls for the run.
+  - `external=confirm` requires explicit non-auto approval before first side-effect external action.
+- **Slash parser freeform objective edge cases**: objective parsing now supports quoted text and `--token`-like content inside objectives without misclassifying them as unknown flags.
 - **Files list filtering edge case**: extensionless output files are no longer excluded from the right panel.
+- **Executor hard budget contracts are now opt-in**: `COWORK_AGENT_BUDGET_CONTRACTS` defaults to `false` (previously `true`). Set `COWORK_AGENT_BUDGET_CONTRACTS=true` to restore legacy strict budget-contract behavior.
 
 ## [0.3.90] - 2026-02-23
 

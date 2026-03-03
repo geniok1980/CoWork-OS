@@ -91,21 +91,41 @@ interface ToggleRowProps {
 }
 
 /** Parse imported-memory tags from memory content */
-function parseImportTag(content: string): { title: string; preview: string } {
-  const match = content.match(
+function parseImportTag(content: string): {
+  title: string;
+  preview: string;
+  ignoredForPromptRecall: boolean;
+  isImported: boolean;
+} {
+  const ignoredForPromptRecall = /^\s*\[cowork:prompt_recall=ignore\]/.test(content);
+  const normalizedContent = content.replace(/^\s*\[cowork:prompt_recall=ignore\]\s*(?:\r?\n)?/, "");
+
+  const match = normalizedContent.match(
     /^\[Imported from\s+(.+?)\s*[-—]\s*"(.+?)"\s*(?:\([^)]+\))?\]\n?([\s\S]*)/,
   );
   if (match) {
-    return { title: `${match[1]}: ${match[2]}`, preview: match[3].slice(0, 200) };
+    return {
+      title: `${match[1]}: ${match[2]}`,
+      preview: match[3].slice(0, 200),
+      ignoredForPromptRecall,
+      isImported: true,
+    };
   }
-  const fallback = content.match(/^\[Imported from\s+([^\]]+)\]\n?([\s\S]*)/);
+  const fallback = normalizedContent.match(/^\[Imported from\s+([^\]]+)\]\n?([\s\S]*)/);
   if (fallback) {
     return {
       title: `Imported from ${fallback[1]}`,
       preview: (fallback[2] || "").slice(0, 200),
+      ignoredForPromptRecall,
+      isImported: true,
     };
   }
-  return { title: "Imported Memory", preview: content.slice(0, 200) };
+  return {
+    title: "Memory",
+    preview: normalizedContent.slice(0, 200),
+    ignoredForPromptRecall,
+    isImported: false,
+  };
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -170,6 +190,8 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
   const [importedHasMore, setImportedHasMore] = useState(false);
   const [loadingImported, setLoadingImported] = useState(false);
   const [deletingImported, setDeletingImported] = useState(false);
+  const [deletingImportedEntryId, setDeletingImportedEntryId] = useState<string | null>(null);
+  const [updatingImportedEntryId, setUpdatingImportedEntryId] = useState<string | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [newFact, setNewFact] = useState("");
   const [newFactCategory, setNewFactCategory] = useState<UserFactCategory>("preference");
@@ -177,6 +199,8 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
   const [relationshipItems, setRelationshipItems] = useState<RelationshipMemoryItem[]>([]);
   const [dueSoonItems, setDueSoonItems] = useState<RelationshipMemoryItem[]>([]);
   const [dueSoonReminder, setDueSoonReminder] = useState("");
+  const [cleaningRecurringHistory, setCleaningRecurringHistory] = useState(false);
+  const [recurringCleanupMessage, setRecurringCleanupMessage] = useState("");
   const [recentMemories, setRecentMemories] = useState<MemoryItem[]>([]);
   const [memorySearchQuery, setMemorySearchQuery] = useState("");
   const [memorySearchResults, setMemorySearchResults] = useState<MemoryItem[]>([]);
@@ -319,6 +343,60 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
     }
   };
 
+  const handleDeleteImportedEntry = async (memoryId: string) => {
+    if (!confirm("Delete this imported memory entry? This cannot be undone.")) {
+      return;
+    }
+    try {
+      setDeletingImportedEntryId(memoryId);
+      await window.electronAPI.deleteImportedMemoryEntry({ workspaceId, memoryId });
+      await loadImportedMemories(0);
+      await loadData();
+    } catch (error) {
+      console.error("Failed to delete imported memory entry:", error);
+    } finally {
+      setDeletingImportedEntryId(null);
+    }
+  };
+
+  const handleToggleImportedPromptRecallIgnored = async (
+    memoryId: string,
+    currentlyIgnored: boolean,
+  ) => {
+    try {
+      setUpdatingImportedEntryId(memoryId);
+      const result = await window.electronAPI.setImportedMemoryPromptRecallIgnored({
+        workspaceId,
+        memoryId,
+        ignored: !currentlyIgnored,
+      });
+
+      if (result?.memory) {
+        setImportedMemories((prev) =>
+          prev.map((entry) =>
+            entry.id === memoryId
+              ? {
+                  ...entry,
+                  content: result.memory?.content ?? entry.content,
+                  tokens: result.memory?.tokens ?? entry.tokens,
+                  createdAt: result.memory?.createdAt ?? entry.createdAt,
+                  type: result.memory?.type ?? entry.type,
+                }
+              : entry,
+          ),
+        );
+      } else {
+        await loadImportedMemories(0);
+      }
+
+      await loadData();
+    } catch (error) {
+      console.error("Failed to update imported memory prompt-recall state:", error);
+    } finally {
+      setUpdatingImportedEntryId(null);
+    }
+  };
+
   const handleSave = async (updates: Partial<MemorySettingsData>) => {
     if (!settings) return;
     try {
@@ -458,6 +536,31 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
       setDueSoonItems((prev) => prev.map((entry) => (entry.id === item.id ? updated : entry)));
     } catch (error) {
       console.error("Failed to edit relationship memory:", error);
+    }
+  };
+
+  const handleCleanupRecurringHistory = async () => {
+    if (
+      !confirm(
+        "Collapse duplicate recurring completed-task history entries and keep only the latest per task title?",
+      )
+    ) {
+      return;
+    }
+    try {
+      setCleaningRecurringHistory(true);
+      const result = await window.electronAPI.cleanupRecurringRelationshipHistory();
+      setRecurringCleanupMessage(
+        result.collapsed > 0
+          ? `Cleaned ${result.collapsed} duplicate entries across ${result.groupsCollapsed} recurring task title(s).`
+          : "No duplicate recurring history entries found.",
+      );
+      await loadData();
+    } catch (error) {
+      console.error("Failed to cleanup recurring relationship history:", error);
+      setRecurringCleanupMessage("Failed to clean recurring history. Please try again.");
+    } finally {
+      setCleaningRecurringHistory(false);
     }
   };
 
@@ -654,38 +757,46 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
                 </div>
               )}
               {!searchingMemories &&
-                selectedManageMemories.slice(0, 30).map((memory) => (
-                  <div
-                    key={memory.id}
-                    style={{
-                      padding: "10px 12px",
-                      borderBottom: "1px solid var(--color-border)",
-                    }}
-                  >
+                selectedManageMemories.slice(0, 30).map((memory) => {
+                  const parsed = parseImportTag(memory.content);
+                  const title = parsed.isImported
+                    ? parsed.title
+                    : memory.type
+                      ? `${memory.type.charAt(0).toUpperCase()}${memory.type.slice(1)}`
+                      : parsed.title;
+                  return (
                     <div
+                      key={memory.id}
                       style={{
-                        color: "var(--color-text-primary)",
-                        fontSize: "13px",
-                        marginBottom: "4px",
+                        padding: "10px 12px",
+                        borderBottom: "1px solid var(--color-border)",
                       }}
                     >
-                      {parseImportTag(memory.content).title}
+                      <div
+                        style={{
+                          color: "var(--color-text-primary)",
+                          fontSize: "13px",
+                          marginBottom: "4px",
+                        }}
+                      >
+                        {title}
+                      </div>
+                      <div style={{ color: "var(--color-text-secondary)", fontSize: "12px" }}>
+                        {parsed.preview || memory.content.slice(0, 180)}
+                      </div>
+                      <div
+                        style={{
+                          color: "var(--color-text-tertiary)",
+                          fontSize: "11px",
+                          marginTop: "4px",
+                        }}
+                      >
+                        {new Date(memory.createdAt).toLocaleDateString()}
+                        {typeof memory.tokens === "number" ? ` • ${memory.tokens} tokens` : ""}
+                      </div>
                     </div>
-                    <div style={{ color: "var(--color-text-secondary)", fontSize: "12px" }}>
-                      {parseImportTag(memory.content).preview || memory.content.slice(0, 180)}
-                    </div>
-                    <div
-                      style={{
-                        color: "var(--color-text-tertiary)",
-                        fontSize: "11px",
-                        marginTop: "4px",
-                      }}
-                    >
-                      {new Date(memory.createdAt).toLocaleDateString()}
-                      {typeof memory.tokens === "number" ? ` • ${memory.tokens} tokens` : ""}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
             </div>
           </div>
 
@@ -856,17 +967,38 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
               <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
                 Relationship Memory
               </div>
-              <button
-                className="settings-button"
-                style={{ padding: "4px 10px" }}
-                onClick={() => loadData()}
-              >
-                Refresh
-              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <button
+                  className="settings-button"
+                  style={{ padding: "4px 10px" }}
+                  onClick={handleCleanupRecurringHistory}
+                  disabled={cleaningRecurringHistory}
+                >
+                  {cleaningRecurringHistory ? "Cleaning..." : "Clean Old Recurring History"}
+                </button>
+                <button
+                  className="settings-button"
+                  style={{ padding: "4px 10px" }}
+                  onClick={() => loadData()}
+                >
+                  Refresh
+                </button>
+              </div>
             </div>
             <p className="settings-form-hint" style={{ marginTop: 0 }}>
               Continuity memory across identity, preferences, context, history, and commitments.
             </p>
+            {recurringCleanupMessage && (
+              <div
+                style={{
+                  marginBottom: "8px",
+                  fontSize: "12px",
+                  color: "var(--color-text-secondary)",
+                }}
+              >
+                {recurringCleanupMessage}
+              </div>
+            )}
 
             <div
               style={{
@@ -1211,7 +1343,9 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
                     }}
                   >
                     {importedMemories.map((memory) => {
-                      const { title, preview } = parseImportTag(memory.content);
+                      const { title, preview, ignoredForPromptRecall } = parseImportTag(memory.content);
+                      const busy =
+                        deletingImportedEntryId === memory.id || updatingImportedEntryId === memory.id;
                       return (
                         <div
                           key={memory.id}
@@ -1231,15 +1365,38 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
                           >
                             <div
                               style={{
-                                fontWeight: 500,
-                                color: "var(--color-text-primary)",
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "6px",
+                                minWidth: 0,
                                 maxWidth: "70%",
                               }}
                             >
-                              {title}
+                              <div
+                                style={{
+                                  fontWeight: 500,
+                                  color: "var(--color-text-primary)",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {title}
+                              </div>
+                              {ignoredForPromptRecall && (
+                                <span
+                                  style={{
+                                    fontSize: "10px",
+                                    color: "var(--color-warning)",
+                                    border: "1px solid color-mix(in srgb, var(--color-warning) 60%, transparent)",
+                                    borderRadius: "999px",
+                                    padding: "1px 6px",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  ignored in prompts
+                                </span>
+                              )}
                             </div>
                             <div
                               style={{
@@ -1265,6 +1422,53 @@ export function MemorySettings({ workspaceId, onSettingsChanged }: MemorySetting
                             }}
                           >
                             {preview}
+                          </div>
+                          <div
+                            style={{
+                              marginTop: "8px",
+                              display: "flex",
+                              gap: "8px",
+                              justifyContent: "flex-end",
+                            }}
+                          >
+                            <button
+                              onClick={() =>
+                                handleToggleImportedPromptRecallIgnored(memory.id, ignoredForPromptRecall)
+                              }
+                              disabled={busy}
+                              style={{
+                                padding: "4px 8px",
+                                borderRadius: "6px",
+                                border: "1px solid var(--color-border)",
+                                background: "var(--color-bg-tertiary)",
+                                color: "var(--color-text-secondary)",
+                                fontSize: "11px",
+                                cursor: busy ? "default" : "pointer",
+                                opacity: busy ? 0.6 : 1,
+                              }}
+                            >
+                              {updatingImportedEntryId === memory.id
+                                ? "Saving..."
+                                : ignoredForPromptRecall
+                                  ? "Use in prompts"
+                                  : "Ignore in prompts"}
+                            </button>
+                            <button
+                              onClick={() => handleDeleteImportedEntry(memory.id)}
+                              disabled={busy}
+                              style={{
+                                padding: "4px 8px",
+                                borderRadius: "6px",
+                                border: "1px solid color-mix(in srgb, var(--color-error) 45%, transparent)",
+                                background: "color-mix(in srgb, var(--color-error) 12%, transparent)",
+                                color: "var(--color-error)",
+                                fontSize: "11px",
+                                cursor: busy ? "default" : "pointer",
+                                opacity: busy ? 0.6 : 1,
+                              }}
+                            >
+                              {deletingImportedEntryId === memory.id ? "Deleting..." : "Delete"}
+                            </button>
                           </div>
                         </div>
                       );

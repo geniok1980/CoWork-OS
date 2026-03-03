@@ -7,6 +7,7 @@ import {
 
 type RelationshipLayer = "identity" | "preferences" | "context" | "history" | "commitments";
 type RelationshipSource = "conversation" | "feedback" | "task";
+type TaskSource = "manual" | "cron" | "hook" | "api";
 
 export interface RelationshipMemoryItem {
   id: string;
@@ -208,7 +209,12 @@ export class RelationshipMemoryService {
     }
   }
 
-  static recordTaskCompletion(title: string, resultSummary?: string, taskId?: string): void {
+  static recordTaskCompletion(
+    title: string,
+    resultSummary?: string,
+    taskId?: string,
+    taskSource: TaskSource = "manual",
+  ): void {
     const normalizedTitle = String(title || "").trim();
     if (!normalizedTitle) return;
 
@@ -221,17 +227,73 @@ export class RelationshipMemoryService {
       ? `Completed task: ${normalizedTitle}. Outcome: ${excerpt}`
       : `Completed task: ${normalizedTitle}`;
 
-    this.upsert({
-      layer: "history",
-      text: text.slice(0, MAX_TEXT_LENGTH),
-      confidence: 0.68,
-      source: "task",
-      lastTaskId: taskId,
-    });
+    if (taskSource === "cron") {
+      this.upsertRecurringTaskHistory({
+        title: normalizedTitle,
+        text,
+        taskId,
+      });
+    } else {
+      this.upsert({
+        layer: "history",
+        text: text.slice(0, MAX_TEXT_LENGTH),
+        confidence: 0.68,
+        source: "task",
+        lastTaskId: taskId,
+      });
+    }
 
     if (/\b(done|completed|finished|shipped)\b/i.test(compactSummary)) {
       this.markMatchingCommitmentsDone(compactSummary);
     }
+  }
+
+  static cleanupRecurringTaskHistory(): {
+    collapsed: number;
+    groupsCollapsed: number;
+  } {
+    const profile = this.load();
+    const byTitle = new Map<string, number[]>();
+
+    for (let i = 0; i < profile.items.length; i++) {
+      const item = profile.items[i];
+      if (item.layer !== "history" || item.source !== "task") continue;
+      const title = this.extractCompletedTaskTitle(item.text);
+      if (!title) continue;
+      const key = this.normalizeForMatch(title);
+      const bucket = byTitle.get(key);
+      if (bucket) bucket.push(i);
+      else byTitle.set(key, [i]);
+    }
+
+    const indexesToDelete = new Set<number>();
+    let groupsCollapsed = 0;
+    for (const indexes of byTitle.values()) {
+      if (indexes.length <= 1) continue;
+      groupsCollapsed += 1;
+      const keepIndex = indexes.reduce((best, idx) => {
+        const candidate = profile.items[idx];
+        const currentBest = profile.items[best];
+        if (candidate.updatedAt !== currentBest.updatedAt) {
+          return candidate.updatedAt > currentBest.updatedAt ? idx : best;
+        }
+        if (candidate.createdAt !== currentBest.createdAt) {
+          return candidate.createdAt > currentBest.createdAt ? idx : best;
+        }
+        return idx > best ? idx : best;
+      });
+      for (const idx of indexes) {
+        if (idx !== keepIndex) indexesToDelete.add(idx);
+      }
+    }
+
+    const collapsed = indexesToDelete.size;
+    if (collapsed > 0) {
+      profile.items = profile.items.filter((_, idx) => !indexesToDelete.has(idx));
+      this.save(profile);
+    }
+
+    return { collapsed, groupsCollapsed };
   }
 
   static buildPromptContext(options: BuildPromptContextOptions = {}): string {
@@ -391,6 +453,70 @@ export class RelationshipMemoryService {
 
   private static normalizeForMatch(value: string): string {
     return this.normalizeText(value).toLowerCase();
+  }
+
+  private static extractCompletedTaskTitle(text: string): string | null {
+    const normalized = this.normalizeText(text);
+    const match = normalized.match(/^completed task:\s*(.+?)(?:\.\s*outcome:|$)/i);
+    if (!match) return null;
+    const title = this.normalizeText(match[1]);
+    return title || null;
+  }
+
+  private static upsertRecurringTaskHistory(params: {
+    title: string;
+    text: string;
+    taskId?: string;
+  }): void {
+    const profile = this.load();
+    const now = Date.now();
+    const titleKey = this.normalizeForMatch(params.title);
+
+    const matchingIndexes: number[] = [];
+    for (let i = 0; i < profile.items.length; i++) {
+      const item = profile.items[i];
+      if (item.layer !== "history" || item.source !== "task") continue;
+      const existingTitle = this.extractCompletedTaskTitle(item.text);
+      if (!existingTitle) continue;
+      if (this.normalizeForMatch(existingTitle) === titleKey) {
+        matchingIndexes.push(i);
+      }
+    }
+
+    if (matchingIndexes.length > 0) {
+      const keepIndex = matchingIndexes.reduce((best, idx) =>
+        profile.items[idx].updatedAt > profile.items[best].updatedAt ? idx : best,
+      );
+      const keepItem = profile.items[keepIndex];
+      keepItem.text = this.normalizeText(params.text);
+      keepItem.updatedAt = now;
+      keepItem.confidence = Math.max(keepItem.confidence, 0.48);
+      keepItem.lastTaskId = params.taskId ?? keepItem.lastTaskId;
+
+      if (matchingIndexes.length > 1) {
+        const indexesToDelete = new Set(matchingIndexes.filter((idx) => idx !== keepIndex));
+        profile.items = profile.items.filter((_, idx) => !indexesToDelete.has(idx));
+      }
+
+      this.save(profile);
+      return;
+    }
+
+    profile.items.push({
+      id: uuidv4(),
+      layer: "history",
+      text: this.normalizeText(params.text),
+      confidence: 0.48,
+      source: "task",
+      createdAt: now,
+      updatedAt: now,
+      lastTaskId: params.taskId,
+    });
+
+    if (profile.items.length > MAX_ITEMS) {
+      profile.items = this.sort(profile.items).slice(0, MAX_ITEMS);
+    }
+    this.save(profile);
   }
 
   private static load(): RelationshipMemoryProfile {

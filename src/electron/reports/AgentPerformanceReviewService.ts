@@ -36,7 +36,7 @@ export class AgentPerformanceReviewService {
     // Tasks in period
     const taskRows = this.db
       .prepare(`
-      SELECT id, status, created_at, updated_at, completed_at
+      SELECT id, status, terminal_status, failure_class, created_at, updated_at, completed_at
       FROM tasks
       WHERE workspace_id = ?
         AND assigned_agent_role_id = ?
@@ -45,6 +45,8 @@ export class AgentPerformanceReviewService {
       .all(request.workspaceId, request.agentRoleId, periodStart) as Array<{
       id: string;
       status: string;
+      terminal_status: string | null;
+      failure_class: string | null;
       created_at: number;
       updated_at: number;
       completed_at: number | null;
@@ -111,6 +113,31 @@ export class AgentPerformanceReviewService {
 
     const rating = clampRating(score);
 
+    const terminalTasks = taskRows.filter(
+      (t) => t.status === "completed" || t.status === "failed" || t.status === "cancelled",
+    );
+    const coreOkCount = terminalTasks.filter((t) => t.terminal_status === "ok").length;
+    const corePartialCount = terminalTasks.filter((t) =>
+      t.terminal_status === "partial_success" || t.terminal_status === "needs_user_action",
+    ).length;
+    const coreFailCount = terminalTasks.filter(
+      (t) => t.terminal_status === "failed" || t.status === "failed",
+    ).length;
+    const dependencyIssueCount = terminalTasks.filter((t) =>
+      /dependency_unavailable|external_unknown|tool_error|provider_quota/i.test(
+        String(t.failure_class || ""),
+      ),
+    ).length;
+    const verificationBlockCount = terminalTasks.filter((t) =>
+      /required_verification/i.test(String(t.failure_class || "")),
+    ).length;
+    const artifactContractFailureCount = terminalTasks.filter((t) =>
+      /contract_unmet_write_required|required_contract|contract_error/i.test(
+        String(t.failure_class || ""),
+      ),
+    ).length;
+    const terminalTotal = terminalTasks.length || 1;
+
     const metrics: Record<string, number> = {
       periodDays,
       tasksTotal: taskRows.length,
@@ -122,6 +149,15 @@ export class AgentPerformanceReviewService {
       mentionsTotal: totalMentions,
       mentionsPending: pendingMentions,
       activityCount,
+      agent_core_success_rate: Math.round(((coreOkCount + corePartialCount) / terminalTotal) * 100),
+      dependency_availability_rate: Math.round(
+        ((terminalTasks.length - dependencyIssueCount) / terminalTotal) * 100,
+      ),
+      verification_block_rate: Math.round((verificationBlockCount / terminalTotal) * 100),
+      artifact_contract_failure_rate: Math.round((artifactContractFailureCount / terminalTotal) * 100),
+      core_outcome_ok_count: coreOkCount,
+      core_outcome_partial_count: corePartialCount,
+      core_outcome_failed_count: coreFailCount,
     };
 
     const recommendedAutonomyLevel: AgentAutonomyLevel = (() => {

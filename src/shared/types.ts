@@ -22,6 +22,7 @@ export interface AppearanceSettings {
   accentColor: AccentColor;
   uiDensity?: UiDensity;
   timelineVerbosity?: TimelineVerbosity;
+  devRunLoggingEnabled?: boolean; // Persist npm run dev stdout/stderr to logs/
   language?: string; // Persisted language preference (e.g. 'en', 'ja', 'zh')
   disclaimerAccepted?: boolean;
   onboardingCompleted?: boolean;
@@ -870,12 +871,19 @@ export interface Task {
   budgetProfile?: "balanced" | "strict" | "aggressive";
   // Execution result metadata (for partial success + diagnostics)
   terminalStatus?: "ok" | "partial_success" | "needs_user_action" | "failed";
-  failureClass?:
-    | "budget_exhausted"
+  failureClass?: StepFailureClass;
+  coreOutcome?: "ok" | "partial" | "failed";
+  dependencyOutcome?: "healthy" | "degraded" | "down";
+  failureDomains?: string[];
+  stopReasons?: Array<
+    | "completed"
+    | "max_turns"
     | "tool_error"
-    | "contract_error"
-    | "contract_unmet_write_required"
-    | "unknown";
+    | "contract_block"
+    | "verification_block"
+    | "awaiting_user_input"
+    | "dependency_unavailable"
+  >;
   riskLevel?: TaskRiskLevel;
   evalCaseId?: string;
   evalRunId?: string;
@@ -902,6 +910,19 @@ export interface Task {
   noProgressStreak?: number;
   lastLoopFingerprint?: string;
 }
+
+export type StepFailureClass =
+  | "budget_exhausted"
+  | "tool_error"
+  | "contract_error"
+  | "contract_unmet_write_required"
+  | "required_contract"
+  | "required_verification"
+  | "optional_enrichment"
+  | "dependency_unavailable"
+  | "provider_quota"
+  | "user_blocker"
+  | "unknown";
 
 // ============ Git Worktree Types ============
 
@@ -1122,6 +1143,10 @@ export interface EvalBaselineMetrics {
   taskSuccessRate: number;
   approvalDeadEndRate: number;
   verificationPassRate: number;
+  agentCoreSuccessRate?: number;
+  dependencyAvailabilityRate?: number;
+  verificationBlockRate?: number;
+  artifactContractFailureRate?: number;
   retriesPerTask: number;
   toolFailureRateByTool: Array<{
     tool: string;
@@ -2951,6 +2976,8 @@ export const IPC_CHANNELS = {
   MEMORY_GET_IMPORTED_STATS: "memory:getImportedStats",
   MEMORY_FIND_IMPORTED: "memory:findImported",
   MEMORY_DELETE_IMPORTED: "memory:deleteImported",
+  MEMORY_DELETE_IMPORTED_ENTRY: "memory:deleteImportedEntry",
+  MEMORY_SET_IMPORTED_RECALL_IGNORED: "memory:setImportedRecallIgnored",
   MEMORY_GET_USER_PROFILE: "memory:getUserProfile",
   MEMORY_ADD_USER_FACT: "memory:addUserFact",
   MEMORY_UPDATE_USER_FACT: "memory:updateUserFact",
@@ -2958,6 +2985,7 @@ export const IPC_CHANNELS = {
   MEMORY_RELATIONSHIP_LIST: "memory:relationshipList",
   MEMORY_RELATIONSHIP_UPDATE: "memory:relationshipUpdate",
   MEMORY_RELATIONSHIP_DELETE: "memory:relationshipDelete",
+  MEMORY_RELATIONSHIP_CLEANUP_RECURRING: "memory:relationshipCleanupRecurring",
   MEMORY_COMMITMENTS_GET: "memory:commitmentsGet",
   MEMORY_COMMITMENTS_DUE_SOON: "memory:commitmentsDueSoon",
 

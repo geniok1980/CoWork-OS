@@ -173,9 +173,19 @@ export function extractArtifactPathCandidates(text: string): string[] {
 
 export function descriptionHasWriteIntent(text: string): boolean {
   const desc = String(text || "").toLowerCase();
-  return /\b(write|create|draft|generate|produce|compose|prepare|build|save|author|scaffold|bootstrap|initialize|implement|configure|add)\b/.test(
-    desc,
-  );
+  const explicitWriteVerb =
+    /\b(write|create|draft|generate|produce|compose|build|save|author|scaffold|bootstrap|initialize|implement|configure|add|edit|update|append|rewrite)\b/.test(
+      desc,
+    );
+  if (explicitWriteVerb) return true;
+
+  // "prepare" is ambiguous (often setup/planning only). Treat it as write-intent
+  // only when paired with a concrete artifact/output cue.
+  const prepareArtifactCue =
+    /\bprepare(?:\s+[\w./-]+){0,6}\s+(?:a\s+|an\s+|the\s+)?(file|document|artifact|report|summary|proposal|plan|markdown|md|docx|pdf|csv|json|xlsx|pptx|slides?|presentation|code|script|output)\b/.test(
+      desc,
+    );
+  return prepareArtifactCue;
 }
 
 export function descriptionHasReadOnlyIntent(text: string): boolean {

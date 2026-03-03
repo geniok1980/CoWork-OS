@@ -91,7 +91,7 @@ function deriveStepId(
 
 function inferLegacyTimelineType(
   legacyType: EventType,
-  payload: Record<string, unknown>,
+  _payload: Record<string, unknown>,
 ): TimelineEventType {
   if (
     legacyType === "file_created" ||

@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as fsPromises from "fs/promises";
 import * as path from "path";
+import { createHash } from "crypto";
 import {
   Workspace,
   GatewayContextType,
@@ -54,10 +55,23 @@ import { MCPClientManager } from "../../mcp/client/MCPClientManager";
 import { MCPSettingsManager } from "../../mcp/settings";
 import { MCPRegistryManager } from "../../mcp/registry/MCPRegistryManager";
 import type { MCPServerConfig, MCPTool, MCPToolProperty } from "../../mcp/types";
+import {
+  ConnectorCapability,
+  IntegrationAuthMethod,
+  IntegrationInputHint,
+  Tier1IntegrationProvider,
+  TIER1_CONNECTOR_IDS,
+  detectConnectorCapabilityId,
+  evaluateConnectorReadiness,
+  getConnectorCapability,
+  listTier1ConnectorCapabilities,
+} from "../../mcp/connectors/capabilities";
+import { startConnectorOAuth, type ConnectorOAuthRequest } from "../../mcp/oauth/connector-oauth";
 import { isToolAllowedQuick } from "../../security/policy-manager";
 import { evaluateMontyToolPolicy } from "../../security/monty-tool-policy";
 import { BuiltinToolsSettingsManager } from "./builtin-settings";
 import { getCustomSkillLoader } from "../custom-skill-loader";
+import { SkillProposalService } from "../skills/SkillProposalService";
 import { PersonalityManager } from "../../settings/personality-manager";
 import {
   PersonalityId,
@@ -1198,6 +1212,7 @@ Skill Management (create, modify, duplicate skills):
 - skill_duplicate: Duplicate an existing skill with modifications (great for variations)
 - skill_update: Update an existing skill (managed/workspace only, not bundled)
 - skill_delete: Delete a skill (managed/workspace only, not bundled)
+- skill_proposal: Create/list/approve/reject approval-gated skill proposals (no auto-mutation)
 Skills are stored in ~/Library/Application Support/cowork-os/skills/ (managed) or workspace/skills/ (workspace).
 
 Code Tools (PREFERRED for code navigation and editing):
@@ -1357,7 +1372,7 @@ Channel Message Log (Local Gateway):
 		- revise_plan: Modify remaining plan steps when obstacles are encountered or new information discovered
 		- task_history: Query recent task history/messages (use for "what did we talk about yesterday?")
 		- switch_workspace: Switch to a different workspace/working directory. Use when you need to work in a different folder.
-		- integration_setup: Inspect/configure integrations from chat (e.g., enable email sending via Resend, ask for missing API keys, provide setup links).
+		- integration_setup: List/inspect/configure Tier-1 integrations from chat (resend/slack/gmail/google-calendar/google-drive/jira/linear/hubspot), including plan_hash stale-plan safety and optional OAuth setup.
 		- set_personality: Change the assistant's communication style (professional, friendly, concise, creative, technical, casual).
 	- set_persona: Change the assistant's character persona (jarvis, friday, hal, computer, alfred, intern, sensei, pirate, noir, companion, or none).
 	- set_response_style: Adjust response preferences (emoji_usage, response_length, code_comments, explanation_depth).
@@ -1494,6 +1509,7 @@ ${skillDescriptions}`;
     if (name === "skill_duplicate") return await this.executeSkillDuplicate(input);
     if (name === "skill_update") return await this.executeSkillUpdate(input);
     if (name === "skill_delete") return await this.executeSkillDelete(input);
+    if (name === "skill_proposal") return await this.executeSkillProposal(input);
 
     // Code tools (glob, grep, edit)
     if (name === "glob") return await this.globTools.glob(input);
@@ -2650,6 +2666,246 @@ ${skillDescriptions}`;
   }
 
   /**
+   * Manage approval-gated skill proposals
+   */
+  private async executeSkillProposal(input: {
+    action?: "create" | "list" | "approve" | "reject";
+    proposal_id?: string;
+    status?: "pending" | "approved" | "rejected" | "all";
+    problem_statement?: string;
+    evidence?: string[];
+    required_tools?: string[];
+    risk_note?: string;
+    draft_skill?: {
+      id?: string;
+      name?: string;
+      description?: string;
+      prompt?: string;
+      icon?: string;
+      category?: string;
+      parameters?: Any[];
+      enabled?: boolean;
+    };
+    rejection_reason?: string;
+  }): Promise<Any> {
+    const action = input.action || "list";
+    const proposalService = new SkillProposalService(this.workspace.path);
+
+    if (action === "list") {
+      const status = input.status || "pending";
+      const proposals = await proposalService.list(status);
+      return {
+        success: true,
+        action,
+        status,
+        total: proposals.length,
+        proposals,
+      };
+    }
+
+    if (action === "create") {
+      const draftSkill = input.draft_skill || {};
+      const createResult = await proposalService.create({
+        problemStatement: input.problem_statement || "",
+        evidence: input.evidence || [],
+        requiredTools: input.required_tools || [],
+        riskNote: input.risk_note || "",
+        draftSkill: {
+          id: draftSkill.id || "",
+          name: draftSkill.name || "",
+          description: draftSkill.description || "",
+          prompt: draftSkill.prompt || "",
+          icon: draftSkill.icon,
+          category: draftSkill.category,
+          parameters: draftSkill.parameters,
+          enabled: draftSkill.enabled,
+        },
+      });
+
+      if (createResult.blocked) {
+        return {
+          success: false,
+          action,
+          message: createResult.blocked,
+        };
+      }
+
+      if (createResult.duplicateOf && createResult.cooldownUntil) {
+        return {
+          success: false,
+          action,
+          duplicate_of: createResult.duplicateOf,
+          cooldown_until: createResult.cooldownUntil,
+          message: "A similar proposal was recently rejected. Wait for cooldown before re-submitting.",
+        };
+      }
+
+      if (createResult.duplicateOf) {
+        return {
+          success: false,
+          action,
+          duplicate_of: createResult.duplicateOf,
+          message: "A matching proposal already exists.",
+        };
+      }
+
+      return {
+        success: true,
+        action,
+        proposal: createResult.proposal,
+        message: "Skill proposal created and awaiting approval.",
+      };
+    }
+
+    if (action === "approve") {
+      const proposalId = String(input.proposal_id || "").trim();
+      if (!proposalId) {
+        return {
+          success: false,
+          action,
+          message: "proposal_id is required for approve",
+        };
+      }
+
+      const proposal = await proposalService.get(proposalId);
+      if (!proposal) {
+        return {
+          success: false,
+          action,
+          message: `Proposal '${proposalId}' not found`,
+        };
+      }
+      if (proposal.status !== "pending") {
+        return {
+          success: false,
+          action,
+          message: `Proposal '${proposalId}' is not pending (current status: ${proposal.status})`,
+          proposal,
+        };
+      }
+
+      const availableToolNames = new Set(this.getTools().map((tool) => tool.name));
+      const missingRequiredTools = proposal.requiredTools.filter(
+        (toolName) => !availableToolNames.has(toolName),
+      );
+      if (missingRequiredTools.length > 0) {
+        return {
+          success: false,
+          action,
+          message:
+            "Proposal requires tools that are not currently available in this runtime context.",
+          missing_required_tools: missingRequiredTools,
+        };
+      }
+
+      const skillLoader = getCustomSkillLoader();
+      // Enforce workspace-scoped materialization for approved proposals.
+      skillLoader.setWorkspaceSkillsDir(this.workspace.path);
+      const existing = skillLoader.getSkill(proposal.draftSkill.id);
+
+      let materializedSkill: Any;
+      if (existing) {
+        if (existing.source === "bundled") {
+          return {
+            success: false,
+            action,
+            message:
+              `Cannot apply proposal to bundled skill '${existing.id}'. ` +
+              "Duplicate the skill first or choose a different id.",
+          };
+        }
+        materializedSkill = await skillLoader.updateSkill(existing.id, {
+          name: proposal.draftSkill.name,
+          description: proposal.draftSkill.description,
+          prompt: proposal.draftSkill.prompt,
+          icon: proposal.draftSkill.icon,
+          category: proposal.draftSkill.category,
+          parameters: proposal.draftSkill.parameters,
+          enabled: proposal.draftSkill.enabled,
+        });
+      } else {
+        materializedSkill = await skillLoader.createWorkspaceSkill({
+          id: proposal.draftSkill.id,
+          name: proposal.draftSkill.name,
+          description: proposal.draftSkill.description,
+          prompt: proposal.draftSkill.prompt,
+          icon: proposal.draftSkill.icon || "",
+          category: proposal.draftSkill.category || "Custom",
+          parameters: proposal.draftSkill.parameters,
+          enabled: proposal.draftSkill.enabled !== false,
+        });
+      }
+
+      if (!materializedSkill) {
+        return {
+          success: false,
+          action,
+          message: "Failed to materialize skill from proposal",
+        };
+      }
+
+      const approved = await proposalService.approve(proposal.id, materializedSkill.id);
+      this.daemon.logEvent(this.taskId, "log", {
+        message: `Approved skill proposal '${proposal.id}' and materialized skill '${materializedSkill.id}'`,
+        proposalId: proposal.id,
+        skillId: materializedSkill.id,
+      });
+
+      return {
+        success: true,
+        action,
+        proposal: approved,
+        skill: {
+          id: materializedSkill.id,
+          name: materializedSkill.name,
+          source: materializedSkill.source,
+          filePath: materializedSkill.filePath,
+        },
+        message: "Skill proposal approved and materialized.",
+      };
+    }
+
+    if (action === "reject") {
+      const proposalId = String(input.proposal_id || "").trim();
+      if (!proposalId) {
+        return {
+          success: false,
+          action,
+          message: "proposal_id is required for reject",
+        };
+      }
+
+      const rejected = await proposalService.reject(proposalId, input.rejection_reason);
+      if (!rejected) {
+        return {
+          success: false,
+          action,
+          message: `Proposal '${proposalId}' not found or not pending`,
+        };
+      }
+
+      this.daemon.logEvent(this.taskId, "log", {
+        message: `Rejected skill proposal '${proposalId}'`,
+        proposalId,
+        reason: input.rejection_reason || null,
+      });
+
+      return {
+        success: true,
+        action,
+        proposal: rejected,
+        message: "Skill proposal rejected.",
+      };
+    }
+
+    return {
+      success: false,
+      action,
+      message: `Unsupported skill_proposal action: ${action}`,
+    };
+  }
+
+  /**
    * Define file operation tools
    */
   private getFileToolDefinitions(): LLMTool[] {
@@ -3302,6 +3558,60 @@ ${skillDescriptions}`;
             },
           },
           required: ["skill_id"],
+        },
+      },
+      {
+        name: "skill_proposal",
+        description:
+          "Manage approval-gated skill proposals. Create proposals for missing capabilities, list pending proposals, and approve/reject proposals. " +
+          "Skill mutations happen only after explicit approve.",
+        input_schema: {
+          type: "object",
+          properties: {
+            action: {
+              type: "string",
+              enum: ["create", "list", "approve", "reject"],
+              description: "Proposal action to execute",
+            },
+            proposal_id: {
+              type: "string",
+              description: "Proposal ID (required for approve/reject)",
+            },
+            status: {
+              type: "string",
+              enum: ["pending", "approved", "rejected", "all"],
+              description: "Filter for list action (default: pending)",
+            },
+            problem_statement: {
+              type: "string",
+              description: "What capability gap this proposal addresses",
+            },
+            evidence: {
+              type: "array",
+              description: "Observed evidence snippets that justify the proposal",
+              items: { type: "string" },
+            },
+            required_tools: {
+              type: "array",
+              description: "Tool names required by the proposed skill",
+              items: { type: "string" },
+            },
+            risk_note: {
+              type: "string",
+              description: "Risk notes and safety considerations for approving this skill",
+            },
+            draft_skill: {
+              type: "object",
+              description:
+                "Draft skill payload to materialize on approve (id, name, description, prompt, optional parameters/icon/category/enabled).",
+              additionalProperties: true,
+            },
+            rejection_reason: {
+              type: "string",
+              description: "Optional reason for rejecting a proposal",
+            },
+          },
+          required: ["action"],
         },
       },
     ];
@@ -4423,356 +4733,707 @@ ${skillDescriptions}`;
   private async integrationSetup(input: {
     action?: string;
     provider?: string;
+    auth_method?: "auto" | IntegrationAuthMethod;
+    env?: Record<string, unknown>;
+    oauth?: {
+      client_id?: string;
+      client_secret?: string;
+      scopes?: string[];
+      login_url?: string;
+      subdomain?: string;
+      team_domain?: string;
+    };
+    expected_plan_hash?: string;
+    dry_run?: boolean;
     api_key?: string;
     webhook_secret?: string;
     base_url?: string;
     enable_inbound?: boolean;
     connect_now?: boolean;
     allow_unsafe_external_content?: boolean;
-  }): Promise<{
-    success: boolean;
-    action: "inspect" | "configure";
-    provider: "resend";
-    installed: boolean;
-    configured: boolean;
-    connected: boolean;
-    email_sending_ready: boolean;
-    inbound: {
-      requested: boolean;
-      hooks_enabled: boolean;
-      preset_enabled: boolean;
-      endpoint_path: string;
-      token_configured: boolean;
-      signing_secret_configured: boolean;
-    };
-    missing_inputs: Array<{
-      field: "api_key";
-      label: string;
-      prompt: string;
-      create_url: string;
-      docs_url: string;
-    }>;
-    links: {
-      dashboard: string;
-      create_api_key: string;
-      api_keys_docs: string;
-      webhooks_docs: string;
-    };
-    message: string;
-    notes?: string[];
-    connection_error?: string;
-    health_error?: string;
-    health_text?: string;
-    server_id?: string;
-  }> {
-    const action: "inspect" | "configure" = input?.action === "configure" ? "configure" : "inspect";
-    const provider = (input?.provider || "resend").trim().toLowerCase();
-    if (provider !== "resend") {
-      throw new Error(`Unsupported provider: ${provider}. Currently supported: resend`);
-    }
-
-    const links = this.getResendSetupLinks();
-    const enableInbound = Boolean(input?.enable_inbound);
-    const connectNow = input?.connect_now !== false;
-    const mcpClient = MCPClientManager.getInstance();
-    const providedApiKey = typeof input?.api_key === "string" ? input.api_key.trim() : "";
-    const providedBaseUrl = typeof input?.base_url === "string" ? input.base_url.trim() : "";
-    const providedWebhookSecret =
-      typeof input?.webhook_secret === "string" ? input.webhook_secret.trim() : undefined;
+  }): Promise<Any> {
+    const action: "list" | "inspect" | "configure" =
+      input?.action === "list" || input?.action === "configure" ? input.action : "inspect";
+    const requestedProvider = (input?.provider || "resend").trim().toLowerCase();
 
     MCPSettingsManager.initialize();
+    const mcpClient = MCPClientManager.getInstance();
+
+    if (action === "list") {
+      const settings = MCPSettingsManager.loadSettings();
+      const providers = listTier1ConnectorCapabilities().map((capability) => {
+        const server = this.findConnectorServer(settings, capability);
+        const readiness = evaluateConnectorReadiness({
+          capability,
+          env: server?.env,
+          authMethod: "auto",
+        });
+        return {
+          provider: capability.id,
+          name: capability.name,
+          installed: Boolean(server),
+          configured: readiness.configured,
+          connected: server ? this.isConnectorConnected(mcpClient, server.id) : false,
+          ready:
+            Boolean(server) &&
+            readiness.configured &&
+            (server ? this.isConnectorConnected(mcpClient, server.id) : false),
+          auth_methods: capability.authMethods,
+          links: capability.links,
+        };
+      });
+
+      return {
+        success: true,
+        action,
+        providers,
+        message: "Tier-1 integration readiness summary generated.",
+      };
+    }
+
+    const provider = this.resolveTier1Provider(requestedProvider);
+    if (!provider) {
+      throw new Error(
+        `Unsupported provider: ${requestedProvider}. Supported providers: ${TIER1_CONNECTOR_IDS.join(", ")}`,
+      );
+    }
+
+    const capability = getConnectorCapability(provider);
+    if (!capability) {
+      throw new Error(`Capability metadata missing for provider: ${provider}`);
+    }
+
+    const authMethod: "auto" | IntegrationAuthMethod =
+      input?.auth_method === "oauth" || input?.auth_method === "api_key" ? input.auth_method : "auto";
+    if (authMethod === "oauth" && !capability.authMethods.includes("oauth")) {
+      return {
+        success: false,
+        action,
+        provider,
+        message: `${capability.name} does not support OAuth setup in chat.`,
+        auth_methods: capability.authMethods,
+      };
+    }
 
     let settings = MCPSettingsManager.loadSettings();
-    let server = this.findResendConnectorServer(settings);
-    let installError: string | undefined;
-    let installedNow = false;
+    let server = this.findConnectorServer(settings, capability);
+    const inboundBefore = this.getResendInboundState();
 
-    if (action === "configure" && !server) {
+    const normalizedInputEnv = this.normalizeIntegrationEnvInput(input?.env);
+    if (provider === "resend") {
+      if (typeof input?.api_key === "string" && input.api_key.trim()) {
+        normalizedInputEnv.RESEND_API_KEY = input.api_key.trim();
+      }
+      if (typeof input?.base_url === "string" && input.base_url.trim()) {
+        normalizedInputEnv.RESEND_BASE_URL = input.base_url.trim();
+      }
+    }
+
+    const envForInspect = this.buildMergedIntegrationEnv(server?.env, normalizedInputEnv, provider);
+    const inspectReadiness = evaluateConnectorReadiness({
+      capability,
+      env: envForInspect,
+      authMethod,
+    });
+    const missingInputs = this.buildIntegrationMissingInputs(capability, inspectReadiness.missingInputs);
+    const connected = server ? this.isConnectorConnected(mcpClient, server.id) : false;
+    const ready = Boolean(server) && inspectReadiness.configured && connected;
+    const planHash = this.buildIntegrationPlanHash({
+      provider,
+      auth_method: authMethod,
+      server_id: server?.id ?? null,
+      installed: Boolean(server),
+      connected,
+      selected_auth_method: inspectReadiness.selectedAuthMethod,
+      missing_inputs: missingInputs.map((entry) => entry.field),
+      env_fingerprint: this.buildIntegrationEnvFingerprint(envForInspect, capability),
+      inbound_state: provider === "resend" ? inboundBefore : undefined,
+    });
+
+    if (action === "inspect") {
+      const response: Any = {
+        success: true,
+        action,
+        provider,
+        installed: Boolean(server),
+        configured: inspectReadiness.configured,
+        connected,
+        ready,
+        plan_hash: planHash,
+        auth_method: inspectReadiness.selectedAuthMethod,
+        auth_methods: capability.authMethods,
+        missing_inputs: missingInputs,
+        links: capability.links,
+        server_id: server?.id,
+        message: server
+          ? inspectReadiness.configured
+            ? `${capability.name} connector is installed and configured.`
+            : `${capability.name} connector is installed but missing setup inputs.`
+          : `${capability.name} connector is not installed yet.`,
+      };
+
+      if (provider === "resend") {
+        response.email_sending_ready = ready;
+        response.inbound = {
+          requested: false,
+          hooks_enabled: inboundBefore.hooks_enabled,
+          preset_enabled: inboundBefore.preset_enabled,
+          endpoint_path: inboundBefore.endpoint_path,
+          token_configured: inboundBefore.token_configured,
+          signing_secret_configured: inboundBefore.signing_secret_configured,
+        };
+        response.notes = [
+          'Use action="configure" with api_key to enable email sending.',
+          "Set enable_inbound=true to configure webhook ingestion.",
+        ];
+      }
+      return response;
+    }
+
+    const expectedPlanHash = typeof input?.expected_plan_hash === "string" ? input.expected_plan_hash.trim() : "";
+    if (expectedPlanHash && expectedPlanHash !== planHash) {
+      return {
+        success: false,
+        action,
+        provider,
+        stale_plan: true,
+        message:
+          "Integration state changed since inspect. Re-run integration_setup with action=\"inspect\" and retry configure using the latest plan_hash.",
+        expected_plan_hash: expectedPlanHash,
+        current_plan_hash: planHash,
+      };
+    }
+
+    const dryRun = input?.dry_run === true;
+    const connectNow = input?.connect_now !== false;
+    const enableInbound = provider === "resend" && input?.enable_inbound === true;
+    const notes: string[] = [];
+    let installedNow = false;
+    let installError: string | undefined;
+
+    if (!server && !dryRun) {
       try {
-        await MCPRegistryManager.installServer("resend");
+        await MCPRegistryManager.installServer(capability.registryEntryId);
         installedNow = true;
       } catch (error: Any) {
-        const message = error?.message || String(error);
+        const message = String(error?.message || error);
         if (!/already installed/i.test(message)) {
           installError = message;
         }
       }
-
       settings = MCPSettingsManager.loadSettings();
-      server = this.findResendConnectorServer(settings);
+      server = this.findConnectorServer(settings, capability);
     }
 
-    const existingApiKey = server?.env?.RESEND_API_KEY?.trim() || "";
-    const resolvedApiKey = providedApiKey || existingApiKey;
-    const resolvedBaseUrl =
-      providedBaseUrl || server?.env?.RESEND_BASE_URL?.trim() || "https://api.resend.com";
-
-    const missingInputs: Array<{
-      field: "api_key";
-      label: string;
-      prompt: string;
-      create_url: string;
-      docs_url: string;
-    }> = [];
-    if (!resolvedApiKey) {
-      missingInputs.push({
-        field: "api_key",
-        label: "Resend API key",
-        prompt: "Provide your Resend API key (starts with re_) so I can finish setup.",
-        create_url: links.create_api_key,
-        docs_url: links.api_keys_docs,
-      });
-    }
-
-    if (action === "inspect") {
-      let connected = false;
-      let serverId: string | undefined;
-      if (server) {
-        serverId = server.id;
-        try {
-          connected = mcpClient.getServerStatus(server.id)?.status === "connected";
-        } catch {
-          connected = false;
-        }
-      }
-
-      HooksSettingsManager.initialize();
-      const hooks = HooksSettingsManager.loadSettings();
-      return {
-        success: true,
-        action,
-        provider: "resend",
-        installed: Boolean(server),
-        configured: Boolean(resolvedApiKey),
-        connected,
-        email_sending_ready: Boolean(server && resolvedApiKey && connected),
-        inbound: {
-          requested: false,
-          hooks_enabled: hooks.enabled,
-          preset_enabled: hooks.presets.includes("resend"),
-          endpoint_path: `${hooks.path || "/hooks"}/resend`,
-          token_configured: Boolean(hooks.token),
-          signing_secret_configured: Boolean(hooks.resend?.webhookSecret),
-        },
-        missing_inputs: missingInputs,
-        links,
-        server_id: serverId,
-        message: server
-          ? resolvedApiKey
-            ? "Resend connector is installed. Provide missing values or ask to configure/connect if needed."
-            : "Resend connector is installed but API key is missing."
-          : "Resend connector is not installed yet.",
-        notes: [
-          'Use action="configure" with api_key to enable email sending.',
-          "If you also want inbound email automation, set enable_inbound=true (webhook signing secret is recommended).",
-        ],
-      };
-    }
-
-    if (!server) {
+    if (!server && !dryRun) {
       return {
         success: false,
         action,
-        provider: "resend",
+        provider,
         installed: false,
         configured: false,
         connected: false,
-        email_sending_ready: false,
-        inbound: {
-          requested: enableInbound,
-          hooks_enabled: false,
-          preset_enabled: false,
-          endpoint_path: "/hooks/resend",
-          token_configured: false,
-          signing_secret_configured: false,
-        },
+        ready: false,
         missing_inputs: missingInputs,
-        links,
-        message: "Could not install or locate the Resend connector.",
+        links: capability.links,
+        message: `Could not install or locate the ${capability.name} connector.`,
         notes: installError ? [installError] : undefined,
       };
     }
 
-    const env: Record<string, string> = {
-      ...server.env,
-      RESEND_BASE_URL: resolvedBaseUrl,
-    };
-    if (resolvedApiKey) {
-      env.RESEND_API_KEY = resolvedApiKey;
+    let envToApply = this.buildMergedIntegrationEnv(server?.env, normalizedInputEnv, provider);
+
+    const oauthRequested = authMethod === "oauth" || Boolean(input?.oauth);
+    if (oauthRequested) {
+      if (!capability.oauthProvider) {
+        return {
+          success: false,
+          action,
+          provider,
+          message: `${capability.name} does not expose OAuth setup in chat.`,
+          auth_methods: capability.authMethods,
+        };
+      }
+
+      if (dryRun) {
+        notes.push("Dry run: OAuth flow skipped.");
+      } else {
+        const oauthOutcome = await this.applyConnectorOAuth({
+          capability,
+          provider,
+          input,
+          env: envToApply,
+        });
+        if (!oauthOutcome.success) {
+          return {
+            success: false,
+            action,
+            provider,
+            installed: Boolean(server),
+            configured: false,
+            connected: false,
+            ready: false,
+            missing_inputs: missingInputs,
+            links: capability.links,
+            message: oauthOutcome.message,
+            oauth_error: oauthOutcome.error,
+          };
+        }
+        envToApply = oauthOutcome.env;
+        notes.push(oauthOutcome.message);
+      }
     }
 
-    const updated = MCPSettingsManager.updateServer(server.id, {
-      env,
-      enabled: Boolean(resolvedApiKey),
+    const readinessAfter = evaluateConnectorReadiness({
+      capability,
+      env: envToApply,
+      authMethod,
     });
-    if (!updated) {
-      throw new Error(`Failed to update Resend connector settings for server ${server.id}`);
+    const missingAfter = this.buildIntegrationMissingInputs(capability, readinessAfter.missingInputs);
+
+    let updatedServer: MCPServerConfig | null = null;
+    if (!dryRun && server) {
+      updatedServer = MCPSettingsManager.updateServer(server.id, {
+        env: envToApply,
+        enabled: readinessAfter.configured,
+      });
+      if (!updatedServer) {
+        throw new Error(`Failed to update connector settings for server ${server.id}`);
+      }
     }
 
-    let connected = false;
-    try {
-      connected = mcpClient.getServerStatus(server.id)?.status === "connected";
-    } catch {
-      connected = false;
-    }
-
+    let connectedAfter = server ? this.isConnectorConnected(mcpClient, server.id) : false;
     let connectionError: string | undefined;
-    if (connectNow && resolvedApiKey && !connected) {
+    if (!dryRun && server && readinessAfter.configured && connectNow && !connectedAfter) {
       try {
         await mcpClient.connectServer(server.id);
-        connected = true;
+        connectedAfter = true;
       } catch (error: Any) {
-        connectionError = error?.message || String(error);
-        try {
-          connected = mcpClient.getServerStatus(server.id)?.status === "connected";
-          if (connected) {
-            connectionError = undefined;
-          }
-        } catch {
-          connected = false;
-        }
+        connectionError = String(error?.message || error);
+        connectedAfter = this.isConnectorConnected(mcpClient, server.id);
+        if (connectedAfter) connectionError = undefined;
       }
     }
 
     let healthError: string | undefined;
     let healthText: string | undefined;
-    if (connected) {
+    if (!dryRun && server && connectedAfter && capability.healthTool) {
       try {
-        const health = await mcpClient.callTool("resend.health", {});
+        const health = await mcpClient.callTool(capability.healthTool, {});
         healthText = this.extractMcpTextContent(health) || undefined;
         if (health?.isError) {
           healthError = healthText || "Connector health call returned an error";
         }
       } catch (error: Any) {
-        healthError = error?.message || String(error);
+        healthError = String(error?.message || error);
       }
     }
 
-    let hooksEnabled = false;
-    let presetEnabled = false;
-    let hookPath = "/hooks/resend";
-    let hookTokenConfigured = false;
-    let hookSigningSecretConfigured = false;
-
-    if (enableInbound) {
-      HooksSettingsManager.initialize();
-      let hooks = HooksSettingsManager.loadSettings();
-
-      if (!hooks.enabled) {
-        hooks = HooksSettingsManager.enableHooks();
-      }
-
-      const nextPresets = new Set(hooks.presets || []);
-      nextPresets.add("resend");
-
-      let nextWebhookSecret = hooks.resend?.webhookSecret;
-      if (providedWebhookSecret !== undefined) {
-        nextWebhookSecret = providedWebhookSecret || undefined;
-      }
-
-      hooks = HooksSettingsManager.updateConfig({
-        ...hooks,
-        presets: Array.from(nextPresets),
-        resend: {
-          ...hooks.resend,
-          webhookSecret: nextWebhookSecret,
+    const inboundAfter = enableInbound
+      ? this.configureResendInbound({
+          webhookSecret:
+            typeof input?.webhook_secret === "string" ? input.webhook_secret.trim() : undefined,
           allowUnsafeExternalContent:
-            typeof input.allow_unsafe_external_content === "boolean"
+            typeof input?.allow_unsafe_external_content === "boolean"
               ? input.allow_unsafe_external_content
-              : hooks.resend?.allowUnsafeExternalContent,
-        },
-      });
+              : undefined,
+        })
+      : this.getResendInboundState();
 
-      hooksEnabled = hooks.enabled;
-      presetEnabled = hooks.presets.includes("resend");
-      hookPath = `${hooks.path || "/hooks"}/resend`;
-      hookTokenConfigured = Boolean(hooks.token);
-      hookSigningSecretConfigured = Boolean(hooks.resend?.webhookSecret);
-    } else {
-      HooksSettingsManager.initialize();
-      const hooks = HooksSettingsManager.loadSettings();
-      hooksEnabled = hooks.enabled;
-      presetEnabled = hooks.presets.includes("resend");
-      hookPath = `${hooks.path || "/hooks"}/resend`;
-      hookTokenConfigured = Boolean(hooks.token);
-      hookSigningSecretConfigured = Boolean(hooks.resend?.webhookSecret);
-    }
+    if (installedNow) notes.push(`Installed ${capability.name} connector.`);
+    if (dryRun) notes.push("Dry run: no settings were persisted.");
 
-    const emailSendingReady = Boolean(resolvedApiKey && connected && !healthError);
-    const notes: string[] = [];
-    if (installedNow) notes.push("Installed Resend connector.");
-    if (enableInbound) {
-      notes.push(
-        `Inbound endpoint configured at ${hookPath}. Use your hooks token with this URL when registering webhook endpoints.`,
-      );
-      if (!hookSigningSecretConfigured) {
-        notes.push(
-          "Webhook signing secret is recommended. You can set it with webhook_secret in a follow-up configure call.",
-        );
-      }
-    }
-    if (!resolvedApiKey) {
-      notes.push("API key is still missing. Provide api_key and run configure again.");
-    }
-
-    return {
-      success: emailSendingReady && (enableInbound ? presetEnabled : true),
+    const effectiveConnected = dryRun ? connected : connectedAfter;
+    const effectiveConfigured = readinessAfter.configured;
+    const effectiveReady = effectiveConfigured && effectiveConnected && !healthError;
+    const response: Any = {
+      success: dryRun ? true : effectiveReady,
       action,
-      provider: "resend",
-      installed: true,
-      configured: Boolean(resolvedApiKey),
-      connected,
-      email_sending_ready: emailSendingReady,
-      inbound: {
-        requested: enableInbound,
-        hooks_enabled: hooksEnabled,
-        preset_enabled: presetEnabled,
-        endpoint_path: hookPath,
-        token_configured: hookTokenConfigured,
-        signing_secret_configured: hookSigningSecretConfigured,
-      },
-      missing_inputs: missingInputs,
-      links,
-      server_id: server.id,
+      provider,
+      installed: Boolean(server) || dryRun,
+      configured: effectiveConfigured,
+      connected: effectiveConnected,
+      ready: effectiveReady,
+      auth_method: readinessAfter.selectedAuthMethod,
+      auth_methods: capability.authMethods,
+      missing_inputs: missingAfter,
+      links: capability.links,
+      server_id: server?.id,
       connection_error: connectionError,
       health_error: healthError,
       health_text: healthText,
-      message: emailSendingReady
-        ? "Resend email sending is configured and healthy."
-        : resolvedApiKey
-          ? "Resend connector is configured, but connection/health still needs attention."
-          : "Resend connector is installed; API key is required to finish setup.",
+      plan_hash: this.buildIntegrationPlanHash({
+        provider,
+        auth_method: authMethod,
+        server_id: server?.id ?? null,
+        installed: Boolean(server),
+        connected: effectiveConnected,
+        selected_auth_method: readinessAfter.selectedAuthMethod,
+        missing_inputs: missingAfter.map((entry) => entry.field),
+        env_fingerprint: this.buildIntegrationEnvFingerprint(envToApply, capability),
+        inbound_state: provider === "resend" ? inboundAfter : undefined,
+      }),
+      message: dryRun
+        ? `${capability.name} configuration dry run completed.`
+        : effectiveReady
+          ? `${capability.name} integration is configured and healthy.`
+          : effectiveConfigured
+            ? `${capability.name} is configured, but connection or health still needs attention.`
+            : `${capability.name} setup is incomplete. Missing required credentials.`,
       notes: notes.length > 0 ? notes : undefined,
     };
+
+    if (provider === "resend") {
+      response.email_sending_ready = effectiveReady;
+      response.inbound = {
+        requested: enableInbound,
+        hooks_enabled: inboundAfter.hooks_enabled,
+        preset_enabled: inboundAfter.preset_enabled,
+        endpoint_path: inboundAfter.endpoint_path,
+        token_configured: inboundAfter.token_configured,
+        signing_secret_configured: inboundAfter.signing_secret_configured,
+      };
+    }
+
+    void updatedServer;
+    return response;
   }
 
-  private getResendSetupLinks(): {
-    dashboard: string;
-    create_api_key: string;
-    api_keys_docs: string;
-    webhooks_docs: string;
-  } {
+  private resolveTier1Provider(rawProvider: string): Tier1IntegrationProvider | null {
+    const normalized = String(rawProvider || "").trim().toLowerCase();
+    return TIER1_CONNECTOR_IDS.includes(normalized as Tier1IntegrationProvider)
+      ? (normalized as Tier1IntegrationProvider)
+      : null;
+  }
+
+  private findConnectorServer(
+    settings: { servers: MCPServerConfig[] },
+    capability: ConnectorCapability,
+  ): MCPServerConfig | undefined {
+    return settings.servers.find((server) => {
+      const detected = detectConnectorCapabilityId(server);
+      if (detected === capability.id) return true;
+
+      const lowerName = (server.name || "").toLowerCase();
+      if (lowerName === capability.id || lowerName.includes(capability.id)) return true;
+
+      const args = (server.args || []).map((arg) => String(arg).toLowerCase());
+      return args.some((arg) => arg.includes(`${capability.id}-mcp`));
+    });
+  }
+
+  private isConnectorConnected(mcpClient: MCPClientManager, serverId: string): boolean {
+    try {
+      return mcpClient.getServerStatus(serverId)?.status === "connected";
+    } catch {
+      return false;
+    }
+  }
+
+  private normalizeIntegrationEnvInput(inputEnv: Record<string, unknown> | undefined): Record<string, string> {
+    const normalized: Record<string, string> = {};
+    if (!inputEnv || typeof inputEnv !== "object") return normalized;
+    for (const [key, value] of Object.entries(inputEnv)) {
+      const trimmedKey = key.trim();
+      if (!trimmedKey) continue;
+      if (typeof value === "string") {
+        const trimmedValue = value.trim();
+        if (trimmedValue) normalized[trimmedKey] = trimmedValue;
+      } else if (value !== null && value !== undefined) {
+        normalized[trimmedKey] = String(value);
+      }
+    }
+    return normalized;
+  }
+
+  private buildMergedIntegrationEnv(
+    currentEnv: Record<string, string> | undefined,
+    inputEnv: Record<string, string>,
+    provider: Tier1IntegrationProvider,
+  ): Record<string, string> {
+    const merged: Record<string, string> = {
+      ...(currentEnv || {}),
+      ...inputEnv,
+    };
+    if (provider === "resend" && !merged.RESEND_BASE_URL?.trim()) {
+      merged.RESEND_BASE_URL = "https://api.resend.com";
+    }
+    return merged;
+  }
+
+  private buildIntegrationMissingInputs(
+    capability: ConnectorCapability,
+    missingKeys: string[],
+  ): Array<{
+    field: string;
+    label: string;
+    prompt: string;
+    create_url?: string;
+    docs_url?: string;
+  }> {
+    const deduped = [...new Set(missingKeys)];
+    return deduped.map((key) => {
+      const hint = capability.inputHints?.[key] || this.buildDefaultInputHint(capability, key);
+      const field = capability.id === "resend" && key === "RESEND_API_KEY" ? "api_key" : key;
+      return {
+        field,
+        label: hint.label,
+        prompt: hint.prompt,
+        create_url: hint.create_url,
+        docs_url: hint.docs_url,
+      };
+    });
+  }
+
+  private buildDefaultInputHint(capability: ConnectorCapability, key: string): IntegrationInputHint {
+    const label = key.replace(/_/g, " ").toLowerCase();
+    const title = label.charAt(0).toUpperCase() + label.slice(1);
     return {
-      dashboard: "https://resend.com/dashboard",
-      create_api_key: "https://resend.com/api-keys",
-      api_keys_docs: "https://resend.com/docs/dashboard/api-keys/introduction",
-      webhooks_docs: "https://resend.com/docs/dashboard/webhooks/introduction",
+      field: key,
+      label: title,
+      prompt: `Provide ${title} to complete ${capability.name} setup.`,
+      create_url: capability.links.create_api_key,
+      docs_url: capability.links.api_keys_docs || capability.links.oauth_docs,
     };
   }
 
-  private findResendConnectorServer(settings: {
-    servers: MCPServerConfig[];
-  }): MCPServerConfig | undefined {
-    return settings.servers.find((server) => {
-      const lowerName = (server.name || "").toLowerCase();
-      if (lowerName === "resend" || lowerName.includes("resend")) return true;
+  private buildIntegrationPlanHash(payload: Any): string {
+    const canonical = this.stableStringify(payload);
+    return createHash("sha256").update(canonical).digest("hex").slice(0, 24);
+  }
 
-      const command = (server.command || "").toLowerCase();
-      if (command.includes("resend")) return true;
+  private stableStringify(value: Any): string {
+    const normalize = (input: Any): Any => {
+      if (Array.isArray(input)) {
+        return input.map((item) => normalize(item));
+      }
+      if (input && typeof input === "object") {
+        const sortedKeys = Object.keys(input).sort();
+        const output: Record<string, Any> = {};
+        for (const key of sortedKeys) {
+          output[key] = normalize(input[key]);
+        }
+        return output;
+      }
+      return input;
+    };
+    return JSON.stringify(normalize(value));
+  }
 
-      const args = (server.args || []).map((arg) => String(arg).toLowerCase());
-      return args.some((arg) => arg.includes("resend-mcp") || arg.includes("/connectors/resend"));
+  private buildIntegrationEnvFingerprint(
+    env: Record<string, string>,
+    capability: ConnectorCapability,
+  ): Record<string, string> {
+    const relevantKeys = new Set<string>();
+    for (const group of capability.readinessAny) {
+      for (const key of group) relevantKeys.add(key);
+    }
+    if (capability.id === "resend") relevantKeys.add("RESEND_BASE_URL");
+    const fingerprint: Record<string, string> = {};
+    for (const key of [...relevantKeys].sort()) {
+      const value = env[key];
+      if (!value) {
+        fingerprint[key] = "missing";
+      } else {
+        fingerprint[key] = createHash("sha256").update(value).digest("hex").slice(0, 12);
+      }
+    }
+    return fingerprint;
+  }
+
+  private getOAuthClientEnvKeys(provider: Tier1IntegrationProvider): {
+    clientIdKey?: string;
+    clientSecretKey?: string;
+  } {
+    switch (provider) {
+      case "jira":
+        return { clientIdKey: "JIRA_CLIENT_ID", clientSecretKey: "JIRA_CLIENT_SECRET" };
+      case "hubspot":
+        return { clientIdKey: "HUBSPOT_CLIENT_ID", clientSecretKey: "HUBSPOT_CLIENT_SECRET" };
+      case "slack":
+        return { clientIdKey: "SLACK_CLIENT_ID", clientSecretKey: "SLACK_CLIENT_SECRET" };
+      case "gmail":
+      case "google-calendar":
+      case "google-drive":
+        return { clientIdKey: "GOOGLE_CLIENT_ID", clientSecretKey: "GOOGLE_CLIENT_SECRET" };
+      default:
+        return {};
+    }
+  }
+
+  private async applyConnectorOAuth(params: {
+    capability: ConnectorCapability;
+    provider: Tier1IntegrationProvider;
+    input: {
+      oauth?: {
+        client_id?: string;
+        client_secret?: string;
+        scopes?: string[];
+        login_url?: string;
+        subdomain?: string;
+        team_domain?: string;
+      };
+    };
+    env: Record<string, string>;
+  }): Promise<
+    | { success: true; env: Record<string, string>; message: string }
+    | { success: false; error: string; message: string }
+  > {
+    const oauthProvider = params.capability.oauthProvider;
+    if (!oauthProvider) {
+      return {
+        success: false,
+        error: "OAuth provider not configured",
+        message: `${params.capability.name} does not support OAuth setup in chat.`,
+      };
+    }
+
+    const oauthInput = params.input.oauth || {};
+    const clientEnvKeys = this.getOAuthClientEnvKeys(params.provider);
+    const clientId =
+      (oauthInput.client_id || "").trim() ||
+      (clientEnvKeys.clientIdKey ? params.env[clientEnvKeys.clientIdKey]?.trim() : "") ||
+      "";
+    const clientSecret =
+      (oauthInput.client_secret || "").trim() ||
+      (clientEnvKeys.clientSecretKey ? params.env[clientEnvKeys.clientSecretKey]?.trim() : "") ||
+      "";
+
+    if (!clientId) {
+      return {
+        success: false,
+        error: "Missing OAuth client_id",
+        message: `Missing OAuth client_id for ${params.capability.name}. Provide oauth.client_id.`,
+      };
+    }
+
+    const oauthRequest: ConnectorOAuthRequest = {
+      provider: oauthProvider,
+      clientId,
+      clientSecret: clientSecret || undefined,
+      scopes: Array.isArray(oauthInput.scopes)
+        ? oauthInput.scopes.map((scope) => String(scope || "").trim()).filter(Boolean)
+        : undefined,
+      loginUrl: typeof oauthInput.login_url === "string" ? oauthInput.login_url.trim() : undefined,
+      subdomain: typeof oauthInput.subdomain === "string" ? oauthInput.subdomain.trim() : undefined,
+      teamDomain:
+        typeof oauthInput.team_domain === "string" ? oauthInput.team_domain.trim() : undefined,
+    };
+
+    try {
+      const oauthResult = await startConnectorOAuth(oauthRequest);
+      const nextEnv: Record<string, string> = { ...params.env };
+
+      if (clientEnvKeys.clientIdKey) nextEnv[clientEnvKeys.clientIdKey] = clientId;
+      if (clientEnvKeys.clientSecretKey && clientSecret) nextEnv[clientEnvKeys.clientSecretKey] = clientSecret;
+
+      switch (params.provider) {
+        case "jira": {
+          nextEnv.JIRA_ACCESS_TOKEN = oauthResult.accessToken;
+          if (oauthResult.refreshToken) nextEnv.JIRA_REFRESH_TOKEN = oauthResult.refreshToken;
+          if (!nextEnv.JIRA_BASE_URL && oauthResult.resources?.[0]?.url) {
+            nextEnv.JIRA_BASE_URL = oauthResult.resources[0].url;
+          }
+          break;
+        }
+        case "hubspot": {
+          nextEnv.HUBSPOT_ACCESS_TOKEN = oauthResult.accessToken;
+          if (oauthResult.refreshToken) nextEnv.HUBSPOT_REFRESH_TOKEN = oauthResult.refreshToken;
+          break;
+        }
+        case "slack": {
+          nextEnv.SLACK_ACCESS_TOKEN = oauthResult.accessToken;
+          if (oauthResult.refreshToken) nextEnv.SLACK_REFRESH_TOKEN = oauthResult.refreshToken;
+          break;
+        }
+        case "gmail":
+        case "google-calendar":
+        case "google-drive": {
+          nextEnv.GOOGLE_ACCESS_TOKEN = oauthResult.accessToken;
+          if (oauthResult.refreshToken) nextEnv.GOOGLE_REFRESH_TOKEN = oauthResult.refreshToken;
+          break;
+        }
+        default: {
+          break;
+        }
+      }
+
+      return {
+        success: true,
+        env: nextEnv,
+        message: `${params.capability.name} OAuth authorization completed.`,
+      };
+    } catch (error: Any) {
+      return {
+        success: false,
+        error: String(error?.message || error),
+        message: `OAuth setup failed for ${params.capability.name}.`,
+      };
+    }
+  }
+
+  private getResendInboundState(): {
+    hooks_enabled: boolean;
+    preset_enabled: boolean;
+    endpoint_path: string;
+    token_configured: boolean;
+    signing_secret_configured: boolean;
+  } {
+    HooksSettingsManager.initialize();
+    const hooks = HooksSettingsManager.loadSettings();
+    return {
+      hooks_enabled: hooks.enabled,
+      preset_enabled: hooks.presets.includes("resend"),
+      endpoint_path: `${hooks.path || "/hooks"}/resend`,
+      token_configured: Boolean(hooks.token),
+      signing_secret_configured: Boolean(hooks.resend?.webhookSecret),
+    };
+  }
+
+  private configureResendInbound(input: {
+    webhookSecret?: string;
+    allowUnsafeExternalContent?: boolean;
+  }): {
+    hooks_enabled: boolean;
+    preset_enabled: boolean;
+    endpoint_path: string;
+    token_configured: boolean;
+    signing_secret_configured: boolean;
+  } {
+    HooksSettingsManager.initialize();
+    let hooks = HooksSettingsManager.loadSettings();
+    if (!hooks.enabled) {
+      hooks = HooksSettingsManager.enableHooks();
+    }
+
+    const nextPresets = new Set(hooks.presets || []);
+    nextPresets.add("resend");
+
+    let nextWebhookSecret = hooks.resend?.webhookSecret;
+    if (input.webhookSecret !== undefined) {
+      nextWebhookSecret = input.webhookSecret || undefined;
+    }
+
+    hooks = HooksSettingsManager.updateConfig({
+      ...hooks,
+      presets: Array.from(nextPresets),
+      resend: {
+        ...hooks.resend,
+        webhookSecret: nextWebhookSecret,
+        allowUnsafeExternalContent:
+          typeof input.allowUnsafeExternalContent === "boolean"
+            ? input.allowUnsafeExternalContent
+            : hooks.resend?.allowUnsafeExternalContent,
+      },
     });
+
+    return {
+      hooks_enabled: hooks.enabled,
+      preset_enabled: hooks.presets.includes("resend"),
+      endpoint_path: `${hooks.path || "/hooks"}/resend`,
+      token_configured: Boolean(hooks.token),
+      signing_secret_configured: Boolean(hooks.resend?.webhookSecret),
+    };
   }
 
   private extractMcpTextContent(result: Any): string {
@@ -6365,29 +7026,76 @@ ${skillDescriptions}`;
       {
         name: "integration_setup",
         description:
-          "Inspect or configure integrations directly from chat. " +
-          "Use this when the user asks to enable email sending or connect Resend. " +
-          "If credentials are missing, this tool returns required inputs and direct setup links.",
+          "Inspect, list, or configure integrations directly from chat. " +
+          "Supports Tier-1 providers: resend, slack, gmail, google-calendar, google-drive, jira, linear, hubspot. " +
+          "Use inspect to get plan_hash + missing inputs, and configure with expected_plan_hash for safe apply.",
         input_schema: {
           type: "object",
           properties: {
             action: {
               type: "string",
-              enum: ["inspect", "configure"],
-              description: "inspect = show readiness/missing inputs, configure = apply settings",
+              enum: ["list", "inspect", "configure"],
+              description:
+                "list = show all Tier-1 providers, inspect = show readiness and plan_hash, configure = apply settings",
             },
             provider: {
               type: "string",
-              enum: ["resend"],
-              description: "Integration provider to configure",
+              enum: [
+                "resend",
+                "slack",
+                "gmail",
+                "google-calendar",
+                "google-drive",
+                "jira",
+                "linear",
+                "hubspot",
+              ],
+              description: "Integration provider to inspect/configure",
+            },
+            auth_method: {
+              type: "string",
+              enum: ["auto", "api_key", "oauth"],
+              description:
+                "Authentication method preference. auto picks the best available path for the provider.",
+            },
+            expected_plan_hash: {
+              type: "string",
+              description:
+                "Optional stale-plan guard. Pass plan_hash from inspect; configure fails safely if state changed.",
+            },
+            dry_run: {
+              type: "boolean",
+              description: "When true, computes the outcome without writing settings or launching OAuth.",
+            },
+            env: {
+              type: "object",
+              description:
+                "Environment variable overrides to apply to the connector (e.g., {\"LINEAR_API_KEY\":\"...\"}).",
+              additionalProperties: true,
+            },
+            oauth: {
+              type: "object",
+              description:
+                "OAuth bootstrap inputs. client_id is required for OAuth setup. Optional provider-specific fields are supported.",
+              properties: {
+                client_id: { type: "string" },
+                client_secret: { type: "string" },
+                scopes: {
+                  type: "array",
+                  items: { type: "string" },
+                },
+                login_url: { type: "string" },
+                subdomain: { type: "string" },
+                team_domain: { type: "string" },
+              },
             },
             api_key: {
               type: "string",
-              description: "Provider API key (for Resend, starts with re_)",
+              description: "Legacy shortcut for Resend API key (maps to RESEND_API_KEY).",
             },
             base_url: {
               type: "string",
-              description: "Optional API base URL override (default: https://api.resend.com)",
+              description: "Legacy shortcut for Resend base URL (maps to RESEND_BASE_URL).",
             },
             connect_now: {
               type: "boolean",

@@ -105,6 +105,11 @@ export interface WorkspaceKitStatus {
   hasKitDir: boolean;
   files: WorkspaceKitFileStatus[];
   missingCount: number;
+  onboarding?: {
+    bootstrapSeededAt?: number;
+    onboardingCompletedAt?: number;
+    bootstrapPresent: boolean;
+  };
 }
 
 export type WorkspaceKitInitMode = "missing" | "overwrite";

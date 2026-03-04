@@ -4268,7 +4268,10 @@ a,
 .code-block-wrapper code {
   display: block;
   padding: 12px;
+  white-space: pre;
+  max-height: min(380px, 52vh);
   overflow-x: auto;
+  overflow-y: auto;
   background: none;
   color: #cdd6f4;
 }

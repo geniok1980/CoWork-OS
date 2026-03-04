@@ -19,20 +19,13 @@ import { MCPSettingsManager } from "../settings";
 import { MCPServerConnection } from "./MCPServerConnection";
 import { IPC_CHANNELS } from "../../../shared/types";
 import { createLogger } from "../../utils/logger";
+import {
+  detectConnectorCapabilityId,
+  getKnownConnectorIds,
+  isConnectorConfiguredByCapability,
+} from "../connectors/capabilities";
 
-const CONNECTOR_SCRIPT_PATH_REGEX =
-  /(?:^|[\\/])connectors[\\/]([^\\/]+)-mcp[\\/]dist[\\/]index\.js$/i;
-const KNOWN_CONNECTORS = new Set([
-  "salesforce",
-  "jira",
-  "hubspot",
-  "zendesk",
-  "servicenow",
-  "linear",
-  "asana",
-  "okta",
-  "resend",
-]);
+const KNOWN_CONNECTORS = new Set(getKnownConnectorIds());
 const logger = createLogger("MCPClientManager");
 
 function getAllElectronWindows(): Any[] {
@@ -492,79 +485,15 @@ export class MCPClientManager extends EventEmitter {
   }
 
   private detectConnectorId(server: MCPServerConfig): string | null {
-    const args = server.args || [];
-    for (const arg of args) {
-      const match = arg.match(CONNECTOR_SCRIPT_PATH_REGEX);
-      if (!match) continue;
-      const connector = match[1].toLowerCase();
-      if (KNOWN_CONNECTORS.has(connector)) return connector;
-    }
-
-    const lowerName = server.name.toLowerCase();
-    for (const connector of KNOWN_CONNECTORS) {
-      if (lowerName.includes(connector)) {
-        return connector;
-      }
-    }
-
-    return null;
-  }
-
-  private hasEnvValue(env: Record<string, string> | undefined, key: string): boolean {
-    return Boolean(env?.[key]?.trim());
-  }
-
-  private hasAllEnvValues(env: Record<string, string> | undefined, keys: string[]): boolean {
-    return keys.every((key) => this.hasEnvValue(env, key));
+    const detected = detectConnectorCapabilityId(server);
+    if (!detected) return null;
+    return KNOWN_CONNECTORS.has(detected) ? detected : null;
   }
 
   private isConnectorConfigured(
     connectorId: string,
     env: Record<string, string> | undefined,
   ): boolean {
-    switch (connectorId) {
-      case "salesforce":
-        return (
-          this.hasEnvValue(env, "SALESFORCE_INSTANCE_URL") &&
-          (this.hasEnvValue(env, "SALESFORCE_ACCESS_TOKEN") ||
-            this.hasAllEnvValues(env, [
-              "SALESFORCE_CLIENT_ID",
-              "SALESFORCE_CLIENT_SECRET",
-              "SALESFORCE_REFRESH_TOKEN",
-            ]))
-        );
-      case "jira":
-        return (
-          this.hasEnvValue(env, "JIRA_BASE_URL") &&
-          (this.hasEnvValue(env, "JIRA_ACCESS_TOKEN") ||
-            this.hasAllEnvValues(env, ["JIRA_EMAIL", "JIRA_API_TOKEN"]))
-        );
-      case "hubspot":
-        return this.hasEnvValue(env, "HUBSPOT_ACCESS_TOKEN");
-      case "zendesk":
-        return (
-          (this.hasEnvValue(env, "ZENDESK_BASE_URL") ||
-            this.hasEnvValue(env, "ZENDESK_SUBDOMAIN")) &&
-          (this.hasEnvValue(env, "ZENDESK_ACCESS_TOKEN") ||
-            this.hasAllEnvValues(env, ["ZENDESK_EMAIL", "ZENDESK_API_TOKEN"]))
-        );
-      case "servicenow":
-        return (
-          (this.hasEnvValue(env, "SERVICENOW_INSTANCE_URL") ||
-            this.hasEnvValue(env, "SERVICENOW_INSTANCE")) &&
-          (this.hasEnvValue(env, "SERVICENOW_ACCESS_TOKEN") ||
-            this.hasAllEnvValues(env, ["SERVICENOW_USERNAME", "SERVICENOW_PASSWORD"]))
-        );
-      case "linear":
-        return this.hasEnvValue(env, "LINEAR_API_KEY");
-      case "asana":
-        return this.hasEnvValue(env, "ASANA_ACCESS_TOKEN");
-      case "okta":
-        return this.hasAllEnvValues(env, ["OKTA_BASE_URL", "OKTA_API_TOKEN"]);
-      case "resend":
-        return this.hasEnvValue(env, "RESEND_API_KEY");
-      default:
-        return true;
-    }
+    return isConnectorConfiguredByCapability(connectorId, env);
   }
 }

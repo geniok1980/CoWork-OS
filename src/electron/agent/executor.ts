@@ -975,6 +975,78 @@ export class TaskExecutor {
     this.daemon.logEvent(this.task.id, type, payload);
   }
 
+  private extractCapabilityGapSignalCount(toolResults: LLMToolResult[]): number {
+    let signalCount = 0;
+    const pattern =
+      /(tool not available|not available in current context|missing (?:api|credential|token)|not configured|not connected|reconnect|integration|oauth|api key)/i;
+
+    for (const result of toolResults) {
+      if (!result?.is_error) continue;
+      const raw = typeof result.content === "string" ? result.content : "";
+      if (!raw.trim()) continue;
+
+      let candidate = raw;
+      try {
+        const parsed = JSON.parse(raw) as { error?: unknown; reason?: unknown; message?: unknown };
+        const fragments = [parsed?.error, parsed?.reason, parsed?.message]
+          .filter((item) => typeof item === "string")
+          .map((item) => String(item));
+        if (fragments.length > 0) candidate = fragments.join(" ");
+      } catch {
+        // Keep raw fallback string.
+      }
+
+      if (pattern.test(candidate)) {
+        signalCount += 1;
+      }
+    }
+
+    return signalCount;
+  }
+
+  private maybeInjectCapabilityGapSkillProposalHint(params: {
+    stepId: string;
+    messages: Any[];
+    toolResults: LLMToolResult[];
+    hasUnavailableToolAttempt: boolean;
+  }): boolean {
+    if (!params.stepId || this.capabilityGapHintInjectedSteps.has(params.stepId)) {
+      return false;
+    }
+
+    const extractedSignals = this.extractCapabilityGapSignalCount(params.toolResults);
+    const totalSignals = extractedSignals + (params.hasUnavailableToolAttempt ? 1 : 0);
+    if (totalSignals <= 0) {
+      return false;
+    }
+
+    this.capabilityGapSignalCount += totalSignals;
+    if (this.capabilityGapSignalCount < 2) {
+      return false;
+    }
+
+    if (this.capabilityGapHintInjectedTurn === this.globalTurnCount) {
+      return false;
+    }
+
+    params.messages.push({
+      role: "user",
+      content:
+        "Repeated tool/integration availability issues detected. " +
+        "If this looks like a missing reusable capability, create an approval-gated skill proposal " +
+        "with skill_proposal(action=\"create\", problem_statement, evidence, required_tools, draft_skill, risk_note).",
+    });
+
+    this.capabilityGapHintInjectedSteps.add(params.stepId);
+    this.capabilityGapHintInjectedTurn = this.globalTurnCount;
+    this.emitEvent("log", {
+      metric: "skill_proposal_hint_injected",
+      stepId: params.stepId,
+      totalSignals: this.capabilityGapSignalCount,
+    });
+    return true;
+  }
+
   private getLifecycleMutex(): LifecycleMutex {
     return this.lifecycleMutex ?? (this.lifecycleMutexFallback ??= new LifecycleMutex());
   }
@@ -1991,6 +2063,9 @@ ${transcript}
     | "awaiting_user_input"
     | "dependency_unavailable"
   > = new Set();
+  private capabilityGapSignalCount = 0;
+  private capabilityGapHintInjectedTurn = -1;
+  private capabilityGapHintInjectedSteps: Set<string> = new Set();
   private taskFailureDomains: Set<string> = new Set();
   private readonly reliabilityV2DisableCompletionReform =
     process.env.COWORK_RELIABILITY_V2_DISABLE_COMPLETION_REFORM === "1" ||
@@ -15029,6 +15104,12 @@ TASK / CONVERSATION HISTORY:
             maxIterations,
             allowRecoveryHint: !pauseAfterNextAssistantMessage,
           });
+          const capabilityGapHintInjected = this.maybeInjectCapabilityGapSkillProposalHint({
+            stepId: step.id,
+            messages,
+            toolResults,
+            hasUnavailableToolAttempt,
+          });
           const _allToolsFailed = failureDecision.allToolsFailed;
           if (hasHardToolFailureAttempt && !lastFailureReason) {
             stepFailed = true;
@@ -15057,6 +15138,12 @@ TASK / CONVERSATION HISTORY:
             });
             continueLoop = true;
           } else if (failureDecision.shouldStopFromFailures) {
+            if (capabilityGapHintInjected) {
+              continueLoop = true;
+              stepFailed = false;
+              lastFailureReason = "";
+              continue;
+            }
             console.log(
               `${this.logTag} All tool calls failed, were disabled, or duplicates - stopping iteration`,
             );
@@ -15066,6 +15153,12 @@ TASK / CONVERSATION HISTORY:
               "All required tools are unavailable or failed. Unable to complete this step.";
             continueLoop = false;
           } else if (failureDecision.shouldStopFromHardFailure) {
+            if (capabilityGapHintInjected) {
+              continueLoop = true;
+              stepFailed = false;
+              lastFailureReason = "";
+              continue;
+            }
             console.log(`${this.logTag} Hard tool failure detected - stopping iteration`);
             stepFailed = true;
             lastFailureReason =
@@ -18371,6 +18464,12 @@ TASK / CONVERSATION HISTORY:
             maxIterations,
             allowRecoveryHint: true,
           });
+          const capabilityGapHintInjected = this.maybeInjectCapabilityGapSkillProposalHint({
+            stepId: this.currentStepId || "follow_up",
+            messages,
+            toolResults,
+            hasUnavailableToolAttempt,
+          });
 
           if (failureDecision.shouldInjectRecoveryHint) {
             toolRecoveryHintInjected = true;
@@ -18393,11 +18492,19 @@ TASK / CONVERSATION HISTORY:
             });
             continueLoop = true;
           } else if (failureDecision.shouldStopFromFailures) {
+            if (capabilityGapHintInjected) {
+              continueLoop = true;
+              continue;
+            }
             console.log(
               `${this.logTag} All tool calls failed, were disabled, or duplicates - stopping iteration`,
             );
             continueLoop = false;
           } else if (failureDecision.shouldStopFromHardFailure) {
+            if (capabilityGapHintInjected) {
+              continueLoop = true;
+              continue;
+            }
             console.log(`${this.logTag} Hard tool failure detected - stopping iteration`);
             continueLoop = false;
           } else {

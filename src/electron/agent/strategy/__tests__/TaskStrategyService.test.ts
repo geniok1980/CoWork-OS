@@ -48,6 +48,15 @@ describe("TaskStrategyService deriveLlmProfile", () => {
   });
 });
 
+describe("TaskStrategyService getRelevantToolSet", () => {
+  it("keeps request_user_input available for advice/planning intents", () => {
+    const planning = TaskStrategyService.getRelevantToolSet("planning");
+    const advice = TaskStrategyService.getRelevantToolSet("advice");
+    expect(planning.has("request_user_input")).toBe(true);
+    expect(advice.has("request_user_input")).toBe(true);
+  });
+});
+
 describe("TaskStrategyService applyToAgentConfig", () => {
   it("adds llmProfileHint when no explicit model override exists", () => {
     const strategy = TaskStrategyService.derive(makeRoute({ intent: "planning" }));
@@ -86,6 +95,7 @@ describe("TaskStrategyService applyToAgentConfig", () => {
 
     const config = TaskStrategyService.applyToAgentConfig({ executionMode: "propose" }, strategy);
     expect(config.executionMode).toBe("propose");
+    expect(config.executionModeSource).toBe("user");
   });
 
   it("keeps mixed intent in propose mode without hard execution signals", () => {
@@ -113,6 +123,18 @@ describe("TaskStrategyService applyToAgentConfig", () => {
       domain: "operations",
     });
     const strategy = TaskStrategyService.derive(route);
+    expect(strategy.executionMode).toBe("execute");
+  });
+
+  it("forces mixed intent into execute mode with artifact creation signal", () => {
+    const route = makeRoute({
+      intent: "mixed",
+      signals: ["planning-language", "action-verb"],
+    });
+    const strategy = TaskStrategyService.derive(route, undefined, {
+      title: "Website build",
+      prompt: "Make an interactive website with timeline controls and ship the project files.",
+    });
     expect(strategy.executionMode).toBe("execute");
   });
 
@@ -145,6 +167,27 @@ describe("TaskStrategyService applyToAgentConfig", () => {
     });
 
     expect(strategy.maxTurns).toBe(80);
+  });
+
+  it("marks strategy-derived execution mode source when no override is provided", () => {
+    const route = makeRoute({ intent: "execution" });
+    const strategy = TaskStrategyService.derive(route);
+    const config = TaskStrategyService.applyToAgentConfig({}, strategy);
+    expect(config.executionMode).toBe("execute");
+    expect(config.executionModeSource).toBe("strategy");
+  });
+
+  it("defaults execution tasks to adaptive unbounded turn policy with follow-up recovery", () => {
+    const route = makeRoute({ intent: "execution" });
+    const strategy = TaskStrategyService.derive(route);
+    const config = TaskStrategyService.applyToAgentConfig({}, strategy);
+    expect(config.turnBudgetPolicy).toBe("adaptive_unbounded");
+    expect(config.followUpAutoRecovery).toBe(true);
+    expect(config.workspacePathAliasPolicy).toBe("rewrite_and_retry");
+    expect(config.taskPathRootPolicy).toBe("pin_and_rewrite");
+    expect(config.pathDriftRetryBudget).toBe(3);
+    expect(config.suppressToolDisableOnRecoverablePathDrift).toBe(true);
+    expect(config.mutationCheckpointRetryBudget).toBe(1);
   });
 
   it("forces execute mode and at least 80 turns for build+verify+render artifact prompts", () => {

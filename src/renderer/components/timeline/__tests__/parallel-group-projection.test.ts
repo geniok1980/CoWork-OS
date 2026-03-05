@@ -1,0 +1,107 @@
+import { describe, expect, it } from "vitest";
+
+import type { TaskEvent } from "../../../../shared/types";
+import {
+  buildParallelGroupProjection,
+  getEventGroupId,
+  isToolsParallelGroupId,
+} from "../parallel-group-projection";
+
+function makeEvent(
+  type: TaskEvent["type"],
+  id: string,
+  payload: Record<string, unknown>,
+  overrides: Partial<TaskEvent> = {},
+): TaskEvent {
+  return {
+    id,
+    taskId: "task-1",
+    timestamp: 1000 + Number(id.replace(/\D+/g, "") || 0),
+    schemaVersion: 2,
+    type,
+    payload,
+    ...overrides,
+  };
+}
+
+describe("parallel-group-projection", () => {
+  it("detects tool parallel group identifiers", () => {
+    expect(isToolsParallelGroupId("tools:step:build:1")).toBe(true);
+    expect(isToolsParallelGroupId(" stage:build ")).toBe(false);
+    expect(isToolsParallelGroupId(null)).toBe(false);
+  });
+
+  it("extracts group id from event fields", () => {
+    const event = makeEvent(
+      "timeline_group_started",
+      "evt-1",
+      { groupId: "tools:step:build:1" },
+      { groupId: "tools:step:build:1" },
+    );
+    expect(getEventGroupId(event)).toBe("tools:step:build:1");
+  });
+
+  it("builds stable lane ordering and suppression sets for tool groups", () => {
+    const groupId = "tools:step:build:1";
+    const events: TaskEvent[] = [
+      makeEvent("timeline_group_started", "evt-1", {
+        groupId,
+        groupLabel: "Tool batch (2)",
+      }),
+      makeEvent("tool_call", "evt-2", {
+        groupId,
+        tool: "web_search",
+        toolUseId: "use-2",
+        toolCallIndex: 2,
+      }),
+      makeEvent("tool_call", "evt-3", {
+        groupId,
+        tool: "web_fetch",
+        toolUseId: "use-1",
+        toolCallIndex: 1,
+      }),
+      makeEvent("timeline_step_started", "evt-4", {
+        groupId,
+        step: { id: "tool_lane:step:use-1", description: "Running web_fetch" },
+        status: "in_progress",
+      }),
+      makeEvent("tool_result", "evt-5", {
+        groupId,
+        tool: "web_search",
+        toolUseId: "use-2",
+        toolCallIndex: 2,
+        result: { success: true },
+      }),
+      makeEvent("timeline_step_finished", "evt-6", {
+        groupId,
+        step: { id: "tool_lane:step:use-1", description: "Running web_fetch" },
+        status: "completed",
+      }),
+      makeEvent("tool_result", "evt-7", {
+        groupId,
+        tool: "web_fetch",
+        toolUseId: "use-1",
+        toolCallIndex: 1,
+        result: { success: true },
+      }),
+      makeEvent("timeline_group_finished", "evt-8", {
+        groupId,
+        groupLabel: "Tool batch",
+        status: "completed",
+      }),
+    ];
+
+    const projection = buildParallelGroupProjection(events);
+    const group = projection.groupsByAnchorEventId.get("evt-1");
+    expect(group).toBeDefined();
+    expect(group?.groupId).toBe(groupId);
+    expect(group?.status).toBe("completed");
+    expect(group?.lanes.map((lane) => lane.toolUseId)).toEqual(["use-1", "use-2"]);
+    expect(group?.lanes.map((lane) => lane.toolCallIndex)).toEqual([1, 2]);
+
+    expect(projection.suppressedEventIds.has("evt-1")).toBe(false);
+    expect(projection.suppressedEventIds.has("evt-2")).toBe(true);
+    expect(projection.suppressedEventIds.has("evt-5")).toBe(true);
+    expect(projection.suppressedEventIds.has("evt-8")).toBe(true);
+  });
+});

@@ -195,6 +195,31 @@ describe("executor-loop-utils guardrails", () => {
     expect(shouldLock).toBe(false);
   });
 
+  it("locks follow-up tool calls immediately when remaining turn budget is critically low", () => {
+    const shouldLock = shouldLockFollowUpToolCalls({
+      stopReason: "tool_use",
+      consecutiveToolUseStops: 1,
+      followUpToolCallCount: 1,
+      stopReasonNudgeInjected: false,
+      remainingTurns: 2,
+      immediateTurnBudgetThreshold: 2,
+    });
+    expect(shouldLock).toBe(true);
+  });
+
+  it("does not lock on low remaining turn budget when immediate budget locking is disabled", () => {
+    const shouldLock = shouldLockFollowUpToolCalls({
+      stopReason: "tool_use",
+      consecutiveToolUseStops: 1,
+      followUpToolCallCount: 1,
+      stopReasonNudgeInjected: false,
+      remainingTurns: 2,
+      immediateTurnBudgetThreshold: 2,
+      allowImmediateTurnBudgetLock: false,
+    });
+    expect(shouldLock).toBe(false);
+  });
+
   it("tracks skipped-tool-only streak and forces stop after threshold", () => {
     let streak = updateSkippedToolOnlyTurnStreak({
       skippedToolCalls: 2,

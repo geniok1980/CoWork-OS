@@ -93,6 +93,24 @@ export const NON_RETRYABLE_ERROR_PATTERNS = [
   /upgrade your plan/i,
 ];
 
+// Patterns that indicate context/window capacity overflow.
+// These should trigger compaction + retry rather than terminal failure.
+export const CONTEXT_CAPACITY_ERROR_PATTERNS = [
+  /context length/i,
+  /context window/i,
+  /maximum context/i,
+  /max context/i,
+  /input too long/i,
+  /prompt too long/i,
+  /too many tokens/i,
+  /token limit exceeded/i,
+  /request too large/i,
+  /message too large/i,
+  /maximum number of input tokens/i,
+  /reduce the length of the messages/i,
+  /invalid_request_error.*(context|tokens|length)/i,
+];
+
 // Patterns that indicate input-dependent errors (not tool failures)
 // These are normal operational errors that should NOT count towards circuit breaker
 export const INPUT_DEPENDENT_ERROR_PATTERNS = [
@@ -187,6 +205,33 @@ export function isNonRetryableError(errorMessage: string): boolean {
  */
 export function isInputDependentError(errorMessage: string): boolean {
   return INPUT_DEPENDENT_ERROR_PATTERNS.some((pattern) => pattern.test(errorMessage));
+}
+
+/**
+ * Check if an error indicates input/context capacity exhaustion.
+ */
+export function isContextCapacityError(errorLike: unknown): boolean {
+  const message =
+    typeof errorLike === "string"
+      ? errorLike
+      : typeof errorLike === "object" && errorLike !== null
+        ? String((errorLike as Any).message || "")
+        : "";
+  if (!message.trim()) return false;
+  return CONTEXT_CAPACITY_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/**
+ * Recoverable path-drift class used for task-root rewrite/retry logic.
+ * This intentionally targets filesystem-miss style failures rather than boundary/security failures.
+ */
+export function isRecoverablePathDriftError(errorMessage: string): boolean {
+  const lower = String(errorMessage || "").toLowerCase();
+  if (!lower.trim()) return false;
+  return (
+    /enoent|no such file|does not exist|cannot find|not found|enotdir|eisdir/i.test(lower) &&
+    !/outside workspace boundary|path traversal outside workspace|protected system path/i.test(lower)
+  );
 }
 
 // ===== Date/Time Utilities =====
@@ -730,6 +775,45 @@ export class ToolCallDeduplicator {
     this.rateLimitCounters.delete("read_multiple_files");
     this.rateLimitCounters.delete("list_directory");
     this.rateLimitCounters.delete("list_directory_with_sizes");
+  }
+
+  /**
+   * Reset mutation duplicate history at step boundaries while preserving
+   * read-only dedupe memory and all rate-limit counters.
+   *
+   * Why: mutation retries across different plan steps can be legitimate
+   * (for example editing the same file in a later refinement step).
+   */
+  resetMutationHistoryForNewStep(): void {
+    const isMutationTool = (toolName: string): boolean => {
+      const canonical = canonicalizeToolName(toolName);
+      return (
+        isFileMutationToolName(canonical) ||
+        isArtifactGenerationToolName(canonical) ||
+        canonical === "copy_file"
+      );
+    };
+
+    for (const key of Array.from(this.recentCalls.keys())) {
+      const toolName = key.split(":", 1)[0] || "";
+      if (isMutationTool(toolName)) {
+        this.recentCalls.delete(key);
+      }
+    }
+
+    for (const key of Array.from(this.semanticPatterns.keys())) {
+      const toolName = key.split(":", 1)[0] || "";
+      if (isMutationTool(toolName)) {
+        this.semanticPatterns.delete(key);
+      }
+    }
+
+    for (const key of Array.from(this.semanticTotalCounts.keys())) {
+      const toolName = key.split(":", 1)[0] || "";
+      if (isMutationTool(toolName)) {
+        this.semanticTotalCounts.delete(key);
+      }
+    }
   }
 
   /**

@@ -5,24 +5,24 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Mock @mariozechner/pi-ai before importing PiProvider
-vi.mock("@mariozechner/pi-ai", () => ({
-  getModel: vi.fn(),
-  getModels: vi.fn(() => [
-    {
-      id: "claude-sonnet-4-5-20250514",
-      name: "Claude Sonnet 4.5",
-      reasoning: false,
-      contextWindow: 200000,
-    },
-    { id: "gpt-4o", name: "GPT-4o", reasoning: false, contextWindow: 128000 },
-  ]),
-  getProviders: vi.fn(() => ["anthropic", "openai"]),
-  complete: vi.fn(),
+const completeMock = vi.fn();
+const getModelsMock = vi.fn(() => [
+  {
+    id: "claude-sonnet-4-5-20250514",
+    name: "Claude Sonnet 4.5",
+    reasoning: false,
+    contextWindow: 200000,
+  },
+  { id: "gpt-4o", name: "GPT-4o", reasoning: false, contextWindow: 128000 },
+]);
+const getProvidersMock = vi.fn(() => ["anthropic", "openai"]);
+const loadPiAiModuleMock = vi.fn();
+
+vi.mock("../llm/pi-ai-loader", () => ({
+  loadPiAiModule: (...args: Any[]) => loadPiAiModuleMock(...args),
 }));
 
 import { PiProvider } from "../llm/pi-provider";
-import { getModels as _getModels } from "@mariozechner/pi-ai";
 import type { LLMProviderConfig, LLMMessage, LLMResponse } from "../llm/types";
 
 function createConfig(overrides: Partial<LLMProviderConfig> = {}): LLMProviderConfig {
@@ -43,6 +43,11 @@ function getPrivate(provider: PiProvider): Any {
 describe("PiProvider", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    loadPiAiModuleMock.mockResolvedValue({
+      getModels: (...args: Any[]) => getModelsMock(...args),
+      getProviders: (...args: Any[]) => getProvidersMock(...args),
+      complete: (...args: Any[]) => completeMock(...args),
+    });
   });
 
   describe("constructor validation", () => {
@@ -76,34 +81,32 @@ describe("PiProvider", () => {
   });
 
   describe("resolveModel", () => {
-    it("should return model on exact match", () => {
+    it("should return model on exact match", async () => {
       const provider = new PiProvider(createConfig());
-      const model = getPrivate(provider).resolveModel("claude-sonnet-4-5-20250514");
+      const model = await getPrivate(provider).resolveModel("claude-sonnet-4-5-20250514");
       expect(model.id).toBe("claude-sonnet-4-5-20250514");
     });
 
-    it("should throw when model is not found (no partial matching)", () => {
+    it("should throw when model is not found (no partial matching)", async () => {
       const provider = new PiProvider(createConfig());
-      expect(() => getPrivate(provider).resolveModel("nonexistent-model")).toThrow(
+      await expect(getPrivate(provider).resolveModel("nonexistent-model")).rejects.toThrow(
         /Model "nonexistent-model" not found for provider anthropic/,
       );
     });
 
-    it("should throw for partial model ID match (no fuzzy fallback)", () => {
+    it("should throw for partial model ID match (no fuzzy fallback)", async () => {
       const provider = new PiProvider(createConfig());
-      // "claude" is a substring of "claude-sonnet-4-5-20250514" but should NOT match
-      expect(() => getPrivate(provider).resolveModel("claude")).toThrow(/Model "claude" not found/);
+      await expect(getPrivate(provider).resolveModel("claude")).rejects.toThrow(
+        /Model "claude" not found/,
+      );
     });
 
-    it("should list available models in error message", () => {
+    it("should list available models in error message", async () => {
       const provider = new PiProvider(createConfig());
-      try {
-        getPrivate(provider).resolveModel("missing");
-        expect.fail("Should have thrown");
-      } catch (e: Any) {
-        expect(e.message).toContain("claude-sonnet-4-5-20250514");
-        expect(e.message).toContain("gpt-4o");
-      }
+      await expect(getPrivate(provider).resolveModel("missing")).rejects.toThrow(
+        /claude-sonnet-4-5-20250514/,
+      );
+      await expect(getPrivate(provider).resolveModel("missing")).rejects.toThrow(/gpt-4o/);
     });
   });
 
@@ -126,7 +129,6 @@ describe("PiProvider", () => {
       expect(result).toHaveLength(1);
       expect(result[0].role).toBe("assistant");
       expect(result[0].content).toEqual([{ type: "text", text: "Hi there" }]);
-      // Verify placeholder usage is zeroed
       expect(result[0].usage.input).toBe(0);
       expect(result[0].usage.output).toBe(0);
       expect(result[0].usage.totalTokens).toBe(0);
@@ -271,14 +273,14 @@ describe("PiProvider", () => {
       const provider = new PiProvider(createConfig());
       const piResponse = {
         role: "assistant",
-        content: [{ type: "text", text: "truncated" }],
+        content: [{ type: "text", text: "Truncated" }],
         stopReason: "length",
         usage: {
-          input: 0,
-          output: 0,
+          input: 10,
+          output: 5,
           cacheRead: 0,
           cacheWrite: 0,
-          totalTokens: 0,
+          totalTokens: 15,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
         },
         api: "openai-completions",
@@ -296,16 +298,16 @@ describe("PiProvider", () => {
       const piResponse = {
         role: "assistant",
         content: [
-          { type: "thinking", thinking: "Let me reason..." },
-          { type: "text", text: "Answer" },
+          { type: "thinking", thinking: "internal" },
+          { type: "text", text: "Visible" },
         ],
         stopReason: "stop",
         usage: {
-          input: 0,
-          output: 0,
+          input: 10,
+          output: 5,
           cacheRead: 0,
           cacheWrite: 0,
-          totalTokens: 0,
+          totalTokens: 15,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
         },
         api: "openai-completions",
@@ -315,7 +317,7 @@ describe("PiProvider", () => {
       };
 
       const result: LLMResponse = getPrivate(provider).convertPiAiResponse(piResponse);
-      expect(result.content).toEqual([{ type: "text", text: "Answer" }]);
+      expect(result.content).toEqual([{ type: "text", text: "Visible" }]);
     });
   });
 });

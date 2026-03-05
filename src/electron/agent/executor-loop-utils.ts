@@ -36,7 +36,7 @@ export function appendMaxTokensRecoveryUserMessage(messages: LLMMessage[]): void
           "You MUST reduce the size of your next response. Strategies:\n" +
           "1. If writing a file, split the content across MULTIPLE write_file calls " +
           "(e.g., write the first half now, then the second half in the next turn).\n" +
-          "2. Call only ONE tool at a time instead of multiple parallel calls.\n" +
+          "2. Reduce parallel tool calls to only what is necessary (use serial calls when output pressure is high).\n" +
           "3. Write shorter, more concise content.\n" +
           "Continue from where you left off.",
       },
@@ -522,11 +522,23 @@ export function shouldLockFollowUpToolCalls(opts: {
   consecutiveToolUseStops: number;
   followUpToolCallCount: number;
   stopReasonNudgeInjected: boolean;
+  remainingTurns?: number;
+  immediateTurnBudgetThreshold?: number;
+  allowImmediateTurnBudgetLock?: boolean;
   minStreak?: number;
   minToolCalls?: number;
 }): boolean {
   const minStreak = opts.minStreak ?? 10;
   const minToolCalls = opts.minToolCalls ?? 10;
+  const immediateTurnBudgetThreshold = opts.immediateTurnBudgetThreshold ?? 2;
+  const allowImmediateTurnBudgetLock = opts.allowImmediateTurnBudgetLock ?? true;
+  const forceByTurnBudget =
+    allowImmediateTurnBudgetLock &&
+    opts.stopReason === "tool_use" &&
+    typeof opts.remainingTurns === "number" &&
+    opts.remainingTurns <= immediateTurnBudgetThreshold &&
+    opts.followUpToolCallCount > 0;
+  if (forceByTurnBudget) return true;
   return (
     opts.stopReason === "tool_use" &&
     opts.stopReasonNudgeInjected &&

@@ -13,6 +13,7 @@ import type { ChannelGateway } from "../electron/gateway";
 import {
   ApprovalRepository,
   ChannelRepository,
+  InputRequestRepository,
   TaskEventRepository,
   TaskRepository,
   WorkspaceRepository,
@@ -115,6 +116,128 @@ function sanitizeApprovalRespondParams(params: unknown): { approvalId: string; a
   if (typeof approved !== "boolean")
     throw { code: ErrorCodes.INVALID_PARAMS, message: "approved is required (boolean)" };
   return { approvalId, approved };
+}
+
+function sanitizeInputRequestListParams(params: unknown): {
+  limit: number;
+  offset: number;
+  taskId?: string;
+  status?: "pending" | "submitted" | "dismissed";
+} {
+  const p = (params ?? {}) as Any;
+  const rawLimit =
+    typeof p.limit === "number" && Number.isFinite(p.limit) ? Math.floor(p.limit) : 100;
+  const rawOffset =
+    typeof p.offset === "number" && Number.isFinite(p.offset) ? Math.floor(p.offset) : 0;
+  const limit = Math.min(Math.max(rawLimit, 1), 500);
+  const offset = Math.max(rawOffset, 0);
+  const taskId = typeof p.taskId === "string" ? p.taskId.trim() : "";
+  const rawStatus = typeof p.status === "string" ? p.status.trim() : "";
+  const status =
+    rawStatus === "pending" || rawStatus === "submitted" || rawStatus === "dismissed"
+      ? (rawStatus as "pending" | "submitted" | "dismissed")
+      : undefined;
+  return {
+    limit,
+    offset,
+    ...(taskId ? { taskId } : {}),
+    ...(status ? { status } : {}),
+  };
+}
+
+export function sanitizeInputRequestRespondParams(params: unknown): {
+  requestId: string;
+  status: "submitted" | "dismissed";
+  answers?: Record<string, { optionLabel?: string; otherText?: string }>;
+} {
+  const MAX_INPUT_REQUEST_OTHER_TEXT_LENGTH = 500000;
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const keyRegex = /^[a-z][a-z0-9_]*$/;
+  const p = (params ?? {}) as Any;
+  const requestId = typeof p.requestId === "string" ? p.requestId.trim() : "";
+  const status = typeof p.status === "string" ? p.status.trim() : "";
+  if (!requestId) throw { code: ErrorCodes.INVALID_PARAMS, message: "requestId is required" };
+  if (!uuidRegex.test(requestId)) {
+    throw { code: ErrorCodes.INVALID_PARAMS, message: "requestId must be a UUID" };
+  }
+  if (status !== "submitted" && status !== "dismissed") {
+    throw {
+      code: ErrorCodes.INVALID_PARAMS,
+      message: "status is required and must be 'submitted' or 'dismissed'",
+    };
+  }
+  const answers = p.answers;
+  if (answers !== undefined && (!answers || typeof answers !== "object" || Array.isArray(answers))) {
+    throw { code: ErrorCodes.INVALID_PARAMS, message: "answers must be an object when provided" };
+  }
+  let normalizedAnswers: Record<string, { optionLabel?: string; otherText?: string }> | undefined =
+    undefined;
+  if (answers && typeof answers === "object" && !Array.isArray(answers)) {
+    normalizedAnswers = {};
+    for (const [rawKey, rawValue] of Object.entries(answers as Record<string, unknown>)) {
+      const key = String(rawKey || "").trim();
+      if (!keyRegex.test(key)) {
+        throw {
+          code: ErrorCodes.INVALID_PARAMS,
+          message: `answers key "${rawKey}" must match /^[a-z][a-z0-9_]*$/`,
+        };
+      }
+
+      if (!rawValue || typeof rawValue !== "object" || Array.isArray(rawValue)) {
+        throw {
+          code: ErrorCodes.INVALID_PARAMS,
+          message: `answers["${key}"] must be an object`,
+        };
+      }
+
+      const value = rawValue as Record<string, unknown>;
+      const optionLabelRaw = value.optionLabel;
+      const otherTextRaw = value.otherText;
+      const normalizedValue: { optionLabel?: string; otherText?: string } = {};
+
+      if (optionLabelRaw !== undefined) {
+        if (typeof optionLabelRaw !== "string") {
+          throw {
+            code: ErrorCodes.INVALID_PARAMS,
+            message: `answers["${key}"].optionLabel must be a string`,
+          };
+        }
+        const optionLabel = optionLabelRaw.trim();
+        if (optionLabel.length < 1 || optionLabel.length > 200) {
+          throw {
+            code: ErrorCodes.INVALID_PARAMS,
+            message: `answers["${key}"].optionLabel must be 1..200 chars`,
+          };
+        }
+        normalizedValue.optionLabel = optionLabel;
+      }
+
+      if (otherTextRaw !== undefined) {
+        if (typeof otherTextRaw !== "string") {
+          throw {
+            code: ErrorCodes.INVALID_PARAMS,
+            message: `answers["${key}"].otherText must be a string`,
+          };
+        }
+        const otherText = otherTextRaw.trim();
+        if (otherText.length < 1 || otherText.length > MAX_INPUT_REQUEST_OTHER_TEXT_LENGTH) {
+          throw {
+            code: ErrorCodes.INVALID_PARAMS,
+            message: `answers["${key}"].otherText must be 1..${MAX_INPUT_REQUEST_OTHER_TEXT_LENGTH} chars`,
+          };
+        }
+        normalizedValue.otherText = otherText;
+      }
+
+      normalizedAnswers[key] = normalizedValue;
+    }
+  }
+  return {
+    requestId,
+    status,
+    ...(normalizedAnswers ? { answers: normalizedAnswers } : {}),
+  };
 }
 
 function sanitizeTaskListParams(params: unknown): {
@@ -590,6 +713,7 @@ export function registerControlPlaneMethods(
   const taskRepo = new TaskRepository(db);
   const workspaceRepo = new WorkspaceRepository(db);
   const approvalRepo = new ApprovalRepository(db);
+  const inputRequestRepo = new InputRequestRepository(db);
   const eventRepo = new TaskEventRepository(db);
   const channelRepo = new ChannelRepository(db);
   const agentDaemon = deps.agentDaemon;
@@ -903,6 +1027,30 @@ export function registerControlPlaneMethods(
     const { approvalId, approved } = sanitizeApprovalRespondParams(params);
     const status = await agentDaemon.respondToApproval(approvalId, approved);
     return { status };
+  });
+
+  server.registerMethod(Methods.INPUT_REQUEST_LIST, async (client, params) => {
+    requireScope(client, "admin");
+    const { limit, offset, taskId, status } = sanitizeInputRequestListParams(params);
+    const requests = inputRequestRepo.list({ limit, offset, ...(taskId ? { taskId } : {}), ...(status ? { status } : {}) });
+    const enriched = requests.map((request) => {
+      const task = request.taskId ? taskRepo.findById(request.taskId) : undefined;
+      return {
+        ...request,
+        ...(task
+          ? { taskTitle: task.title, workspaceId: task.workspaceId, taskStatus: task.status }
+          : {}),
+        questions: sanitizeForBroadcast(request.questions),
+        answers: sanitizeForBroadcast(request.answers),
+      };
+    });
+    return { inputRequests: enriched };
+  });
+
+  server.registerMethod(Methods.INPUT_REQUEST_RESPOND, async (client, params) => {
+    requireScope(client, "admin");
+    const validated = sanitizeInputRequestRespondParams(params);
+    return await agentDaemon.respondToInputRequest(validated);
   });
 
   // Channels (gateway)

@@ -273,6 +273,8 @@ See [Knowledge Graph](knowledge-graph.md) for the full architecture guide.
 Initialize and maintain a `.cowork/` directory inside each workspace for durable context, project scaffolding, and prompt injection.
 
 - Kit initialization with standard `.cowork/` structure and templates
+- First-run bootstrap lifecycle with `.cowork/BOOTSTRAP.md`, `.cowork/VIBES.md`, and `.cowork/LORE.md`
+- Lifecycle state tracking in `.cowork/workspace-state.json` (`bootstrapSeededAt`, `onboardingCompletedAt`)
 - Project contexts with `ACCESS.md`, `CONTEXT.md`, and `research/`
 - Markdown indexing for durable human-edited context — searchable via `search_memories`
 - Context injection into agent prompts automatically
@@ -857,6 +859,21 @@ Pre-built connectors for enterprise integrations. Install from **Settings > MCP 
 | **Slack** | Messaging (OAuth) | health, list channels, send/search messages |
 
 See [Enterprise Connectors](enterprise-connectors.md) for the full contract.
+
+---
+
+## Chat Integration Setup + Skill Proposals
+
+Two orchestration tools are available for runtime setup and governed expansion:
+
+| Tool | Purpose |
+|------|---------|
+| `integration_setup` | Chat-native Tier-1 integration management with `list`, `inspect`, and `configure`, including OAuth, health checks, and stale-plan protection via `expected_plan_hash` |
+| `skill_proposal` | Approval-gated skill proposal lifecycle (`create`, `list`, `approve`, `reject`) with workspace-local persistence and duplicate cooldown controls |
+
+Tier-1 providers currently covered by `integration_setup`: `resend`, `slack`, `gmail`, `google-calendar`, `google-drive`, `jira`, `linear`, `hubspot`.
+
+See [Integration Setup, Skill Proposals, and Bootstrap Lifecycle](integration-skill-bootstrap-lifecycle.md) for full request/response contracts and operational examples.
 
 ---
 

@@ -15,3 +15,9 @@ When a user reports a failure, error, or unexpected behavior:
 - Log capture is controlled by **Settings -> Appearance -> Developer logging** (default off).
 - A forced capture run can be started with `npm run dev:log`.
 - Optional local toggle state may exist at `.cowork/dev-log-settings.json`.
+
+## Dev Startup Commands
+
+- Use `npm run dev` for normal development startup; it routes through the log-aware wrapper.
+- Use `npm run dev:start` only when you explicitly need the raw underlying startup command.
+- Use `npm run dev:log` to force timestamped capture to `logs/dev-*.log` and `logs/dev-latest.log`.

@@ -2,6 +2,21 @@ import type { TaskEvent } from "../../shared/types";
 
 type TaskEventLike = Pick<TaskEvent, "type" | "legacyType" | "status" | "payload">;
 
+function isLikelyTaskCompletionPayload(payload: Record<string, unknown> | null): boolean {
+  if (!payload) return false;
+
+  if (typeof payload.terminalStatus === "string") return true;
+  if (typeof payload.resultSummary === "string" && payload.resultSummary.trim().length > 0) return true;
+  if (payload.outputSummary && typeof payload.outputSummary === "object") return true;
+  if (Array.isArray(payload.pendingChecklist) && payload.pendingChecklist.length > 0) return true;
+
+  if (typeof payload.message === "string" && /^\s*task completed\b/i.test(payload.message)) {
+    return true;
+  }
+
+  return false;
+}
+
 export function getEffectiveTaskEventType(event: TaskEventLike): string {
   if (!event.type.startsWith("timeline_")) return String(event.type);
 
@@ -28,6 +43,7 @@ export function getEffectiveTaskEventType(event: TaskEventLike): string {
       if (event.status === "failed") return "step_failed";
       if (event.status === "skipped") return "step_skipped";
       if (event.status === "cancelled") return "task_cancelled";
+      if (isLikelyTaskCompletionPayload(payload)) return "task_completed";
       return "step_completed";
     case "timeline_artifact_emitted":
       return "artifact_created";

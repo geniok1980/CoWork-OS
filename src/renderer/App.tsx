@@ -25,6 +25,8 @@ import {
   QueueStatus,
   ToastNotification,
   ApprovalRequest,
+  InputRequest,
+  InputRequestResponse,
   isTempWorkspaceId,
   ImageAttachment,
   MultiLlmConfig,
@@ -71,9 +73,29 @@ const RENDERER_NOISE_EVENT_TYPES = new Set([
 const RENDERER_DROPPED_EVENT_TYPES = new Set(["log", "llm_usage", "task_analysis"]);
 const RENDERER_THROTTLED_EVENT_TYPES = new Set(["progress_update", "executing", "llm_streaming"]);
 const RENDERER_NOISE_THROTTLE_MS = 250;
+const STALE_TASK_RECONCILE_INTERVAL_MS = 4_000;
+const STALE_TASK_RECONCILE_IDLE_WINDOW_MS = 12_000;
 
 function isRendererNoiseEvent(event: TaskEvent): boolean {
   return RENDERER_NOISE_EVENT_TYPES.has(getEffectiveTaskEventType(event));
+}
+
+function isTaskPossiblyRunning(status: Task["status"] | undefined): boolean {
+  return status === "executing" || status === "interrupted";
+}
+
+function isTerminalTaskStatus(status: Task["status"] | undefined): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function getLatestEventTimestamp(events: TaskEvent[]): number {
+  let latest = 0;
+  for (const event of events) {
+    if (typeof event.timestamp === "number" && Number.isFinite(event.timestamp)) {
+      latest = Math.max(latest, event.timestamp);
+    }
+  }
+  return latest;
 }
 
 function capTaskEvents(events: TaskEvent[]): TaskEvent[] {
@@ -106,6 +128,14 @@ function extractApprovalId(event: TaskEvent): string | null {
   const direct = event.payload?.approvalId;
   if (typeof direct === "string" && direct.length > 0) return direct;
   const nested = event.payload?.approval?.id;
+  if (typeof nested === "string" && nested.length > 0) return nested;
+  return null;
+}
+
+function extractInputRequestId(event: TaskEvent): string | null {
+  const direct = event.payload?.requestId;
+  if (typeof direct === "string" && direct.length > 0) return direct;
+  const nested = event.payload?.request?.id;
   if (typeof nested === "string" && nested.length > 0) return nested;
   return null;
 }
@@ -171,6 +201,7 @@ export function App() {
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
   const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const [sessionAutoApproveAll, setSessionAutoApproveAll] = useState(false);
+  const [pendingInputRequests, setPendingInputRequests] = useState<InputRequest[]>([]);
   const [unseenOutputTaskIds, setUnseenOutputTaskIds] = useState<string[]>([]);
   const [unseenCompletedTaskIds, setUnseenCompletedTaskIds] = useState<string[]>([]);
   const [rightPanelHighlight, setRightPanelHighlight] = useState<{
@@ -186,12 +217,15 @@ export function App() {
   const tasksRef = useRef<Task[]>([]);
   const sessionAutoApproveAllRef = useRef(false);
   const pendingApprovalsRef = useRef<Map<string, ApprovalRequest>>(new Map());
+  const pendingInputRequestsRef = useRef<Map<string, InputRequest>>(new Map());
   const eventsRef = useRef<TaskEvent[]>([]);
   const selectedTaskIdRef = useRef<string | null>(null);
   const currentViewRef = useRef<AppView>("main");
   const rightSidebarCollapsedRef = useRef(false);
   const currentWorkspaceRef = useRef<Workspace | null>(null);
   const noiseEventThrottleRef = useRef<Map<string, number>>(new Map());
+  const taskLastEventTimestampRef = useRef<Map<string, number>>(new Map());
+  const staleTaskReconcileInFlightRef = useRef(false);
 
   // Disclaimer state (null = loading)
   const [disclaimerAccepted, setDisclaimerAccepted] = useState<boolean | null>(null);
@@ -611,6 +645,31 @@ export function App() {
     }
   };
 
+  const syncPendingInputRequests = () => {
+    const pending = Array.from(pendingInputRequestsRef.current.values())
+      .filter((request) => request.status === "pending")
+      .sort((a, b) => b.requestedAt - a.requestedAt);
+    setPendingInputRequests(pending);
+  };
+
+  const handleInputRequestResponse = async (data: InputRequestResponse) => {
+    try {
+      const response = await window.electronAPI.respondToInputRequest(data);
+      // Keep the prompt visible while the daemon still reports an in-progress mutation.
+      if (response?.status !== "in_progress") {
+        pendingInputRequestsRef.current.delete(data.requestId);
+        syncPendingInputRequests();
+      }
+    } catch (error) {
+      console.error("Failed to respond to input request:", error);
+      addToast({
+        type: "error",
+        title: "Input response failed",
+        message: "Could not submit your response. Please try again.",
+      });
+    }
+  };
+
   const handleSessionApproveAllConfirm = () => {
     setSessionAutoApproveAll(true);
     dismissToast(APPROVAL_WARNING_TOAST_ID);
@@ -753,6 +812,29 @@ export function App() {
       });
   }, []);
 
+  useEffect(() => {
+    if (!window.electronAPI?.listInputRequests) return;
+    let cancelled = false;
+    window.electronAPI
+      .listInputRequests({ limit: 200, offset: 0, status: "pending" })
+      .then((requests) => {
+        if (cancelled) return;
+        pendingInputRequestsRef.current.clear();
+        for (const request of requests || []) {
+          if (request?.id) {
+            pendingInputRequestsRef.current.set(request.id, request);
+          }
+        }
+        syncPendingInputRequests();
+      })
+      .catch((error) => {
+        console.error("Failed to load pending input requests:", error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Subscribe to all task events to update task status
   useEffect(() => {
     if (!window.electronAPI?.onTaskEvent) return;
@@ -763,6 +845,11 @@ export function App() {
         ...rawEvent,
         type: effectiveType,
       } as TaskEvent;
+      const eventTimestamp =
+        typeof rawEvent?.timestamp === "number" && Number.isFinite(rawEvent.timestamp)
+          ? rawEvent.timestamp
+          : Date.now();
+      taskLastEventTimestampRef.current.set(event.taskId, eventTimestamp);
       // Update task status based on event type
       // Check if this is a new task we don't know about (e.g., sub-agent created)
       const isNewTask = !tasksRef.current.some((t) => t.id === event.taskId);
@@ -779,9 +866,21 @@ export function App() {
       const isSessionAutoApproval =
         event.type === "approval_requested" && sessionAutoApproveAllRef.current;
       const skipBlockedStateForAutoApproval = isAutoApprovalRequested || isSessionAutoApproval;
+      const isInputRequestResolutionEvent =
+        event.type === "input_request_resolved" || event.type === "input_request_dismissed";
+      const isTerminalInputResolution =
+        isInputRequestResolutionEvent &&
+        (event.payload?.terminalTask === true ||
+          isTerminalTaskStatus(tasksRef.current.find((t) => t.id === event.taskId)?.status));
       if (newStatus && !skipBlockedStateForAutoApproval) {
         setTasks((prev) =>
-          prev.map((t) => (t.id === event.taskId ? { ...t, status: newStatus } : t)),
+          prev.map((t) => {
+            if (t.id !== event.taskId) return t;
+            if (isTerminalInputResolution && isTerminalTaskStatus(t.status)) {
+              return t;
+            }
+            return { ...t, status: newStatus };
+          }),
         );
       }
 
@@ -839,6 +938,22 @@ export function App() {
         }
       }
 
+      if (event.type === "input_request_created") {
+        const request = event.payload?.request as InputRequest | undefined;
+        if (request?.id) {
+          pendingInputRequestsRef.current.set(request.id, request);
+          syncPendingInputRequests();
+        }
+      }
+
+      if (event.type === "input_request_resolved" || event.type === "input_request_dismissed") {
+        const requestId = extractInputRequestId(event);
+        if (requestId) {
+          pendingInputRequestsRef.current.delete(requestId);
+          syncPendingInputRequests();
+        }
+      }
+
       if (event.type === "workspace_permissions_updated") {
         const payloadWorkspace = event.payload?.workspace as Workspace | undefined;
         const payloadWorkspaceId = event.payload?.workspaceId as string | undefined;
@@ -869,14 +984,24 @@ export function App() {
 
       if (
         event.type === "task_paused" ||
-        (event.type === "approval_requested" && !skipBlockedStateForAutoApproval)
+        (event.type === "approval_requested" && !skipBlockedStateForAutoApproval) ||
+        event.type === "input_request_created"
       ) {
         const isApproval = event.type === "approval_requested";
+        const isInputRequest = event.type === "input_request_created";
         const task = tasksRef.current.find((t) => t.id === event.taskId);
-        const baseTitle = isApproval ? "Approval needed" : "Quick check-in";
+        const baseTitle = isApproval ? "Approval needed" : isInputRequest ? "Input needed" : "Quick check-in";
         const title = task?.title ? `${baseTitle} · ${task.title}` : baseTitle;
+        const requestQuestion =
+          isInputRequest && Array.isArray(event.payload?.request?.questions)
+            ? event.payload.request.questions[0]?.question
+            : undefined;
         const message =
-          (isApproval ? event.payload?.approval?.description : event.payload?.message) ||
+          (isApproval
+            ? event.payload?.approval?.description
+            : isInputRequest
+              ? requestQuestion
+              : event.payload?.message) ||
           "Quick pause - ready to continue once you respond.";
 
         void (async () => {
@@ -911,7 +1036,9 @@ export function App() {
       if (
         event.type === "task_resumed" ||
         event.type === "approval_granted" ||
-        event.type === "approval_denied"
+        event.type === "approval_denied" ||
+        event.type === "input_request_resolved" ||
+        event.type === "input_request_dismissed"
       ) {
         void (async () => {
           try {
@@ -1115,6 +1242,10 @@ export function App() {
       try {
         const historicalEvents = await window.electronAPI.getTaskEvents(selectedTaskId);
         setEvents(capTaskEvents(historicalEvents));
+        const latestTimestamp = getLatestEventTimestamp(historicalEvents);
+        if (latestTimestamp > 0) {
+          taskLastEventTimestampRef.current.set(selectedTaskId, latestTimestamp);
+        }
       } catch (error) {
         console.error("Failed to load historical events:", error);
         setEvents([]);
@@ -1122,6 +1253,78 @@ export function App() {
     };
 
     loadHistoricalEvents();
+  }, [selectedTaskId]);
+
+  // Reconcile stale executing/interrupted task state if event delivery falls behind.
+  useEffect(() => {
+    if (!selectedTaskId || !window.electronAPI?.getTask) return;
+
+    let cancelled = false;
+
+    const reconcileStaleSelectedTask = async () => {
+      if (staleTaskReconcileInFlightRef.current) return;
+
+      const taskId = selectedTaskIdRef.current;
+      if (!taskId) return;
+
+      const currentTask = tasksRef.current.find((t) => t.id === taskId);
+      if (!currentTask || !isTaskPossiblyRunning(currentTask.status)) return;
+
+      const lastEventTs = taskLastEventTimestampRef.current.get(taskId) ?? 0;
+      if (lastEventTs > 0 && Date.now() - lastEventTs < STALE_TASK_RECONCILE_IDLE_WINDOW_MS) {
+        return;
+      }
+
+      staleTaskReconcileInFlightRef.current = true;
+      try {
+        const canonicalTask = (await window.electronAPI.getTask(taskId)) as Task | null;
+        if (cancelled || !canonicalTask || canonicalTask.id !== taskId) return;
+
+        const statusChanged =
+          canonicalTask.status !== currentTask.status ||
+          canonicalTask.completedAt !== currentTask.completedAt ||
+          canonicalTask.updatedAt !== currentTask.updatedAt ||
+          canonicalTask.terminalStatus !== currentTask.terminalStatus ||
+          canonicalTask.error !== currentTask.error;
+
+        if (statusChanged) {
+          setTasks((prev) => {
+            let found = false;
+            const next = prev.map((t) => {
+              if (t.id !== taskId) return t;
+              found = true;
+              return { ...t, ...canonicalTask };
+            });
+            return found ? next : [canonicalTask, ...next];
+          });
+        }
+
+        if (!isTaskPossiblyRunning(canonicalTask.status) && window.electronAPI?.getTaskEvents) {
+          const refreshedEvents = await window.electronAPI.getTaskEvents(taskId);
+          if (cancelled) return;
+          setEvents(capTaskEvents(refreshedEvents));
+          const latestTimestamp = getLatestEventTimestamp(refreshedEvents);
+          taskLastEventTimestampRef.current.set(
+            taskId,
+            latestTimestamp > 0 ? latestTimestamp : Date.now(),
+          );
+        }
+      } catch (error) {
+        console.error("Failed to reconcile stale task status:", error);
+      } finally {
+        staleTaskReconcileInFlightRef.current = false;
+      }
+    };
+
+    void reconcileStaleSelectedTask();
+    const timer = window.setInterval(() => {
+      void reconcileStaleSelectedTask();
+    }, STALE_TASK_RECONCILE_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [selectedTaskId]);
 
   // Load historical events from dispatched child tasks
@@ -1309,6 +1512,14 @@ export function App() {
   };
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId);
+  const activeInputRequest = useMemo(() => {
+    if (!selectedTaskId) return null;
+    const candidates = pendingInputRequests.filter(
+      (request) => request.taskId === selectedTaskId && request.status === "pending",
+    );
+    if (candidates.length === 0) return null;
+    return [...candidates].sort((a, b) => b.requestedAt - a.requestedAt)[0];
+  }, [pendingInputRequests, selectedTaskId]);
 
   const handleSendMessage = async (message: string, images?: ImageAttachment[]) => {
     if (!selectedTaskId) return;
@@ -1862,6 +2073,20 @@ export function App() {
               }}
               onStopTask={handleCancelTask}
               onWrapUpTask={handleWrapUpTask}
+              inputRequest={activeInputRequest}
+              onSubmitInputRequest={(requestId, answers) => {
+                void handleInputRequestResponse({
+                  requestId,
+                  status: "submitted",
+                  answers,
+                });
+              }}
+              onDismissInputRequest={(requestId) => {
+                void handleInputRequestResponse({
+                  requestId,
+                  status: "dismissed",
+                });
+              }}
               onOpenBrowserView={handleOpenBrowserView}
               onViewTaskOutputs={(taskId, primaryOutputPath) => {
                 setCurrentView("main");

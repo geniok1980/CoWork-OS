@@ -127,6 +127,30 @@ describe("task event visibility helpers", () => {
         "executing",
       ),
     ).toBe(false);
+    expect(
+      shouldShowTaskEventInSummaryMode(
+        makeEvent("timeline_step_started", {
+          groupId: "tools:step:build:123",
+          step: { id: "tool_lane:step:use-1", description: "Running web_search" },
+        }),
+        "executing",
+      ),
+    ).toBe(false);
+    expect(
+      shouldShowTaskEventInSummaryMode(
+        makeEvent(
+          "tool_result",
+          {
+            groupId: "tools:step:build:123",
+            tool: "web_search",
+            toolUseId: "use-1",
+            toolCallIndex: 1,
+          },
+          { groupId: "tools:step:build:123" },
+        ),
+        "executing",
+      ),
+    ).toBe(false);
   });
 
   it("does not hide custom non-stage group events for completed tasks", () => {

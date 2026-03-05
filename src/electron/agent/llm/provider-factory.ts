@@ -1,6 +1,5 @@
 import * as fs from "fs";
 import * as path from "path";
-import { getModels as getPiAiModels } from "@mariozechner/pi-ai";
 import {
   LLMProvider,
   LLMProviderConfig,
@@ -42,6 +41,7 @@ import {
 import type { AgentConfig, CustomProviderConfig, LlmProfile } from "../../../shared/types";
 import { getUserDataDir } from "../../utils/user-data-dir";
 import { getSafeStorage } from "../../utils/safe-storage";
+import { loadPiAiModule } from "./pi-ai-loader";
 
 const LEGACY_SETTINGS_FILE = "llm-settings.json";
 const MASKED_VALUE = "***configured***";
@@ -1892,14 +1892,16 @@ export class LLMProviderFactory {
         const modelList =
           settings.cachedPiModels && settings.cachedPiModels.length > 0
             ? settings.cachedPiModels
-            : PiProvider.getAvailableModels(settings.pi?.provider).map((m) => ({
-                key: m.id,
-                displayName: m.name,
-                description: m.description,
-              }));
+            : [
+                {
+                  key: currentModel,
+                  displayName: currentModel,
+                  description: "Selected Pi model",
+                },
+              ];
         return {
           currentModel,
-          models: ensureCurrentModel(modelList, currentModel),
+          models: ensureCurrentModel(modelList, currentModel, "Selected Pi model"),
         };
       }
 
@@ -2478,7 +2480,8 @@ export class LLMProviderFactory {
     if (accessToken && refreshToken && !key) {
       console.log("[OpenAI] Using OAuth - fetching models from pi-ai SDK...");
       try {
-        const piAiModels = getPiAiModels("openai-codex");
+        const { getModels } = await loadPiAiModule();
+        const piAiModels = getModels("openai-codex");
         const models = piAiModels.map((m) => ({
           id: m.id,
           name: m.name || this.formatOpenAIModelName(m.id),
@@ -2661,14 +2664,14 @@ export class LLMProviderFactory {
   static async getPiModels(
     piProvider?: string,
   ): Promise<Array<{ id: string; name: string; description: string }>> {
-    return PiProvider.getAvailableModels(piProvider);
+    return await PiProvider.getAvailableModels(piProvider);
   }
 
   /**
    * Get available Pi backend providers
    */
-  static getPiProviders(): Array<{ id: string; name: string }> {
-    return PiProvider.getAvailableProviders();
+  static async getPiProviders(): Promise<Array<{ id: string; name: string }>> {
+    return await PiProvider.getAvailableProviders();
   }
 
   /**

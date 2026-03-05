@@ -147,6 +147,15 @@ export class CanvasManager {
       throw new Error("URL cannot be empty");
     }
 
+    const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+    if (hasScheme) {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error(`Only http and https URLs are supported for canvas browsing. Received ${parsed.protocol}`);
+      }
+      return parsed.toString();
+    }
+
     const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
     const parsed = new URL(withScheme);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {

@@ -241,6 +241,77 @@ describe("TaskExecutor continuation budgets", () => {
     vi.restoreAllMocks();
   });
 
+  it("does not hard-fail on window exhaustion in adaptive_unbounded mode", () => {
+    vi.spyOn(GuardrailManager, "isIterationLimitExceeded").mockReturnValue({
+      exceeded: false,
+      iterations: 0,
+      limit: 50,
+    });
+    vi.spyOn(GuardrailManager, "isTokenBudgetExceeded").mockReturnValue({
+      exceeded: false,
+      used: 0,
+      limit: 100000,
+    });
+    vi.spyOn(GuardrailManager, "isCostBudgetExceeded").mockReturnValue({
+      exceeded: false,
+      cost: 0,
+      limit: 1,
+    });
+
+    const executor = makeExecutor({
+      globalTurnCount: 60,
+      maxGlobalTurns: 60,
+      lifetimeTurnCount: 100,
+      maxLifetimeTurns: 3000,
+      turnBudgetPolicy: "adaptive_unbounded",
+      turnlessExecutionV4Enabled: true,
+      turnWindowSoftExhaustedNotified: false,
+    });
+
+    expect(() => executor.checkBudgets()).not.toThrow();
+    expect(executor.emitEvent).toHaveBeenCalledWith(
+      "turn_window_soft_exhausted",
+      expect.objectContaining({
+        policy: "adaptive_unbounded",
+        turnsUsed: 60,
+        windowTurnCap: 60,
+      }),
+    );
+
+    vi.restoreAllMocks();
+  });
+
+  it("still enforces hard window policy when explicitly configured", () => {
+    vi.spyOn(GuardrailManager, "isIterationLimitExceeded").mockReturnValue({
+      exceeded: false,
+      iterations: 0,
+      limit: 50,
+    });
+    vi.spyOn(GuardrailManager, "isTokenBudgetExceeded").mockReturnValue({
+      exceeded: false,
+      used: 0,
+      limit: 100000,
+    });
+    vi.spyOn(GuardrailManager, "isCostBudgetExceeded").mockReturnValue({
+      exceeded: false,
+      cost: 0,
+      limit: 1,
+    });
+
+    const executor = makeExecutor({
+      globalTurnCount: 60,
+      maxGlobalTurns: 60,
+      lifetimeTurnCount: 100,
+      maxLifetimeTurns: 3000,
+      turnBudgetPolicy: "hard_window",
+      turnlessExecutionV4Enabled: true,
+    });
+
+    expect(() => executor.checkBudgets()).toThrow(/Global turn limit exceeded/i);
+
+    vi.restoreAllMocks();
+  });
+
   it("evaluates token budget using cumulative usage across continuation windows", () => {
     const tokenBudgetSpy = vi
       .spyOn(GuardrailManager, "isTokenBudgetExceeded")

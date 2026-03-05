@@ -252,6 +252,8 @@ export const Methods = {
   // Approvals
   APPROVAL_RESPOND: "approval.respond",
   APPROVAL_LIST: "approval.list",
+  INPUT_REQUEST_LIST: "input_request.list",
+  INPUT_REQUEST_RESPOND: "input_request.respond",
 
   // Task operations
   TASK_CREATE: "task.create",

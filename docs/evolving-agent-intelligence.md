@@ -1,0 +1,253 @@
+# Evolving Agent Intelligence
+
+CoWork OS has six independent memory subsystems, a full personality engine, 15+ channels, and a playbook system that auto-captures what worked. The **Evolving Agent Intelligence** layer connects these systems so the agent visibly improves over time — reducing correction overhead, aligning to communication preferences, and surfacing quantifiable ROI metrics.
+
+All improvements are opt-in (admin-toggleable), rate-limited, and governed by the existing guardrail system. No changes to the security or local-first architecture.
+
+---
+
+## 1. Unified Memory Synthesizer
+
+**File:** `src/electron/memory/MemorySynthesizer.ts`
+
+### Problem
+
+Before this change, the system prompt was assembled by concatenating 6 independent context strings (UserProfile, RelationshipMemory, Playbook, KnowledgeGraph, Memory, WorkspaceKit). They could contain duplicate facts, contradictory information, and collectively waste the token budget on redundant content.
+
+### Solution
+
+`MemorySynthesizer.synthesize()` collects all 6 sources into typed `MemoryFragment` objects, then:
+
+1. **Deduplicates** by normalizing text to 120-character fingerprints — near-duplicate fragments are merged, keeping the highest-confidence version.
+2. **Ranks** by a composite score: `relevance × 0.45 + confidence × 0.3 + recency × 0.25` (recency uses exponential decay over 30 days).
+3. **Respects a token budget** — fragments are included in score order until the budget is exhausted.
+4. **Groups by source** for readability (You & the User, Past Task Patterns, Recalled Memories, Known Entities).
+5. Wraps output in `<cowork_synthesized_memory>` XML tags with source attribution.
+
+Falls back gracefully to legacy per-source injection if the synthesizer throws.
+
+### Configuration
+
+No guardrail flag — always active when memory injection is enabled for the task.
+
+### Output format
+
+```xml
+<cowork_synthesized_memory>
+You & the User:
+- [UserProfile fact]
+- [RelationshipMemory item]
+
+Past Task Patterns:
+- [Playbook entry]
+
+Recalled Memories:
+- [MemoryService item]
+
+Known Entities:
+- [KnowledgeGraph entity]
+</cowork_synthesized_memory>
+```
+
+---
+
+## 2. Adaptive Style Engine
+
+**File:** `src/electron/memory/AdaptiveStyleEngine.ts`
+
+### Problem
+
+`PersonalityManager` has rich response style settings (emoji usage, response length, explanation depth, code comment style) but they are 100% manual. The agent never learns from observed user behaviour.
+
+### Solution
+
+`AdaptiveStyleEngine` observes every user message and feedback signal, then gradually shifts `PersonalityManager` settings within configurable rate limits.
+
+**Signals observed:**
+| Signal | How detected | Effect |
+|--------|-------------|--------|
+| Short messages | Rolling average of last 50 message lengths | Shifts `responseLength` toward `"terse"` |
+| Emoji in messages | Fraction of messages containing emoji | Shifts `emojiUsage` toward `"moderate"` |
+| Technical vocabulary | Density of tech terms (docker, kubernetes, nginx, …) | Shifts `explanationDepth` toward `"expert"` |
+| "Too verbose" feedback | Regex on feedback reason | Shifts `responseLength` toward `"terse"` |
+| "More detail" feedback | Regex on feedback reason | Shifts `responseLength` toward `"detailed"` |
+| "No emoji" feedback | Regex on feedback reason | Shifts `emojiUsage` toward `"none"` |
+| Expert/beginner signals | Regex on feedback reason | Shifts `explanationDepth` |
+
+**Rate limiting:** Maximum `adaptiveStyleMaxDriftPerWeek` one-level shifts per 7-day window. Counter resets weekly. State persisted via `SecureSettingsRepository`.
+
+**Audit trail:** Every adaptation is recorded in `getAdaptationHistory()` with dimension, from/to values, reason, and timestamp.
+
+### Configuration (GuardrailSettings)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `adaptiveStyleEnabled` | `false` | Master enable — no observation or adaptation when off |
+| `adaptiveStyleMaxDriftPerWeek` | `1` | Max style-level shifts per 7-day period |
+
+### Integration points
+
+- `daemon.ts` — calls `AdaptiveStyleEngine.observe(text)` after every `UserProfileService.ingestUserMessage()`
+- `daemon.ts` — calls `AdaptiveStyleEngine.observeFeedback(decision, reason)` alongside `UserProfileService.ingestUserFeedback()`
+
+---
+
+## 3. Playbook-to-Skill Auto-Promotion Pipeline
+
+**File:** `src/electron/memory/PlaybookSkillPromoter.ts`
+
+### Problem
+
+`PlaybookService` detects repeated successful patterns. `SkillProposalService` has a full admin approval workflow for new skills. They were not connected — no automation converted proven patterns into governed, reusable skills.
+
+### Solution
+
+When a playbook pattern is reinforced **3+ times** (configurable `threshold`), `PlaybookSkillPromoter.maybePropose()` auto-generates a skill proposal with:
+
+- **Problem statement** — "Recurring task pattern detected (reinforced N times): …"
+- **Evidence** — reinforcement count, common tools, example requests
+- **Draft skill** — ID, name, description, prompt template (generated from evidence), icon, category
+- **Required tools** list
+
+The proposal enters the existing `SkillProposalService` governance workflow — an admin sees the evidence and approves or rejects with one click. No skill is created automatically.
+
+**Flow:**
+```
+Task completes successfully
+  → PlaybookService.reinforceEntry() writes reinforcement memory
+  → PlaybookService.events.emit("pattern-reinforced")
+  → executor.ts calls PlaybookSkillPromoter.maybePropose() (async, fire-and-forget)
+    → findCandidates() groups reinforcement memories by normalized task description
+    → if count ≥ threshold: proposeSkill() via SkillProposalService.create()
+    → proposal enters admin review queue
+```
+
+**Cooldown:** 10 minutes per workspace between promotion checks. Max 1 proposal per check.
+
+**Dedup:** `SkillProposalService.create()` handles duplicate detection — returns `duplicateOf` if a similar proposal already exists.
+
+### Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `DEFAULT_PROMOTION_THRESHOLD` | `3` | Min reinforcements before proposing |
+| `PROMOTION_COOLDOWN_MS` | `10 min` | Min time between checks per workspace |
+| `MAX_PROPOSALS_PER_CHECK` | `1` | Max new proposals per check |
+
+---
+
+## 4. Cross-Channel Persona Coherence
+
+**File:** `src/electron/memory/ChannelPersonaAdapter.ts`
+
+### Problem
+
+The agent connects to 15+ channels but delivers the same personality regardless of channel norms. A Slack reply should feel different from an email reply — not because the agent has different knowledge or values, but because each platform has its own communication culture.
+
+### Solution
+
+`ChannelPersonaAdapter.adaptForChannel()` takes the detected `originChannel` (from `task.agentConfig.originChannel`) and returns a channel-specific directive that is **appended to** (not replacing) the core personality prompt.
+
+**Channel profiles:**
+
+| Channel | Length | Formatting | Emoji | Formal framing |
+|---------|--------|-----------|-------|----------------|
+| `slack` | Shorter | Structured | No | No |
+| `email` | Longer | Structured | No | Yes (greeting + sign-off) |
+| `whatsapp` | Shorter | Plain | Yes | No |
+| `imessage` | Shorter | Plain | Yes | No |
+| `signal` | Shorter | Plain | No | No |
+| `discord` | Normal | Structured + markdown | Yes | No |
+| `teams` | Normal | Structured | No | No |
+| `telegram` | Shorter | Minimal | No | No |
+| `mattermost` | Normal | Structured | No | No |
+| `matrix` | Normal | Structured | No | No |
+| `googlechat` | Shorter | Plain | No | No |
+| `twitch` | Shorter | Plain | Yes | No |
+
+**Group/public context overlay:** When `gatewayContext` is `"group"` or `"public"`, an additional privacy-aware directive is layered on (do not share sensitive information, be aware others are reading).
+
+### Configuration (GuardrailSettings)
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `channelPersonaEnabled` | `false` | Enable channel-specific persona adaptation |
+
+### Integration
+
+`executor.ts` injects the channel directive when assembling the system prompt:
+```typescript
+const channelDirective = ChannelPersonaAdapter.adaptForChannel(
+  task.agentConfig.originChannel,
+  gatewayContext,
+);
+// channelDirective is appended to personalityPrompt before budgeting
+```
+
+---
+
+## 5. Evolution Metrics Service
+
+**File:** `src/electron/memory/EvolutionMetricsService.ts`
+
+### Problem
+
+CoWork OS tracks basic relationship stats (tasks completed, days together) but has no concept of measuring agent *improvement over time*. For enterprise buyers, quantifiable ROI is the difference between a tool and a strategic investment.
+
+### Solution
+
+`EvolutionMetricsService.computeSnapshot()` computes 5 metrics on-demand from existing service data:
+
+| Metric ID | Label | Source | Interpretation |
+|-----------|-------|--------|----------------|
+| `correction_rate` | Correction Rate | PlaybookService (failure entries) | Lower this week vs. prior 3-week avg → "improving" |
+| `adaptation_velocity` | Style Adaptations | AdaptiveStyleEngine history | Any adaptations applied → agent is learning |
+| `knowledge_growth` | Knowledge Graph | KnowledgeGraphService.getStats() | Entity and relationship count |
+| `task_success_rate` | Task Success Rate | PlaybookService (success/failure entries) | Percentage of recorded tasks that succeeded |
+| `style_alignment` | Style Alignment | AdaptiveStyleEngine history | Ratio of proactive vs. feedback-driven adaptations |
+
+Each metric includes a `trend` (`"improving"` / `"stable"` / `"declining"`) and a human-readable `detail` string.
+
+**Overall Score:** Composite 0–100 score weighted by trend directions and bonus points for high success rate and large knowledge graph.
+
+### Daily Briefing integration
+
+The `evolution_metrics` section is added to `BriefingSectionType` and enabled by default in `DEFAULT_BRIEFING_CONFIG`. `DailyBriefingService.buildEvolutionMetrics()` calls `EvolutionMetricsService.computeSnapshot()` and maps metrics to `BriefingItem[]`.
+
+Example briefing output:
+```
+Agent Evolution (Day 45, 123 tasks completed):
+  [+] Task Success Rate: 84% — 103 succeeded, 20 failed out of 123 recorded tasks
+  [+] Knowledge Graph: 47 entities — 47 entities, 82 relationships, 310 observations
+  [=] Correction Rate: 2/week — Correction rate is stable
+  [+] Style Adaptations: 3 total — 89 messages observed, 3 adaptations applied
+  [+] Style Alignment: 100% — No adaptations yet — using default style
+  Overall Evolution Score: 72/100
+```
+
+---
+
+## Governance Summary
+
+All 5 improvements respect CoWork OS's security-first positioning:
+
+| Improvement | Guardrail flag | Default | Rate limit | Audit trail |
+|-------------|---------------|---------|------------|-------------|
+| Memory Synthesizer | — | Always on (when memory enabled) | Token budget | Source attribution in output |
+| Adaptive Style Engine | `adaptiveStyleEnabled` | Off | `adaptiveStyleMaxDriftPerWeek` (default 1) | `getAdaptationHistory()` |
+| Playbook-to-Skill | — | Always active (post-task hook) | 10 min cooldown, max 1/check | Full proposal review workflow |
+| Channel Persona | `channelPersonaEnabled` | Off | — | Visible in system prompt |
+| Evolution Metrics | — | Computed on-demand | — | Read-only, no mutations |
+
+---
+
+## Test Coverage
+
+| Service | Test file | Tests |
+|---------|-----------|-------|
+| MemorySynthesizer | `src/electron/memory/__tests__/MemorySynthesizer.test.ts` | 12 |
+| AdaptiveStyleEngine | `src/electron/memory/__tests__/AdaptiveStyleEngine.test.ts` | 17 |
+| PlaybookSkillPromoter | `src/electron/memory/__tests__/PlaybookSkillPromoter.test.ts` | 8 |
+| ChannelPersonaAdapter | `src/electron/memory/__tests__/ChannelPersonaAdapter.test.ts` | 16 |
+| EvolutionMetricsService | `src/electron/memory/__tests__/EvolutionMetricsService.test.ts` | 9 |
+| **Total** | | **62** |

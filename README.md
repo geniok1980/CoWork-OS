@@ -44,7 +44,8 @@
 - **Agent teams** — Multi-agent collaboration with shared checklists, collaborative mode, multi-LLM synthesis, and persistent teams.
 - **Think With Me mode** — Socratic brainstorming that helps you clarify thinking without executing actions.
 - **Build Mode** — Go from idea to working prototype with a phased canvas workflow (Concept → Plan → Scaffold → Iterate) and named checkpoints.
-- **AI Playbook** — Auto-captures what worked from successful tasks and injects relevant patterns into future prompts.
+- **AI Playbook** — Auto-captures what worked from successful tasks and injects relevant patterns into future prompts. Repeated patterns auto-promote to governed, one-click-approvable skills via the Playbook-to-Skill pipeline.
+- **Evolving Intelligence** — Unified Memory Synthesizer merges all 6 memory subsystems into a single coherent context block. Adaptive Style Engine learns your communication preferences from message patterns and feedback. Evolution Metrics dashboard quantifies improvement over time (correction rate, knowledge growth, style alignment).
 - **Usage Insights** — Dashboard showing task stats, cost/token tracking by model, activity heatmaps, top skills, and per-pack analytics.
 - **ChatGPT History Import** — Import your full ChatGPT conversation history. CoWork OS instantly knows your preferences, past projects, and context — no cold start. All data stays encrypted on your machine and never leaves it.
 - **Security-first** — Approval workflows, sandboxed execution, configurable guardrails, encrypted storage, and 3200+ tests.
@@ -54,7 +55,17 @@
 
 ### Recent Platform Updates
 
-The latest runtime updates add four core capabilities:
+The latest updates add five evolving agent intelligence capabilities:
+
+- **Unified Memory Synthesizer** — All 6 memory subsystems (profile, relationship, playbook, knowledge graph, notes, workspace kit) now merge into a single deduplicated, relevance-ranked context block, eliminating redundancy and contradiction in the system prompt.
+- **Adaptive Style Engine** — The agent observes your message patterns (length, emoji use, technical vocabulary) and feedback signals, then gradually shifts its response style to match your preferences. Rate-limited and admin-toggleable.
+- **Playbook-to-Skill Auto-Promotion** — When a task pattern is successfully reinforced 3+ times, the agent auto-drafts a skill proposal with evidence and a prompt template, routed through the existing admin approval workflow.
+- **Cross-Channel Persona Coherence** — The agent's core personality adapts its delivery per channel: concise bullets on Slack, formal structure in email, short messages on WhatsApp — same knowledge, channel-appropriate voice.
+- **Evolution Metrics Dashboard** — Track agent improvement over time: correction rate trend, adaptation velocity, knowledge graph growth, task success rate, and style alignment score. Surfaced in the daily briefing.
+
+See [Evolving Agent Intelligence](docs/evolving-agent-intelligence.md) for architecture details.
+
+Previous updates added four core runtime capabilities:
 
 - **Tier-1 chat integration setup** with `integration_setup` (`list`, `inspect`, `configure`), OAuth support, and stale-plan safety via `expected_plan_hash`
 - **Approval-gated skill expansion** with `skill_proposal` (`create`, `list`, `approve`, `reject`) and workspace-local proposal persistence

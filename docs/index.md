@@ -15,6 +15,9 @@ hero:
       text: Features
       link: /features
     - theme: alt
+      text: Evolving Agent Intelligence
+      link: /evolving-agent-intelligence
+    - theme: alt
       text: Reliability Flywheel
       link: /reliability-flywheel
     - theme: alt

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-03-07
+
+### Added
+- **Unified Memory Synthesizer**: New `MemorySynthesizer` combines all 6 memory subsystems (UserProfile, RelationshipMemory, Playbook, KnowledgeGraph, Memory, WorkspaceKit) into a single deduplicated, relevance-ranked context block injected into the system prompt. Replaces fragmented per-source injection — reduces token waste, eliminates contradictions, and produces a single `<cowork_synthesized_memory>` block with source attribution for audit trails. Located: `src/electron/memory/MemorySynthesizer.ts`.
+- **Adaptive Style Engine**: New `AdaptiveStyleEngine` observes user message patterns (length distribution, emoji frequency, technical vocabulary density) and feedback signals, then gradually adjusts `PersonalityManager` response style preferences. Adaptations are rate-limited by the new `adaptiveStyleMaxDriftPerWeek` guardrail (default 1 shift/week), fully auditable via `getAdaptationHistory()`, and disabled by default (`adaptiveStyleEnabled: false`). Located: `src/electron/memory/AdaptiveStyleEngine.ts`.
+- **Playbook-to-Skill Auto-Promotion Pipeline**: New `PlaybookSkillPromoter` bridges `PlaybookService` and `SkillProposalService`. When a task pattern is reinforced 3+ times (configurable threshold), the service auto-generates a skill proposal with evidence, required tools, and a draft prompt template — routed through the existing admin approval workflow. `PlaybookService` now emits a `pattern-reinforced` event via its new static `EventEmitter`. Per-workspace cooldown (10 min) prevents proposal spam. Located: `src/electron/memory/PlaybookSkillPromoter.ts`.
+- **Cross-Channel Persona Coherence**: New `ChannelPersonaAdapter` applies channel-specific communication directives on top of the core personality — Slack gets concise/bullet-friendly output, Email gets formal structure with greeting/sign-off, WhatsApp/iMessage/Signal get short conversational replies, Discord gets markdown-rich formatting, and Teams gets professional structured output. Controlled by the new `channelPersonaEnabled` guardrail (default off). Located: `src/electron/memory/ChannelPersonaAdapter.ts`.
+- **Evolution Metrics Service**: New `EvolutionMetricsService` computes 5 evolution metrics on-demand: correction rate trend, adaptation velocity, knowledge graph growth, task success rate, and style alignment score. Produces an overall evolution score (0–100) and formats a briefing-ready summary. Integrated into `DailyBriefingService` as the new `evolution_metrics` section. Located: `src/electron/memory/EvolutionMetricsService.ts`.
+- **New guardrail settings**: `adaptiveStyleEnabled` (bool, default `false`), `adaptiveStyleMaxDriftPerWeek` (int, default `1`), and `channelPersonaEnabled` (bool, default `false`) added to `GuardrailSettings` and `GuardrailManager` defaults.
+- **New briefing section**: `evolution_metrics` added to `BriefingSectionType` and `DEFAULT_BRIEFING_CONFIG` (enabled by default). `DailyBriefingService.generateBriefing` is now async to support the evolution metrics computation.
+
+### Changed
+- **Memory injection in executor**: The system prompt assembly now calls `MemorySynthesizer.synthesize()` in place of 6 independent context calls (`kitContext`, `memoryContext`, `playbookContext`). Falls back to legacy per-source injection if the synthesizer throws. Combined token budget is preserved (1820 tokens).
+- **Personality prompt in executor**: When `task.agentConfig.originChannel` is set, the personality prompt is augmented with a channel-specific directive from `ChannelPersonaAdapter` before being injected into the system prompt.
+- **`AdaptiveStyleEngine.observe()`** hooked into `daemon.ts` after every `UserProfileService.ingestUserMessage()` call. `observeFeedback()` is called alongside `UserProfileService.ingestUserFeedback()`.
+- **`PlaybookService.reinforceEntry()`** now emits a `pattern-reinforced` event after writing reinforcement memories. The executor calls `PlaybookSkillPromoter.maybePropose()` asynchronously post-task.
+
 ## [0.4.13] - 2026-03-05
 
 ### Added

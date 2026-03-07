@@ -152,16 +152,27 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 
 #### AI Playbook
 - [x] Auto-capture successful patterns (approach, outcome, tools used)
-- [x] Lesson capture from task failures
-- [x] Relevant playbook injection into system prompts
+- [x] Lesson capture from task failures with error classification (8 categories)
+- [x] Relevant playbook injection into system prompts (time-decayed relevance)
+- [x] Reinforcement: successful pattern repetitions are boosted in future retrieval
+- [x] EventEmitter on `PlaybookService` emits `pattern-reinforced` for downstream consumers
 - [x] Playbook viewer in Settings > AI Playbook
 - [x] Located: `src/electron/memory/PlaybookService.ts`
 
+#### Evolving Agent Intelligence
+
+- [x] **Memory Synthesizer**: Merges all 6 memory subsystems into a single context block per task. Deduplicates via fingerprinting, ranks by composite score (relevance 45%, confidence 30%, recency 25%), respects token budget. Located: `src/electron/memory/MemorySynthesizer.ts`
+- [x] **Adaptive Style Engine**: Observes user message patterns and feedback to shift `PersonalityManager` response style. Rate-limited (configurable max drift/week), auditable history, disabled by default. Located: `src/electron/memory/AdaptiveStyleEngine.ts`
+- [x] **Playbook-to-Skill Promoter**: When a pattern is reinforced 3+ times, auto-generates a skill proposal (with evidence and draft prompt) via `SkillProposalService`. Per-workspace cooldown prevents spam. Located: `src/electron/memory/PlaybookSkillPromoter.ts`
+- [x] **Channel Persona Adapter**: Layers channel-specific communication directives on top of the core personality (Slack: concise, Email: formal, WhatsApp: casual). Controlled by `channelPersonaEnabled` guardrail. Located: `src/electron/memory/ChannelPersonaAdapter.ts`
+- [x] **Evolution Metrics Service**: Computes correction rate trend, adaptation velocity, knowledge graph growth, task success rate, and style alignment. Produces 0–100 evolution score. Integrated into daily briefing as `evolution_metrics` section. Located: `src/electron/memory/EvolutionMetricsService.ts`
+
 #### Daily Briefing
 - [x] Morning briefing with task stats, memory highlights, goal-based priorities
+- [x] Evolution metrics section (correction rate, knowledge growth, style alignment score)
 - [x] Auto-created disabled cron job on first workspace load
 - [x] Configurable time picker and channel delivery
-- [x] Located: `src/electron/reports/DailyBriefingService.ts`
+- [x] Located: `src/electron/briefing/DailyBriefingService.ts`
 
 #### Build Mode
 - [x] Four-phase canvas workflow (Concept → Plan → Scaffold → Iterate)

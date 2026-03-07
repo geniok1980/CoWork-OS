@@ -18,6 +18,7 @@ import {
 } from "./openai-compatible";
 
 const DEFAULT_AZURE_API_VERSION = "2024-02-15-preview";
+const AZURE_MAX_TOOLS = 128;
 
 const isToolResult = (item: LLMContent | LLMToolResult): item is LLMToolResult =>
   item?.type === "tool_result";
@@ -85,7 +86,13 @@ export class AzureOpenAIProvider implements LLMProvider {
     const messages = toOpenAICompatibleMessages(request.messages, request.system, {
       supportsImages: true,
     });
-    const tools = request.tools ? toOpenAICompatibleTools(request.tools) : undefined;
+    const rawTools = request.tools ? toOpenAICompatibleTools(request.tools) : undefined;
+    if (rawTools && rawTools.length > AZURE_MAX_TOOLS) {
+      console.warn(
+        `[Azure] Tool list truncated: ${rawTools.length} → ${AZURE_MAX_TOOLS} (Azure limit). Tools beyond index ${AZURE_MAX_TOOLS - 1} will not be available for this call.`,
+      );
+    }
+    const tools = rawTools ? rawTools.slice(0, AZURE_MAX_TOOLS) : undefined;
     const tokenField = useMaxCompletionTokens ? "max_completion_tokens" : "max_tokens";
 
     return {
@@ -204,7 +211,13 @@ export class AzureOpenAIProvider implements LLMProvider {
 
   private buildResponsesBody(request: LLMRequest): Record<string, Any> {
     const input = this.buildResponsesInput(request.messages);
-    const tools = request.tools ? this.toResponsesTools(request.tools) : undefined;
+    const rawResponsesTools = request.tools ? this.toResponsesTools(request.tools) : undefined;
+    if (rawResponsesTools && rawResponsesTools.length > AZURE_MAX_TOOLS) {
+      console.warn(
+        `[Azure] Tool list truncated: ${rawResponsesTools.length} → ${AZURE_MAX_TOOLS} (Azure limit). Tools beyond index ${AZURE_MAX_TOOLS - 1} will not be available for this call.`,
+      );
+    }
+    const tools = rawResponsesTools ? rawResponsesTools.slice(0, AZURE_MAX_TOOLS) : undefined;
     return {
       model: request.model || this.deployment,
       input,

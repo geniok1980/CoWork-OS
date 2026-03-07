@@ -10,7 +10,8 @@ export type BriefingSectionType =
   | "priority_review"
   | "upcoming_jobs"
   | "open_loops"
-  | "channel_digest";
+  | "channel_digest"
+  | "evolution_metrics";
 
 export interface BriefingItem {
   label: string;
@@ -56,6 +57,7 @@ export const DEFAULT_BRIEFING_CONFIG: BriefingConfig = {
     upcoming_jobs: true,
     open_loops: true,
     channel_digest: false,
+    evolution_metrics: true,
   },
   enabled: false,
 };

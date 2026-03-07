@@ -39,7 +39,7 @@ export class DailyBriefingService {
     const config = { ...this.getConfig(workspaceId), ...configOverride };
     const sections: BriefingSection[] = [];
 
-    const sectionGenerators: Record<BriefingSectionType, () => BriefingSection> = {
+    const sectionGenerators: Record<BriefingSectionType, () => BriefingSection | Promise<BriefingSection>> = {
       task_summary: () => this.buildTaskSummary(workspaceId),
       memory_highlights: () => this.buildMemoryHighlights(workspaceId),
       active_suggestions: () => this.buildSuggestions(workspaceId),
@@ -47,12 +47,13 @@ export class DailyBriefingService {
       upcoming_jobs: () => this.buildUpcomingJobs(),
       open_loops: () => this.buildOpenLoops(workspaceId),
       channel_digest: () => this.buildChannelDigest(workspaceId),
+      evolution_metrics: () => this.buildEvolutionMetrics(workspaceId),
     };
 
     for (const [sectionType, generator] of Object.entries(sectionGenerators)) {
       const enabled = config.enabledSections[sectionType as BriefingSectionType] ?? true;
       try {
-        const section = generator();
+        const section = await generator();
         section.enabled = enabled;
         if (enabled && section.items.length > 0) {
           sections.push(section);
@@ -185,6 +186,41 @@ export class DailyBriefingService {
   private buildChannelDigest(_workspaceId: string): BriefingSection {
     // Placeholder — channel digest requires deeper integration with gateway
     return { type: "channel_digest", title: "Channel Digest", items: [], enabled: false };
+  }
+
+  /** Max ms to wait for evolution metrics before skipping the section. */
+  private static readonly EVOLUTION_METRICS_TIMEOUT_MS = 5_000;
+
+  private async buildEvolutionMetrics(workspaceId: string): Promise<BriefingSection> {
+    try {
+      const { EvolutionMetricsService } = await import("../memory/EvolutionMetricsService");
+
+      // Guard against a slow computeSnapshot stalling the entire briefing pipeline.
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error("EvolutionMetricsService timed out")),
+          DailyBriefingService.EVOLUTION_METRICS_TIMEOUT_MS,
+        ),
+      );
+      const snapshot = await Promise.race([
+        EvolutionMetricsService.computeSnapshot(workspaceId),
+        timeoutPromise,
+      ]);
+
+      const items: BriefingItem[] = snapshot.metrics.map((m) => ({
+        label: `${m.label}: ${m.value}${m.unit}`,
+        detail: m.detail,
+        status: m.trend === "improving" ? ("completed" as const) : m.trend === "declining" ? ("failed" as const) : ("info" as const),
+      }));
+      items.push({
+        label: `Overall Evolution Score: ${snapshot.overallScore}/100`,
+        status: "info",
+      });
+      return { type: "evolution_metrics", title: "Agent Evolution", items, enabled: true };
+    } catch (err) {
+      this.log("[DailyBriefing] buildEvolutionMetrics skipped:", (err as Error)?.message ?? err);
+      return { type: "evolution_metrics", title: "Agent Evolution", items: [], enabled: true };
+    }
   }
 
   // ── Config management ───────────────────────────────────────────

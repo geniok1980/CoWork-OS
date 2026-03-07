@@ -300,6 +300,41 @@ export class AzureOpenAIProvider implements LLMProvider {
     };
   }
 
+  private isTransientInterruptionMessage(message: string): boolean {
+    const normalized = String(message || "").toLowerCase();
+    if (!normalized) return false;
+    return (
+      // "terminated" alone is too broad (e.g. "policy terminated", "process terminated").
+      // Match only connection-specific termination phrases.
+      normalized.includes("connection terminated") ||
+      normalized.includes("stream terminated") ||
+      normalized.includes("stream disconnected") ||
+      normalized.includes("connection reset") ||
+      normalized.includes("unexpected eof") ||
+      normalized.includes("socket hang up") ||
+      normalized.includes("fetch failed")
+    );
+  }
+
+  private toStructuredProviderError(error: Any): Error {
+    const message = String(error?.message || "Azure OpenAI request failed");
+    const wrapped = new Error(message) as Any;
+    wrapped.name = error?.name || "AzureOpenAIProviderError";
+    wrapped.code = String(error?.code || error?.cause?.code || "").trim() || undefined;
+    wrapped.retryable =
+      this.isTransientInterruptionMessage(message) ||
+      wrapped.code === "ECONNRESET" ||
+      wrapped.code === "ETIMEDOUT" ||
+      wrapped.code === "ENOTFOUND" ||
+      wrapped.code === "EAI_AGAIN" ||
+      wrapped.code === "ECONNREFUSED";
+    if (error?.status !== undefined) {
+      wrapped.status = error.status;
+    }
+    wrapped.cause = error;
+    return wrapped;
+  }
+
   async createMessage(request: LLMRequest): Promise<LLMResponse> {
     try {
       const chatUrl = this.getChatCompletionsUrl();
@@ -367,8 +402,9 @@ export class AzureOpenAIProvider implements LLMProvider {
 
       console.error("[Azure OpenAI] API error:", {
         message: error.message,
+        code: error?.code || error?.cause?.code,
       });
-      throw error;
+      throw this.toStructuredProviderError(error);
     }
   }
 

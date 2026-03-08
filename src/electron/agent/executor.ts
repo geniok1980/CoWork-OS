@@ -5066,6 +5066,10 @@ ${transcript}
   private shouldFinalizeAsPartialSuccess(error: unknown): boolean {
     const candidate = String(this.buildResultSummary() || this.getContentFallback() || "").trim();
     if (!candidate) return false;
+    const message = String((error as Any)?.message || error || "");
+    if (/^Task missing /i.test(message) && !this.isSourceValidationGuardError(error)) {
+      return false;
+    }
     const failureClass = this.classifyFailure(error);
     if (failureClass === "required_verification" || failureClass === "user_blocker") {
       return false;
@@ -5170,7 +5174,11 @@ ${transcript}
     if (this.isBudgetExhaustionError(error)) return "budget_exhausted";
     if (this.isSourceValidationGuardError(error)) return "contract_error";
     const message = String((error as Any)?.message || error || "");
-    if (/contract_unmet_write_required|artifact_write_checkpoint_failed|required artifact mutation/i.test(message))
+    if (
+      /contract_unmet_write_required|artifact_write_checkpoint_failed|required artifact mutation|mutation-required contract unmet/i.test(
+        message,
+      )
+    )
       return "contract_unmet_write_required";
     if (/required verification|high-risk verification gate did not pass|verification failed/i.test(message))
       return "required_verification";

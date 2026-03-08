@@ -99,12 +99,25 @@ export function buildTaskCompletionToast(options: {
   taskTitle?: string;
   outputSummary?: TaskOutputSummary | null;
   actionDependencies?: CompletionToastActionDependencies;
-  terminalStatus?: "ok" | "partial_success" | "needs_user_action" | "failed" | string;
+  terminalStatus?:
+    | "ok"
+    | "partial_success"
+    | "needs_user_action"
+    | "awaiting_approval"
+    | "resume_available"
+    | "failed"
+    | string;
 }): Omit<ToastNotification, "id"> {
   const { taskId, taskTitle, outputSummary, actionDependencies, terminalStatus } = options;
-  const isNeedsUserAction = terminalStatus === "needs_user_action";
-  const isWarningCompletion = isNeedsUserAction || terminalStatus === "partial_success";
-  const title = isNeedsUserAction
+  const isNeedsUserAction =
+    terminalStatus === "needs_user_action" || terminalStatus === "awaiting_approval";
+  const isWarningCompletion =
+    isNeedsUserAction || terminalStatus === "partial_success" || terminalStatus === "resume_available";
+  const title = terminalStatus === "awaiting_approval"
+    ? "Task waiting for approval"
+    : terminalStatus === "resume_available"
+      ? "Task paused - resume available"
+      : isNeedsUserAction
     ? "Task complete - action required"
     : isWarningCompletion
       ? "Task complete (warnings)"

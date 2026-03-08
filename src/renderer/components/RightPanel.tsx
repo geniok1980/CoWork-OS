@@ -6,7 +6,7 @@ import { useAgentContext } from "../hooks/useAgentContext";
 import {
   deriveTaskOutputSummaryFromEvents,
   hasTaskOutputs,
-  resolveTaskOutputSummaryFromCompletionEvent,
+  resolvePreferredTaskOutputSummary,
 } from "../utils/task-outputs";
 import { normalizeEventsForTimelineUi } from "../utils/timeline-projection";
 import { getEffectiveTaskEventType } from "../utils/task-event-compat";
@@ -328,10 +328,12 @@ export function RightPanel({
     const latestCompletionEvent = [...events]
       .reverse()
       .find((event) => getEffectiveTaskEventType(event) === "task_completed");
-    const completionOutputSummary = latestCompletionEvent
-      ? resolveTaskOutputSummaryFromCompletionEvent(latestCompletionEvent, events)
-      : null;
-    if (latestCompletionEvent && hasTaskOutputs(completionOutputSummary)) {
+    const completionOutputSummary = resolvePreferredTaskOutputSummary({
+      task,
+      latestCompletionEvent,
+      fallbackEvents: events,
+    });
+    if (hasTaskOutputs(completionOutputSummary)) {
       const modifiedFallbackSet = new Set(completionOutputSummary.modifiedFallback || []);
       const completionOutputPaths =
         completionOutputSummary.created.length > 0
@@ -342,7 +344,7 @@ export function RightPanel({
         fileMap.set(outputPath, {
           path: outputPath,
           action: modifiedFallbackSet.has(outputPath) ? "modified" : "created",
-          timestamp: latestCompletionEvent.timestamp - index,
+          timestamp: (latestCompletionEvent?.timestamp || Date.now()) - index,
         });
       });
     }
@@ -350,17 +352,19 @@ export function RightPanel({
     return Array.from(fileMap.values())
       .filter((f) => !f.path.endsWith("/") && !f.path.endsWith("\\"))
       .sort((a, b) => b.timestamp - a.timestamp);
-  }, [events]);
+  }, [events, task]);
   const outputSummary = useMemo(() => {
     const latestCompletionEvent = [...events]
       .reverse()
       .find((event) => getEffectiveTaskEventType(event) === "task_completed");
-    if (latestCompletionEvent) {
-      const fromCompletion = resolveTaskOutputSummaryFromCompletionEvent(latestCompletionEvent, events);
-      if (fromCompletion) return fromCompletion;
-    }
-    return deriveTaskOutputSummaryFromEvents(events);
-  }, [events]);
+    return (
+      resolvePreferredTaskOutputSummary({
+        task,
+        latestCompletionEvent,
+        fallbackEvents: events,
+      }) || deriveTaskOutputSummaryFromEvents(events)
+    );
+  }, [events, task]);
 
   useEffect(() => {
     if (!highlightOutputPath) return;

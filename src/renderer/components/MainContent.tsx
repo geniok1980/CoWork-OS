@@ -6445,7 +6445,9 @@ export function MainContent({
                                 <span className="chat-status">
                                   {task.terminalStatus === "needs_user_action"
                                     ? "Completed - action required"
-                                    : agentContext.getMessage("taskComplete")}
+                                    : task.terminalStatus === "partial_success"
+                                      ? "Completed - partial success"
+                                      : agentContext.getMessage("taskComplete")}
                                 </span>
                               )}
                               {task.status === "paused" && (
@@ -6453,8 +6455,13 @@ export function MainContent({
                               )}
                               {task.status === "blocked" && (
                                 <span className="chat-status">
-                                  {agentContext.getMessage("taskBlocked") || "Needs approval"}
+                                  {task.terminalStatus === "awaiting_approval"
+                                    ? agentContext.getMessage("taskBlocked") || "Needs approval"
+                                    : "Waiting for your input"}
                                 </span>
+                              )}
+                              {task.status === "interrupted" && task.terminalStatus === "resume_available" && (
+                                <span className="chat-status">Interrupted - resume available</span>
                               )}
                               {isTaskWorking && (
                                 <span className="chat-status executing">
@@ -6782,12 +6789,26 @@ export function MainContent({
           {task.status === "blocked" && (
             <div className="task-status-banner task-status-banner-blocked">
               <div className="task-status-banner-content">
-                <strong>Blocked — needs approval</strong>
-                {latestApprovalEvent?.payload?.approval?.description && (
+                <strong>
+                  {task.terminalStatus === "awaiting_approval"
+                    ? "Blocked - needs approval"
+                    : "Blocked - waiting on you"}
+                </strong>
+                {latestApprovalEvent?.payload?.approval?.description && task.terminalStatus === "awaiting_approval" && (
                   <span className="task-status-banner-detail">
                     {latestApprovalEvent.payload.approval.description}
                   </span>
                 )}
+              </div>
+            </div>
+          )}
+          {task.status === "interrupted" && task.terminalStatus === "resume_available" && (
+            <div className="task-status-banner task-status-banner-paused">
+              <div className="task-status-banner-content">
+                <strong>Resume available</strong>
+                <span className="task-status-banner-detail">
+                  The task stopped before finishing, but its progress and outputs were preserved.
+                </span>
               </div>
             </div>
           )}
@@ -6797,6 +6818,16 @@ export function MainContent({
                 <strong>Completed - action required</strong>
                 <span className="task-status-banner-detail">
                   Verification is pending user evidence before this can be fully marked done.
+                </span>
+              </div>
+            </div>
+          )}
+          {task.status === "completed" && task.terminalStatus === "partial_success" && (
+            <div className="task-status-banner task-status-banner-paused">
+              <div className="task-status-banner-content">
+                <strong>Completed with preserved outputs</strong>
+                <span className="task-status-banner-detail">
+                  Cowork kept the files and summary it produced, even though some checks or steps did not fully finish.
                 </span>
               </div>
             </div>
@@ -7473,6 +7504,8 @@ function renderEventTitle(
     case "task_completed":
       return event.payload?.terminalStatus === "needs_user_action"
         ? "Completed - action required"
+        : event.payload?.terminalStatus === "partial_success"
+          ? "Completed - partial success"
         : getMessage("taskComplete", msgCtx);
     case "plan_created":
       return getMessage("planCreated", msgCtx);

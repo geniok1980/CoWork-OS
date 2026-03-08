@@ -179,8 +179,8 @@ export class TaskRepository {
     };
 
     const stmt = this.db.prepare(`
-      INSERT INTO tasks (id, title, prompt, raw_prompt, user_prompt, status, workspace_id, created_at, updated_at, budget_tokens, budget_cost, success_criteria, max_attempts, current_attempt, parent_task_id, agent_type, agent_config, depth, result_summary, source, strategy_lock, budget_profile, terminal_status, failure_class, budget_usage, continuation_count, continuation_window, lifetime_turns_used, last_progress_score, auto_continue_block_reason, compaction_count, last_compaction_at, last_compaction_tokens_before, last_compaction_tokens_after, no_progress_streak, last_loop_fingerprint, risk_level, eval_case_id, eval_run_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, title, prompt, raw_prompt, user_prompt, status, workspace_id, created_at, updated_at, budget_tokens, budget_cost, success_criteria, max_attempts, current_attempt, parent_task_id, agent_type, agent_config, depth, result_summary, source, strategy_lock, budget_profile, terminal_status, failure_class, best_known_outcome, budget_usage, continuation_count, continuation_window, lifetime_turns_used, last_progress_score, auto_continue_block_reason, compaction_count, last_compaction_at, last_compaction_tokens_before, last_compaction_tokens_after, no_progress_streak, last_loop_fingerprint, risk_level, eval_case_id, eval_run_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -208,6 +208,7 @@ export class TaskRepository {
       newTask.budgetProfile || null,
       newTask.terminalStatus || null,
       newTask.failureClass || null,
+      newTask.bestKnownOutcome ? JSON.stringify(newTask.bestKnownOutcome) : null,
       newTask.budgetUsage ? JSON.stringify(newTask.budgetUsage) : null,
       newTask.continuationCount ?? 0,
       newTask.continuationWindow ?? 1,
@@ -267,6 +268,7 @@ export class TaskRepository {
     "budgetProfile",
     "terminalStatus",
     "failureClass",
+    "bestKnownOutcome",
     "budgetUsage",
     "continuationCount",
     "continuationWindow",
@@ -312,6 +314,7 @@ export class TaskRepository {
           key === "agentConfig" ||
           key === "labels" ||
           key === "mentionedAgentRoleIds" ||
+          key === "bestKnownOutcome" ||
           key === "budgetUsage") &&
         value != null
       ) {
@@ -580,6 +583,9 @@ export class TaskRepository {
       budgetProfile: row.budget_profile || undefined,
       terminalStatus: row.terminal_status || undefined,
       failureClass: row.failure_class || undefined,
+      bestKnownOutcome: row.best_known_outcome
+        ? safeJsonParse(row.best_known_outcome, undefined, "task.bestKnownOutcome")
+        : undefined,
       continuationCount:
         typeof row.continuation_count === "number" ? row.continuation_count : undefined,
       continuationWindow:

@@ -19,6 +19,7 @@ function isLikelyTaskCompletionPayload(payload: Record<string, unknown> | null):
 
 export function getEffectiveTaskEventType(event: TaskEventLike): string {
   if (!event.type.startsWith("timeline_")) return String(event.type);
+  if (event.type === "timeline_error") return "timeline_error";
 
   const payload =
     event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)

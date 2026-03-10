@@ -46,6 +46,11 @@ import { CrossSignalService } from "../electron/agents/CrossSignalService";
 import { FeedbackService } from "../electron/agents/FeedbackService";
 import { attachAgentDaemonTaskBridge, registerControlPlaneMethods } from "./control-plane-methods";
 import { initializeXMentionBridgeService, XMentionBridgeService } from "../electron/x-mentions";
+import {
+  StrategicPlannerService,
+  setStrategicPlannerService,
+} from "../electron/control-plane/StrategicPlannerService";
+import { attachControlPlaneTaskLifecycleSync } from "../electron/control-plane/task-run-sync";
 
 interface StartedControlPlane {
   server: ControlPlaneServer;
@@ -261,6 +266,11 @@ async function main(): Promise<void> {
   // Initialize agent daemon.
   const agentDaemon = new AgentDaemon(dbManager);
   await agentDaemon.initialize();
+  const detachTaskLifecycleSync = attachControlPlaneTaskLifecycleSync({
+    agentDaemon,
+    db: dbManager.getDatabase(),
+    log: (...args) => console.warn(...args),
+  });
 
   await maybeBootstrapWorkspace(agentDaemon);
 
@@ -485,6 +495,20 @@ async function main(): Promise<void> {
     console.error("[Daemon] Failed to initialize Cron Service:", error);
   }
 
+  let strategicPlannerService: StrategicPlannerService | null = null;
+  try {
+    strategicPlannerService = new StrategicPlannerService({
+      db: dbManager.getDatabase(),
+      agentDaemon,
+      log: (...args) => console.log(...args),
+    });
+    setStrategicPlannerService(strategicPlannerService);
+    strategicPlannerService.start();
+    console.log("[Daemon] Strategic Planner initialized");
+  } catch (error) {
+    console.error("[Daemon] Failed to initialize Strategic Planner:", error);
+  }
+
   // Control Plane token printing gating.
   let hadControlPlaneToken = false;
   if (FORCE_ENABLE_CONTROL_PLANE || PRINT_CONTROL_PLANE_TOKEN) {
@@ -587,6 +611,12 @@ async function main(): Promise<void> {
       console.warn("[Daemon] Failed to shutdown Channel Gateway:", error);
     }
     try {
+      strategicPlannerService?.stop();
+      setStrategicPlannerService(null);
+    } catch (error) {
+      console.warn("[Daemon] Failed to stop Strategic Planner:", error);
+    }
+    try {
       if (cronService) await cronService.stop();
     } catch (error) {
       console.warn("[Daemon] Failed to stop Cron Service:", error);
@@ -595,6 +625,11 @@ async function main(): Promise<void> {
       if (mcpClientManager) await mcpClientManager.shutdown();
     } catch (error) {
       console.warn("[Daemon] Failed to shutdown MCP Client Manager:", error);
+    }
+    try {
+      detachTaskLifecycleSync();
+    } catch (error) {
+      console.warn("[Daemon] Failed to detach task lifecycle sync:", error);
     }
     try {
       await agentDaemon.shutdown();

@@ -167,6 +167,26 @@ describeWithSqlite("ControlPlaneCoreService", () => {
     expect(importedIssues[0].title).toBe(issue.title);
   });
 
+  it("creates companies directly with collision-safe names and a single default", () => {
+    const seededCompany = service.getDefaultCompany();
+
+    const created = service.createCompany({
+      name: seededCompany.name,
+      slug: seededCompany.slug,
+      isDefault: true,
+      monthlyBudgetCost: 250,
+    });
+
+    expect(created.name).toBe("Local Company (2)");
+    expect(created.slug).toBe("local-2");
+    expect(created.isDefault).toBe(true);
+    expect(created.monthlyBudgetCost).toBe(250);
+
+    const refreshedSeeded = service.getCompany(seededCompany.id);
+    expect(refreshedSeeded?.isDefault).toBe(false);
+    expect(service.getDefaultCompany().id).toBe(created.id);
+  });
+
   it("enforces single active issue checkout and syncs task lifecycle into runs", () => {
     const workspace = insertWorkspace();
     const company = service.getDefaultCompany();

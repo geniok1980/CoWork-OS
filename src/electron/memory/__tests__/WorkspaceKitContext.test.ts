@@ -65,6 +65,29 @@ describe("WorkspaceKitContext", () => {
     expect(out).toContain("ExampleCo appears");
   });
 
+  it("includes company, operations, and KPI context when present", () => {
+    writeFile(
+      path.join(tmpDir, ".cowork", "COMPANY.md"),
+      "# Company Operating Profile\n\n## Mission\n- Build an autonomous venture OS\n",
+    );
+    writeFile(
+      path.join(tmpDir, ".cowork", "OPERATIONS.md"),
+      "# Operating System\n\n## Work Loops\n- Product discovery\n- Customer support\n",
+    );
+    writeFile(
+      path.join(tmpDir, ".cowork", "KPIS.md"),
+      "# KPIs\n\n## Weekly Dashboard\n- Revenue: up 12%\n- Support backlog: 3\n",
+    );
+
+    const out = buildWorkspaceKitContext(tmpDir, "any");
+    expect(out).toContain("Company Operating Profile (.cowork/COMPANY.md)");
+    expect(out).toContain("autonomous venture OS");
+    expect(out).toContain("Operating System (.cowork/OPERATIONS.md)");
+    expect(out).toContain("Customer support");
+    expect(out).toContain("KPIs (.cowork/KPIS.md)");
+    expect(out).toContain("Revenue: up 12%");
+  });
+
   it("includes docs/CODEBASE_MAP.md content when present (even without .cowork)", () => {
     writeFile(
       path.join(tmpDir, "docs", "CODEBASE_MAP.md"),

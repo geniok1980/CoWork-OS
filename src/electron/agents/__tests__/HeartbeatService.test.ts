@@ -2,6 +2,9 @@
  * Tests for HeartbeatService
  */
 
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import type {
   AgentRole,
@@ -25,6 +28,8 @@ let mockMentions: Map<string, AgentMention>;
 let mockTasks: Map<string, Task>;
 let heartbeatEvents: HeartbeatEvent[];
 let createdTasks: Task[];
+let tmpDir: string;
+let workspacePaths: Map<string, string>;
 
 // Helper to create test agent
 function createAgent(id: string, options: Partial<AgentRole> = {}): AgentRole {
@@ -90,6 +95,15 @@ function createTask(id: string, agentId?: string): Task {
   return task;
 }
 
+function writeHeartbeatChecklist(workspaceId: string, content: string): void {
+  const workspacePath = workspacePaths.get(workspaceId);
+  if (!workspacePath) {
+    throw new Error(`Unknown workspace ${workspaceId}`);
+  }
+  fs.mkdirSync(path.join(workspacePath, ".cowork"), { recursive: true });
+  fs.writeFileSync(path.join(workspacePath, ".cowork", "HEARTBEAT.md"), content, "utf8");
+}
+
 describe("HeartbeatService", () => {
   let service: HeartbeatService;
   let deps: HeartbeatServiceDeps;
@@ -105,6 +119,15 @@ describe("HeartbeatService", () => {
     heartbeatEvents = [];
     createdTasks = [];
     taskIdCounter = 0;
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cowork-heartbeat-"));
+    process.env.COWORK_USER_DATA_DIR = path.join(tmpDir, "user-data");
+    workspacePaths = new Map([
+      ["workspace-1", path.join(tmpDir, "workspace-1")],
+      ["workspace-2", path.join(tmpDir, "workspace-2")],
+    ]);
+    for (const workspacePath of workspacePaths.values()) {
+      fs.mkdirSync(workspacePath, { recursive: true });
+    }
 
     deps = {
       agentRoleRepo: {
@@ -149,7 +172,7 @@ describe("HeartbeatService", () => {
         },
       } as HeartbeatServiceDeps["mentionRepo"],
       activityRepo: {
-        getRecent: () => [] as Activity[],
+        list: () => [] as Activity[],
       } as HeartbeatServiceDeps["activityRepo"],
       workingStateRepo: {
         getByAgent: () => undefined,
@@ -159,6 +182,10 @@ describe("HeartbeatService", () => {
         prompt: string,
         title: string,
         agentRoleId?: string,
+        options?: {
+          source?: Task["source"];
+          agentConfig?: Task["agentConfig"];
+        },
       ) => {
         const task: Task = {
           id: `task-${++taskIdCounter}`,
@@ -169,6 +196,7 @@ describe("HeartbeatService", () => {
           createdAt: Date.now(),
           updatedAt: Date.now(),
           assignedAgentRoleId: agentRoleId,
+          agentConfig: options?.agentConfig,
         };
         createdTasks.push(task);
         return task;
@@ -183,16 +211,19 @@ describe("HeartbeatService", () => {
         return results;
       },
       getDefaultWorkspaceId: () => "workspace-1",
-      getDefaultWorkspacePath: () => "/tmp/default-workspace",
+      getDefaultWorkspacePath: () => workspacePaths.get("workspace-1"),
       getWorkspacePath: (workspaceId: string) => {
-        if (workspaceId === "workspace-1") {
-          return "/tmp/workspace-1";
-        }
-        if (workspaceId === "workspace-2") {
-          return "/tmp/workspace-2";
-        }
-        return undefined;
+        return workspacePaths.get(workspaceId);
       },
+      listWorkspaceContexts: () =>
+        Array.from(workspacePaths.entries()).map(([workspaceId, workspacePath]) => ({
+          workspaceId,
+          workspacePath,
+        })),
+      getMemoryFeaturesSettings: () => ({
+        contextPackInjectionEnabled: true,
+        heartbeatMaintenanceEnabled: true,
+      }),
     };
 
     service = new HeartbeatService(deps);
@@ -201,6 +232,8 @@ describe("HeartbeatService", () => {
 
   afterEach(async () => {
     await service.stop();
+    delete process.env.COWORK_USER_DATA_DIR;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
     vi.useRealTimers();
   });
 
@@ -448,6 +481,100 @@ describe("HeartbeatService", () => {
       const third = await service.triggerHeartbeat("agent-1");
       expect(third.status).toBe("work_done");
       expect(createdTasks).toHaveLength(2);
+    });
+
+    it("runs maintenance heartbeats for lead agents with HEARTBEAT.md even without mentions", async () => {
+      createAgent("agent-1", {
+        heartbeatEnabled: true,
+        autonomyLevel: "lead",
+      });
+      writeHeartbeatChecklist(
+        "workspace-1",
+        "# Recurring Checks\n\n## Daily\n- Check git status for drift\n- Review open loops\n",
+      );
+
+      const result = await service.triggerHeartbeat("agent-1");
+
+      expect(result.status).toBe("work_done");
+      expect(result.maintenanceChecks).toBe(2);
+      expect(result.maintenanceWorkspaceId).toBe("workspace-1");
+      expect(createdTasks).toHaveLength(1);
+      expect(createdTasks[0].prompt).toContain("## HEARTBEAT.md Recurring Checks");
+      expect(createdTasks[0].prompt).toContain("Check git status for drift");
+    });
+
+    it("applies founder-edge autonomy policy from agent soul to heartbeat-dispatched work", async () => {
+      createAgent("agent-1", {
+        heartbeatEnabled: true,
+        autonomyLevel: "lead",
+        soul: JSON.stringify({
+          autonomyPolicy: {
+            preset: "founder_edge",
+            autoApproveTypes: ["run_command"],
+            pauseForRequiredDecision: false,
+          },
+        }),
+      });
+      writeHeartbeatChecklist("workspace-1", "# Recurring Checks\n\n## Daily\n- Review blockers\n");
+
+      const result = await service.triggerHeartbeat("agent-1");
+
+      expect(result.status).toBe("work_done");
+      expect(createdTasks).toHaveLength(1);
+      expect(createdTasks[0].agentConfig?.autonomousMode).toBe(true);
+      expect(createdTasks[0].agentConfig?.allowUserInput).toBe(false);
+      expect(createdTasks[0].agentConfig?.autoApproveTypes).toEqual(["run_command"]);
+      expect(createdTasks[0].agentConfig?.pauseForRequiredDecision).toBe(false);
+    });
+
+    it("does not run HEARTBEAT.md maintenance for non-lead agents", async () => {
+      createAgent("agent-1", {
+        heartbeatEnabled: true,
+        autonomyLevel: "specialist",
+      });
+      writeHeartbeatChecklist("workspace-1", "# Recurring Checks\n\n## Daily\n- Review blockers\n");
+
+      const result = await service.triggerHeartbeat("agent-1");
+
+      expect(result.status).toBe("ok");
+      expect(result.maintenanceChecks).toBe(0);
+      expect(createdTasks).toHaveLength(0);
+    });
+
+    it("persists proactive cadence across service restarts", async () => {
+      createAgent("agent-persist", {
+        heartbeatEnabled: true,
+        soul: JSON.stringify({
+          cognitiveOffload: {
+            proactiveTasks: [
+              {
+                id: "proactive-persist-1",
+                name: "Inbox check",
+                description: "Check inbox for urgent updates",
+                category: "routine-automation",
+                promptTemplate: "Check inbox and summarize urgent items.",
+                frequencyMinutes: 60,
+                priority: 1,
+                enabled: true,
+              },
+            ],
+          },
+        }),
+      });
+
+      const first = await service.triggerHeartbeat("agent-persist");
+      expect(first.status).toBe("work_done");
+      expect(createdTasks).toHaveLength(1);
+
+      await service.stop();
+      heartbeatEvents = [];
+      createdTasks = [];
+      service = new HeartbeatService(deps);
+      service.on("heartbeat", (event) => heartbeatEvents.push(event));
+
+      const second = await service.triggerHeartbeat("agent-persist");
+      expect(second.status).toBe("ok");
+      expect(createdTasks).toHaveLength(0);
     });
   });
 

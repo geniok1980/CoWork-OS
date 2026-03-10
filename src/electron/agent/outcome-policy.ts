@@ -161,27 +161,6 @@ export function decideTaskOutcome(input: OutcomeDecisionInput): OutcomeDecision 
         failureClass: failureClass || "contract_error",
       };
     }
-    if (requestedTerminalStatus === "needs_user_action") {
-      return {
-        status: "completed",
-        terminalStatus: "needs_user_action",
-        failureClass: undefined,
-      };
-    }
-    if (requestedTerminalStatus === "awaiting_approval") {
-      return {
-        status: "blocked",
-        terminalStatus: "awaiting_approval",
-        failureClass: undefined,
-      };
-    }
-    if (requestedTerminalStatus === "resume_available") {
-      return {
-        status: "interrupted",
-        terminalStatus: "resume_available",
-        failureClass: failureClass || "unknown",
-      };
-    }
     if (hasEvidence && failureClass && !isHardFailureWithoutRecovery(failureClass)) {
       return {
         status: "completed",

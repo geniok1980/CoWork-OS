@@ -1,5 +1,5 @@
 import { execFile } from "child_process";
-import { MergeResult } from "../../shared/types";
+import { MergeResult, PullRequestResult } from "../../shared/types";
 
 /**
  * Low-level git command wrapper. All git operations in the app go through this service.
@@ -296,6 +296,70 @@ export class GitService {
   }
 
   /**
+   * Push a branch to origin and set upstream tracking.
+   */
+  static async pushBranch(worktreePath: string, branchName: string): Promise<void> {
+    await GitService.exec(["push", "-u", "origin", branchName], worktreePath);
+  }
+
+  /**
+   * Create or reuse a GitHub pull request for a branch.
+   */
+  static async createPullRequest(
+    repoPath: string,
+    params: {
+      branchName: string;
+      baseBranch: string;
+      title: string;
+      body: string;
+    },
+  ): Promise<PullRequestResult> {
+    const existing = await GitService.findPullRequest(repoPath, params.branchName, params.baseBranch);
+    if (existing.success) {
+      return existing;
+    }
+
+    try {
+      const { stdout } = await GitService.execExternal(
+        "gh",
+        [
+          "pr",
+          "create",
+          "--base",
+          params.baseBranch,
+          "--head",
+          params.branchName,
+          "--title",
+          params.title,
+          "--body",
+          params.body,
+        ],
+        repoPath,
+      );
+      const createdUrl = stdout.trim().split("\n").find((line) => /^https?:\/\//.test(line.trim()))?.trim();
+      const created = await GitService.findPullRequest(repoPath, params.branchName, params.baseBranch);
+      if (created.success) {
+        return created;
+      }
+      if (createdUrl) {
+        return {
+          success: true,
+          url: createdUrl,
+        };
+      }
+      return {
+        success: false,
+        error: "Pull request created but could not be resolved afterward",
+      };
+    } catch (error: Any) {
+      return {
+        success: false,
+        error: error.message || "Failed to create pull request",
+      };
+    }
+  }
+
+  /**
    * Get short status output for display.
    */
   static async getStatus(worktreePath: string): Promise<string> {
@@ -336,14 +400,61 @@ export class GitService {
    * Internal helper: execute a git command.
    */
   private static exec(args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
+    return GitService.execExternal("git", args, cwd, `git ${args[0]} failed`);
+  }
+
+  private static async findPullRequest(
+    repoPath: string,
+    branchName: string,
+    baseBranch: string,
+  ): Promise<PullRequestResult> {
+    try {
+      const { stdout } = await GitService.execExternal(
+        "gh",
+        [
+          "pr",
+          "list",
+          "--head",
+          branchName,
+          "--base",
+          baseBranch,
+          "--json",
+          "number,url",
+          "--limit",
+          "1",
+        ],
+        repoPath,
+        "gh pr list failed",
+      );
+      const entries = JSON.parse(stdout) as Array<{ number?: number; url?: string }>;
+      const first = entries[0];
+      if (first?.url) {
+        return {
+          success: true,
+          url: first.url,
+          number: typeof first.number === "number" ? first.number : undefined,
+        };
+      }
+    } catch {
+      // Best effort probe only.
+    }
+    return { success: false, error: "Pull request not found" };
+  }
+
+  private static execExternal(
+    command: string,
+    args: string[],
+    cwd: string,
+    errorPrefix?: string,
+  ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       execFile(
-        "git",
+        command,
         args,
         { cwd, maxBuffer: 10 * 1024 * 1024, timeout: 30_000 },
         (error, stdout, stderr) => {
           if (error) {
-            reject(new Error(`git ${args[0]} failed: ${stderr || error.message}`));
+            reject(new Error(`${errorPrefix || `${command} failed`}: ${stderr || error.message}`));
           } else {
             resolve({ stdout: stdout || "", stderr: stderr || "" });
           }

@@ -67,6 +67,28 @@ This will:
    - Show real-time progress in the timeline
    - Request approval before destructive changes
 
+## Zero-Human Company Quick Start
+
+If you want to use CoWork OS as a founder-operated autonomous company shell:
+
+1. Choose a real git-backed workspace.
+2. Open **Settings** > **Memory Hub**.
+3. Initialize **Venture operator kit**.
+4. Fill in the generated `.cowork/` company files (`COMPANY.md`, `OPERATIONS.md`, `KPIS.md`, `PRIORITIES.md`, `HEARTBEAT.md`).
+5. Open **Settings** > **Companies**.
+6. Create or select the company shell you want to operate.
+7. Click **Open Digital Twins** from that company.
+8. Activate:
+   - `Company Planner`
+   - `Founder Office Operator`
+9. Enable heartbeat for both operators.
+10. Return to **Settings** > **Companies** and confirm the operators are linked to the intended company.
+11. Open **Mission Control** from that company.
+12. In the planner strip, enable scheduling, set the planner agent, and click **Run Planner**.
+13. Use the `Ops` tab to monitor goals, projects, planner-managed issues, and linked execution runs.
+
+See [Zero-Human Company Operations](zero-human-company.md) for the full architecture, recipe, use cases, and operating model.
+
 ## Example Tasks to Try
 
 ### 1. File Organization

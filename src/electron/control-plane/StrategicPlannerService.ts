@@ -285,6 +285,7 @@ export class StrategicPlannerService {
     const projects = this.core.listProjects({ companyId: company.id, includeArchived: false });
     const issues = this.core.listIssues({ companyId: company.id, limit: 5000 });
     const openIssues = issues.filter((issue) => !["done", "cancelled"].includes(issue.status));
+    const companyWorkspaceId = company.defaultWorkspaceId;
     const plannerAgent = this.pickPlannerAgent(config);
     const createdIssueIds: string[] = [];
     const updatedIssueIds: string[] = [];
@@ -312,12 +313,13 @@ export class StrategicPlannerService {
     for (const project of projects.filter((entry) => entry.status === "active")) {
       const linkedWorkspaceId =
         this.core.listProjectWorkspaces(project.id).find((link) => link.isPrimary)?.workspaceId ||
-        this.core.listProjectWorkspaces(project.id)[0]?.workspaceId;
+        this.core.listProjectWorkspaces(project.id)[0]?.workspaceId ||
+        companyWorkspaceId;
       const projectIssues = openIssues.filter((issue) => issue.projectId === project.id);
       const blockedIssues = projectIssues.filter((issue) => issue.status === "blocked");
       const staleIssue = projectIssues.find((issue) => this.isStaleIssue(issue, config.staleIssueDays));
 
-      if (!linkedWorkspaceId) {
+      if (!linkedWorkspaceId && !companyWorkspaceId) {
         seeds.push({
           kind: "project_workspace",
           title: `Link a workspace for project: ${project.name}`,
@@ -452,6 +454,7 @@ export class StrategicPlannerService {
     if (!this.deps.agentDaemon) return null;
     const workspaceId =
       issue.workspaceId ||
+      company.defaultWorkspaceId ||
       config.planningWorkspaceId ||
       this.pickDefaultWorkspaceId();
     if (!workspaceId) return null;
@@ -492,6 +495,18 @@ export class StrategicPlannerService {
   }
 
   private buildDispatchPrompt(company: Company, issue: Issue): string {
+    const plannerMetadata = this.getPlannerMetadata(issue);
+    const plannerInstructions =
+      plannerMetadata?.plannerKind === "project_workspace"
+        ? [
+            "",
+            "## Workspace Linking Requirements",
+            "This issue is only complete when the project is linked in the CoWork OS control plane database.",
+            "Use the control-plane tools: list_projects, list_workspaces, and link_project_workspace.",
+            "Do not treat ad hoc files in .cowork/ as a substitute for the database link.",
+          ]
+        : [];
+
     return [
       `You are executing a planner-routed company issue for ${company.name}.`,
       "",
@@ -506,6 +521,7 @@ export class StrategicPlannerService {
       "Prefer concrete progress over commentary.",
       "If the issue turns out to be underspecified, tighten scope and capture the next actionable step.",
       "If you hit a real blocker, state it clearly and leave the issue in a better-defined state than you found it.",
+      ...plannerInstructions,
     ]
       .filter(Boolean)
       .join("\n");

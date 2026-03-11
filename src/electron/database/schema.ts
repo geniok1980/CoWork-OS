@@ -1626,6 +1626,11 @@ export class DatabaseManager {
     } catch {
       // Column already exists
     }
+    try {
+      this.db.exec("ALTER TABLE companies ADD COLUMN default_workspace_id TEXT");
+    } catch {
+      // Column already exists
+    }
 
     // ============ User Prompt for Agent-Dispatched Tasks ============
     try {

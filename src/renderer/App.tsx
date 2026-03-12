@@ -61,6 +61,12 @@ function getEffectiveTheme(themeMode: ThemeMode): "light" | "dark" {
 }
 
 type AppView = "home" | "main" | "settings" | "browser" | "devices";
+type RemoteTaskView = {
+  deviceId: string;
+  deviceName: string;
+  task: Task;
+  events: TaskEvent[];
+};
 const MAX_RENDERER_TASK_EVENTS = 600;
 const APPROVAL_TOAST_PREFIX = "approval-request-";
 const APPROVAL_WARNING_TOAST_ID = "approval-auto-approve-warning";
@@ -147,6 +153,7 @@ export function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [hasMoreTasks, setHasMoreTasks] = useState(true);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [remoteTaskView, setRemoteTaskView] = useState<RemoteTaskView | null>(null);
   const [currentView, setCurrentView] = useState<AppView>("main");
   const [browserUrl, setBrowserUrl] = useState<string>("");
   const [settingsTab, setSettingsTab] = useState<
@@ -170,6 +177,8 @@ export function App() {
     | "companies"
     | "digitaltwins"
     | "mcp"
+    | "triggers"
+    | "improvement"
   >("appearance");
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [childEvents, setChildEvents] = useState<TaskEvent[]>([]);
@@ -557,6 +566,7 @@ export function App() {
   useEffect(() => {
     if (!window.electronAPI?.selectWorkspace || !window.electronAPI?.getTempWorkspace) return;
     if (!selectedTaskId) return;
+    if (remoteTaskView) return;
     const task = tasks.find((t) => t.id === selectedTaskId);
     if (!task) return;
     if (currentWorkspace?.id === task.workspaceId) return;
@@ -581,7 +591,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedTaskId, tasks, currentWorkspace?.id]);
+  }, [selectedTaskId, tasks, currentWorkspace?.id, remoteTaskView]);
 
   // Track recency when the active workspace changes
   useEffect(() => {
@@ -839,9 +849,35 @@ export function App() {
     };
   }, []);
 
-  // Subscribe to all task events to update task status
+  // Subscribe to live remote task events when viewing a remote task
+  useEffect(() => {
+    if (!window.electronAPI?.onTaskEvent || !remoteTaskView) return;
+    const view = remoteTaskView;
+    const unsubscribe = window.electronAPI.onTaskEvent((rawEvent: TaskEvent & { deviceId?: string }) => {
+      if (rawEvent.deviceId !== view.deviceId || rawEvent.taskId !== view.task.id) return;
+      const effectiveType = getEffectiveTaskEventType(rawEvent);
+      const event = { ...rawEvent, type: effectiveType } as TaskEvent;
+      setEvents((prev) => capTaskEvents([...prev, event]));
+      const newStatus =
+        event.type === "task_status" ? event.payload?.status : TASK_EVENT_STATUS_MAP[event.type];
+      if (newStatus) {
+        setRemoteTaskView((prev) =>
+          prev && prev.task.id === view.task.id
+            ? {
+                ...prev,
+                task: { ...prev.task, status: newStatus as Task["status"] },
+              }
+            : prev,
+        );
+      }
+    });
+    return typeof unsubscribe === "function" ? unsubscribe : undefined;
+  }, [remoteTaskView]);
+
+  // Subscribe to all task events to update task status (local tasks only when not viewing remote)
   useEffect(() => {
     if (!window.electronAPI?.onTaskEvent) return;
+    if (remoteTaskView) return;
 
     const unsubscribe = window.electronAPI.onTaskEvent((rawEvent: TaskEvent) => {
       const effectiveType = getEffectiveTaskEventType(rawEvent);
@@ -1259,12 +1295,20 @@ export function App() {
     });
 
     return typeof unsubscribe === "function" ? unsubscribe : undefined;
-  }, [selectedTaskId]);
+  }, [selectedTaskId, remoteTaskView]);
 
   // Load historical events when task is selected
   useEffect(() => {
     if (!selectedTaskId) {
       setEvents([]);
+      return;
+    }
+    if (remoteTaskView) {
+      setEvents(capTaskEvents(remoteTaskView.events));
+      const latestTimestamp = getLatestEventTimestamp(remoteTaskView.events);
+      if (latestTimestamp > 0) {
+        taskLastEventTimestampRef.current.set(selectedTaskId, latestTimestamp);
+      }
       return;
     }
 
@@ -1289,11 +1333,12 @@ export function App() {
     };
 
     loadHistoricalEvents();
-  }, [selectedTaskId]);
+  }, [selectedTaskId, remoteTaskView]);
 
   // Reconcile stale executing/interrupted task state if event delivery falls behind.
   useEffect(() => {
     if (!selectedTaskId || !window.electronAPI?.getTask) return;
+    if (remoteTaskView) return;
 
     let cancelled = false;
 
@@ -1361,11 +1406,15 @@ export function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [selectedTaskId]);
+  }, [selectedTaskId, remoteTaskView]);
 
   // Load historical events from dispatched child tasks
   useEffect(() => {
     if (childTasks.length === 0) {
+      setChildEvents([]);
+      return;
+    }
+    if (remoteTaskView) {
       setChildEvents([]);
       return;
     }
@@ -1388,7 +1437,7 @@ export function App() {
     loadChildHistoricalEvents();
     // Re-load when child tasks change (new children appear)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [childTasks.map((c) => c.id).join(",")]);
+  }, [childTasks.map((c) => c.id).join(","), remoteTaskView]);
 
   // Load all existing sessions upfront so the sidebar is fully populated.
   // Pagination only kicks in for sessions beyond INITIAL_TASK_LOAD (extremely
@@ -1602,15 +1651,64 @@ export function App() {
     }
   };
 
-  const selectedTask = tasks.find((t) => t.id === selectedTaskId);
+  const selectedTask = remoteTaskView?.task || tasks.find((t) => t.id === selectedTaskId);
   const activeInputRequest = useMemo(() => {
+    if (remoteTaskView) return null;
     if (!selectedTaskId) return null;
     const candidates = pendingInputRequests.filter(
       (request) => request.taskId === selectedTaskId && request.status === "pending",
     );
     if (candidates.length === 0) return null;
     return [...candidates].sort((a, b) => b.requestedAt - a.requestedAt)[0];
-  }, [pendingInputRequests, selectedTaskId]);
+  }, [pendingInputRequests, selectedTaskId, remoteTaskView]);
+
+  const clearRemoteTaskView = useCallback(() => {
+    setRemoteTaskView(null);
+  }, []);
+
+  const openRemoteTaskView = useCallback(
+    async (taskId: string, remote: { deviceId: string; deviceName: string }) => {
+      try {
+        const [taskResult, eventsResult] = await Promise.all([
+          window.electronAPI?.deviceProxyRequest?.({
+            deviceId: remote.deviceId,
+            method: "task.get",
+            params: { taskId },
+          }),
+          window.electronAPI?.deviceProxyRequest?.({
+            deviceId: remote.deviceId,
+            method: "task.events",
+            params: { taskId, limit: 600 },
+          }),
+        ]);
+
+        const remoteTask = (taskResult?.payload as { task?: Task | null } | undefined)?.task;
+        const remoteEvents =
+          ((eventsResult?.payload as { events?: TaskEvent[] } | undefined)?.events || []).sort(
+            (a, b) => a.timestamp - b.timestamp,
+          );
+        if (!remoteTask) return;
+
+        setRemoteTaskView({
+          deviceId: remote.deviceId,
+          deviceName: remote.deviceName,
+          task: remoteTask,
+          events: remoteEvents,
+        });
+        setSelectedTaskId(remoteTask.id);
+        setCurrentView("main");
+        setRightSidebarCollapsed(true);
+      } catch (error) {
+        console.error("Failed to open remote task view:", error);
+        addToast({
+          type: "error",
+          title: "Remote task unavailable",
+          message: "Could not load the remote task history for this device.",
+        });
+      }
+    },
+    [],
+  );
 
   const handleSendMessage = async (message: string, images?: ImageAttachment[]) => {
     if (!selectedTaskId) return;
@@ -1636,7 +1734,15 @@ export function App() {
         }
       }
 
-      await window.electronAPI.sendMessage(selectedTaskId, message, images);
+      if (remoteTaskView) {
+        await window.electronAPI?.deviceProxyRequest?.({
+          deviceId: remoteTaskView.deviceId,
+          method: "task.sendMessage",
+          params: { taskId: selectedTaskId, message, images },
+        });
+      } else {
+        await window.electronAPI.sendMessage(selectedTaskId, message, images);
+      }
     } catch (error: unknown) {
       console.error("Failed to send message:", error);
       const errorMessage = error instanceof Error ? error.message : "Failed to send message";
@@ -1647,15 +1753,30 @@ export function App() {
   const handleCancelTask = async () => {
     if (!selectedTaskId) return;
 
-    // Optimistic UI update: immediately mark as cancelled so spinner stops
-    setTasks((prev) =>
-      prev.map((t) =>
-        t.id === selectedTaskId ? { ...t, status: "cancelled" as Task["status"] } : t,
-      ),
-    );
+    if (remoteTaskView) {
+      setRemoteTaskView((prev) =>
+        prev && prev.task.id === selectedTaskId
+          ? { ...prev, task: { ...prev.task, status: "cancelled" as Task["status"] } }
+          : prev,
+      );
+    } else {
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === selectedTaskId ? { ...t, status: "cancelled" as Task["status"] } : t,
+        ),
+      );
+    }
 
     try {
-      await window.electronAPI.cancelTask(selectedTaskId);
+      if (remoteTaskView) {
+        await window.electronAPI?.deviceProxyRequest?.({
+          deviceId: remoteTaskView.deviceId,
+          method: "task.cancel",
+          params: { taskId: selectedTaskId },
+        });
+      } else {
+        await window.electronAPI.cancelTask(selectedTaskId);
+      }
     } catch (error: unknown) {
       console.error("Failed to cancel task:", error);
       const errorMessage = error instanceof Error ? error.message : "Failed to cancel task";
@@ -1665,6 +1786,14 @@ export function App() {
 
   const handleWrapUpTask = async () => {
     if (!selectedTaskId) return;
+    if (remoteTaskView) {
+      addToast({
+        type: "info",
+        title: "Remote session view",
+        message: "Wrap up from the remote device directly is not available yet.",
+      });
+      return;
+    }
 
     try {
       const collaborativeRun = await window.electronAPI.findTeamRunByRootTask(selectedTaskId);
@@ -1693,6 +1822,7 @@ export function App() {
 
     const title = prompt.slice(0, 50) + (prompt.length > 50 ? "..." : "");
     setCurrentView("main");
+    clearRemoteTaskView();
     await handleCreateTask(title, prompt);
   };
 
@@ -1700,6 +1830,7 @@ export function App() {
     setCurrentView("main");
     setSelectedTaskId(null);
     setEvents([]);
+    clearRemoteTaskView();
     try {
       const tempWorkspace = await window.electronAPI.getTempWorkspace({ createNew: true });
       setCurrentWorkspace(tempWorkspace);
@@ -1716,6 +1847,7 @@ export function App() {
     if (selectedTaskId) {
       setSelectedTaskId(null);
       setEvents([]);
+      clearRemoteTaskView();
     }
   };
 
@@ -1778,6 +1910,7 @@ export function App() {
   const unseenOutputCount = unseenOutputTaskIds.length;
 
   const handleSelectTaskFromShell = (taskId: string | null) => {
+    clearRemoteTaskView();
     setSelectedTaskId(taskId);
     setCurrentView("main");
   };
@@ -1785,6 +1918,7 @@ export function App() {
   const openTaskById = useCallback(
     async (taskId: string) => {
       setCurrentView("main");
+      clearRemoteTaskView();
 
       const existingTask = tasksRef.current.find((task) => task.id === taskId);
       if (existingTask) {
@@ -1810,7 +1944,7 @@ export function App() {
         console.error("Failed to open task from shell navigation:", error);
       }
     },
-    [],
+    [clearRemoteTaskView],
   );
 
   useEffect(() => {
@@ -1905,6 +2039,7 @@ export function App() {
   return (
     <div className="app">
       <div className="title-bar">
+        <div className="title-bar-drag-handle" aria-hidden="true" />
         <div className="title-bar-left">
           <button
             type="button"
@@ -1981,6 +2116,7 @@ export function App() {
             </>
           )}
         </div>
+        <div className="title-bar-spacer" />
         <div className="title-bar-actions">
           <button
             type="button"
@@ -2247,28 +2383,61 @@ export function App() {
                   setSettingsTab("missioncontrol");
                   setCurrentView("settings");
                 }}
-                onOpenSkills={() => {
-                  setSettingsTab("skills");
+                onOpenEventTriggers={() => {
+                  setSettingsTab("triggers");
                   setCurrentView("settings");
                 }}
-                onOpenConnectedTools={() => {
-                  setSettingsTab("mcp");
+                onOpenSelfImprove={() => {
+                  setSettingsTab("improvement");
                   setCurrentView("settings");
                 }}
-                onOpenDevices={() => setCurrentView("devices")}
               />
             ) : currentView === "devices" ? (
               <DevicesPanel
-                onOpenTask={(taskId) => {
+                onOpenTask={(taskId, remote) => {
+                  if (remote) {
+                    void openRemoteTaskView(taskId, remote);
+                    return;
+                  }
+                  clearRemoteTaskView();
                   setSelectedTaskId(taskId);
                   setCurrentView("main");
                 }}
-                onNewTaskForDevice={async (nodeId, prompt) => {
+                onCreateTaskHere={async (prompt, options) => {
+                  const title = prompt.slice(0, 50) + (prompt.length > 50 ? "..." : "");
+                  clearRemoteTaskView();
+                  if (options?.shellAccess && currentWorkspace) {
+                    try {
+                      const updated = await window.electronAPI?.updateWorkspacePermissions?.(currentWorkspace.id, { shell: true });
+                      if (updated) setCurrentWorkspace(updated);
+                    } catch (e) {
+                      console.warn("[Devices] Failed to enable shell for workspace:", e);
+                    }
+                  }
+                  await handleCreateTask(title, prompt, options ? {
+                    autonomousMode: options.autonomousMode,
+                    collaborativeMode: options.collaborativeMode,
+                    multiLlmMode: options.multiLlmMode,
+                    multiLlmConfig: options.multiLlmConfig,
+                    executionMode: options.executionMode,
+                    taskDomain: options.taskDomain,
+                  } : undefined);
+                  loadTasks();
+                }}
+                onNewTaskForDevice={async (nodeId, prompt, options) => {
                   try {
                     const res = await window.electronAPI?.deviceAssignTask?.({
                       nodeId,
                       prompt,
                       workspaceId: currentWorkspace?.id,
+                      agentConfig: options ? {
+                        ...(options.autonomousMode && { autonomousMode: true }),
+                        ...(options.collaborativeMode && { collaborativeMode: true }),
+                        ...(options.multiLlmMode && { multiLlmMode: true, multiLlmConfig: options.multiLlmConfig }),
+                        ...(options.executionMode && { executionMode: options.executionMode }),
+                        ...(options.taskDomain && { taskDomain: options.taskDomain }),
+                      } : undefined,
+                      shellAccess: options?.shellAccess,
                     });
                     
                     if (res?.ok) {
@@ -2291,6 +2460,12 @@ export function App() {
                     });
                   }
                 }}
+                workspace={currentWorkspace}
+                onOpenSettings={(tab) => {
+                  setSettingsTab(tab || "appearance");
+                  setCurrentView("settings");
+                }}
+                availableProviders={availableProviders}
               />
             ) : (
               <MainContent
@@ -2298,8 +2473,8 @@ export function App() {
                 selectedTaskId={selectedTaskId}
                 workspace={currentWorkspace}
                 events={events}
-                childTasks={childTasks}
-                childEvents={childEvents}
+                childTasks={remoteTaskView ? [] : childTasks}
+                childEvents={remoteTaskView ? [] : childEvents}
                 onSelectChildTask={setSelectedTaskId}
                 onSendMessage={handleSendMessage}
                 onCreateTask={handleCreateTask}
@@ -2328,6 +2503,7 @@ export function App() {
                 onOpenBrowserView={handleOpenBrowserView}
                 onViewTaskOutputs={(taskId, primaryOutputPath) => {
                   setCurrentView("main");
+                  clearRemoteTaskView();
                   setSelectedTaskId(taskId);
                   setRightSidebarCollapsed(false);
                   if (primaryOutputPath) {
@@ -2341,9 +2517,17 @@ export function App() {
                 onModelChange={handleModelChange}
                 availableProviders={availableProviders}
                 uiDensity={uiDensity}
+                remoteSession={
+                  remoteTaskView
+                    ? {
+                        deviceId: remoteTaskView.deviceId,
+                        deviceName: remoteTaskView.deviceName,
+                      }
+                    : null
+                }
               />
             )}
-            {currentView === "main" && !effectiveRightCollapsed && (
+            {currentView === "main" && !effectiveRightCollapsed && !remoteTaskView && (
               <RightPanel
                 task={selectedTask}
                 workspace={currentWorkspace}

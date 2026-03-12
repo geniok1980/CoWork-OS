@@ -8,6 +8,7 @@ import type {
   ImprovementCandidate,
   ImprovementCandidateSource,
   ImprovementEvidence,
+  ImprovementFailureClass,
 } from "../../shared/types";
 import { ImprovementCandidateRepository } from "./ImprovementRepositories";
 import { ImprovementRunRepository } from "./ImprovementRepositories";
@@ -15,6 +16,9 @@ import { ImprovementSettingsManager } from "./ImprovementSettingsManager";
 
 const RECENT_WINDOW_DAYS = 14;
 const MAX_EVIDENCE_ITEMS = 8;
+const PROVIDER_FAILURE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const DETERMINISTIC_FAILURE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const MAX_FAILURE_STREAK_BEFORE_PARK = 3;
 
 export class ImprovementCandidateService {
   private readonly candidateRepo: ImprovementCandidateRepository;
@@ -88,6 +92,7 @@ export class ImprovementCandidateService {
     this.candidateRepo.update(candidateId, {
       status: "running",
       lastExperimentAt: Date.now(),
+      resolvedAt: null as Any,
     });
   }
 
@@ -108,7 +113,49 @@ export class ImprovementCandidateService {
   reopenCandidate(candidateId: string): void {
     this.candidateRepo.update(candidateId, {
       status: "open",
+      cooldownUntil: null as Any,
+      parkReason: null as Any,
+      parkedAt: null as Any,
       resolvedAt: null as Any,
+    });
+  }
+
+  markCandidateParked(candidateId: string, reason: string): void {
+    this.candidateRepo.update(candidateId, {
+      status: "parked",
+      parkReason: reason,
+      parkedAt: Date.now(),
+      resolvedAt: Date.now(),
+    });
+  }
+
+  recordCampaignFailure(
+    candidateId: string,
+    params: { failureClass: ImprovementFailureClass; attemptFingerprint: string; reason?: string },
+  ): void {
+    const candidate = this.candidateRepo.findById(candidateId);
+    if (!candidate) return;
+
+    const sameFingerprint =
+      candidate.lastAttemptFingerprint &&
+      candidate.lastAttemptFingerprint === params.attemptFingerprint;
+    const failureStreak = sameFingerprint ? (candidate.failureStreak || 0) + 1 : 1;
+    const cooldownMs = this.isProviderFailure(params.failureClass)
+      ? PROVIDER_FAILURE_COOLDOWN_MS
+      : DETERMINISTIC_FAILURE_COOLDOWN_MS;
+    const now = Date.now();
+    const shouldPark = sameFingerprint && failureStreak >= MAX_FAILURE_STREAK_BEFORE_PARK;
+
+    this.candidateRepo.update(candidateId, {
+      status: shouldPark ? "parked" : "open",
+      failureStreak,
+      cooldownUntil: shouldPark ? null as Any : now + cooldownMs,
+      parkReason: shouldPark ? params.reason || params.failureClass : null as Any,
+      parkedAt: shouldPark ? now : null as Any,
+      lastAttemptFingerprint: params.attemptFingerprint,
+      lastFailureClass: params.failureClass,
+      lastExperimentAt: now,
+      resolvedAt: shouldPark ? now : null as Any,
     });
   }
 
@@ -391,7 +438,7 @@ export class ImprovementCandidateService {
       const nextStatus =
         existing.status === "dismissed"
           ? "dismissed"
-          : existing.status === "running" || existing.status === "review"
+          : existing.status === "running" || existing.status === "review" || existing.status === "parked"
             ? existing.status
             : "open";
       this.candidateRepo.update(existing.id, {
@@ -406,7 +453,7 @@ export class ImprovementCandidateService {
         lastTaskId: input.lastTaskId || existing.lastTaskId,
         lastEventType: input.lastEventType || existing.lastEventType,
         lastSeenAt: input.evidence.createdAt,
-        resolvedAt: nextStatus === "open" ? undefined : existing.resolvedAt,
+        resolvedAt: nextStatus === "open" ? null as Any : existing.resolvedAt,
       });
       return this.candidateRepo.findById(existing.id)!;
     }
@@ -459,6 +506,10 @@ export class ImprovementCandidateService {
     if (terminalStatus === "failed") return 0.82;
     if (terminalStatus === "partial_success") return 0.62;
     return 0.7;
+  }
+
+  private isProviderFailure(failureClass: ImprovementFailureClass): boolean {
+    return failureClass.startsWith("provider_");
   }
 
   private shouldIngestTaskFailure(

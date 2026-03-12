@@ -47,8 +47,9 @@ export class ImprovementCandidateRepository {
           id, workspace_id, fingerprint, source, status, title, summary,
           severity, recurrence_count, fixability_score, priority_score,
           evidence, last_task_id, last_event_type, first_seen_at, last_seen_at,
-          last_experiment_at, resolved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_experiment_at, failure_streak, cooldown_until, park_reason, parked_at,
+          last_attempt_fingerprint, last_failure_class, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       )
       .run(
@@ -69,6 +70,12 @@ export class ImprovementCandidateRepository {
         candidate.firstSeenAt,
         candidate.lastSeenAt,
         candidate.lastExperimentAt || null,
+        candidate.failureStreak || 0,
+        candidate.cooldownUntil || null,
+        candidate.parkReason || null,
+        candidate.parkedAt || null,
+        candidate.lastAttemptFingerprint || null,
+        candidate.lastFailureClass || null,
         candidate.resolvedAt || null,
       );
 
@@ -88,6 +95,12 @@ export class ImprovementCandidateRepository {
       firstSeenAt: "first_seen_at",
       lastSeenAt: "last_seen_at",
       lastExperimentAt: "last_experiment_at",
+      failureStreak: "failure_streak",
+      cooldownUntil: "cooldown_until",
+      parkReason: "park_reason",
+      parkedAt: "parked_at",
+      lastAttemptFingerprint: "last_attempt_fingerprint",
+      lastFailureClass: "last_failure_class",
       resolvedAt: "resolved_at",
     };
 
@@ -151,11 +164,12 @@ export class ImprovementCandidateRepository {
         FROM improvement_candidates
         WHERE workspace_id = ?
           AND status = 'open'
+          AND (cooldown_until IS NULL OR cooldown_until <= ?)
         ORDER BY priority_score DESC, last_seen_at DESC
-        LIMIT ?
+        LIMIT 1
       `,
       )
-      .get(workspaceId, maxOpenCandidates) as Any;
+      .get(workspaceId, Date.now()) as Any;
     return row ? this.mapCandidate(row) : undefined;
   }
 
@@ -178,6 +192,12 @@ export class ImprovementCandidateRepository {
       firstSeenAt: Number(row.first_seen_at || 0),
       lastSeenAt: Number(row.last_seen_at || 0),
       lastExperimentAt: row.last_experiment_at ? Number(row.last_experiment_at) : undefined,
+      failureStreak: Number(row.failure_streak || 0),
+      cooldownUntil: row.cooldown_until ? Number(row.cooldown_until) : undefined,
+      parkReason: row.park_reason || undefined,
+      parkedAt: row.parked_at ? Number(row.parked_at) : undefined,
+      lastAttemptFingerprint: row.last_attempt_fingerprint || undefined,
+      lastFailureClass: row.last_failure_class || undefined,
       resolvedAt: row.resolved_at ? Number(row.resolved_at) : undefined,
     };
   }
@@ -344,11 +364,11 @@ export class ImprovementCampaignRepository {
       .prepare(
         `
         INSERT INTO improvement_campaigns (
-          id, candidate_id, workspace_id, execution_workspace_id, root_task_id, status, review_status, promotion_status,
-          winner_variant_id, promoted_task_id, promoted_branch_name, merge_result, pull_request, promotion_error,
+          id, candidate_id, workspace_id, execution_workspace_id, root_task_id, status, stage, review_status, promotion_status,
+          stop_reason, provider_health_snapshot, stage_budget, pr_required, winner_variant_id, promoted_task_id, promoted_branch_name, merge_result, pull_request, promotion_error,
           baseline_metrics, outcome_metrics, verdict_summary, evaluation_notes, training_evidence, holdout_evidence,
           replay_cases, created_at, started_at, completed_at, promoted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       )
       .run(
@@ -358,8 +378,13 @@ export class ImprovementCampaignRepository {
         campaign.executionWorkspaceId || null,
         campaign.rootTaskId || null,
         campaign.status,
+        campaign.stage || null,
         campaign.reviewStatus,
         campaign.promotionStatus || "idle",
+        campaign.stopReason || null,
+        campaign.providerHealthSnapshot ? JSON.stringify(campaign.providerHealthSnapshot) : null,
+        campaign.stageBudget ? JSON.stringify(campaign.stageBudget) : null,
+        campaign.prRequired === false ? 0 : 1,
         campaign.winnerVariantId || null,
         campaign.promotedTaskId || null,
         campaign.promotedBranchName || null,
@@ -387,8 +412,13 @@ export class ImprovementCampaignRepository {
       workspaceId: "workspace_id",
       executionWorkspaceId: "execution_workspace_id",
       rootTaskId: "root_task_id",
+      stage: "stage",
       reviewStatus: "review_status",
       promotionStatus: "promotion_status",
+      stopReason: "stop_reason",
+      providerHealthSnapshot: "provider_health_snapshot",
+      stageBudget: "stage_budget",
+      prRequired: "pr_required",
       winnerVariantId: "winner_variant_id",
       promotedTaskId: "promoted_task_id",
       promotedBranchName: "promoted_branch_name",
@@ -458,7 +488,9 @@ export class ImprovementCampaignRepository {
 
   countActive(): number {
     const row = this.db
-      .prepare("SELECT COUNT(*) as count FROM improvement_campaigns WHERE status IN ('planning', 'running_variants', 'judging')")
+      .prepare(
+        "SELECT COUNT(*) as count FROM improvement_campaigns WHERE status IN ('queued', 'preflight', 'reproducing', 'implementing', 'verifying', 'planning', 'running_variants', 'judging')",
+      )
       .get() as { count: number };
     return Number(row?.count || 0);
   }
@@ -471,8 +503,16 @@ export class ImprovementCampaignRepository {
       executionWorkspaceId: row.execution_workspace_id || undefined,
       rootTaskId: row.root_task_id || undefined,
       status: row.status,
+      stage: row.stage || undefined,
       reviewStatus: row.review_status,
       promotionStatus: row.promotion_status || "idle",
+      stopReason: row.stop_reason || undefined,
+      providerHealthSnapshot: safeJsonParse<Record<string, unknown> | undefined>(
+        row.provider_health_snapshot,
+        undefined,
+      ),
+      stageBudget: safeJsonParse<Record<string, unknown> | undefined>(row.stage_budget, undefined),
+      prRequired: Number(row.pr_required ?? 1) !== 0,
       winnerVariantId: row.winner_variant_id || undefined,
       promotedTaskId: row.promoted_task_id || undefined,
       promotedBranchName: row.promoted_branch_name || undefined,

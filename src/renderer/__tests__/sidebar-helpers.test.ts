@@ -8,6 +8,7 @@ import {
   compareTasksByPinAndRecency,
   countHiddenFailedSessions,
   isActiveSessionStatus,
+  isAutomatedSession,
   isAwaitingSessionStatus,
   shouldShowTaskInSidebarSessions,
   shouldShowRootTaskInSidebar,
@@ -145,6 +146,40 @@ describe("shouldShowTaskInSidebarSessions", () => {
 
   it("keeps local tasks visible in the sidebar", () => {
     expect(shouldShowTaskInSidebarSessions(createTask({}))).toBe(true);
+  });
+});
+
+describe("isAutomatedSession", () => {
+  it("treats scheduled and self-improvement tasks as automated", () => {
+    expect(isAutomatedSession(createTask({ source: "cron" }))).toBe(true);
+    expect(isAutomatedSession(createTask({ source: "improvement" }))).toBe(true);
+  });
+
+  it("keeps webhook and generic api tasks out of the automated bucket", () => {
+    expect(isAutomatedSession(createTask({ source: "hook" }))).toBe(false);
+    expect(isAutomatedSession(createTask({ source: "api" }))).toBe(false);
+  });
+
+  it("treats company and heartbeat api tasks as automated", () => {
+    expect(isAutomatedSession(createTask({ source: "api", companyId: "company-123" }))).toBe(true);
+    expect(isAutomatedSession(createTask({ source: "api", issueId: "issue-123" }))).toBe(true);
+    expect(isAutomatedSession(createTask({ source: "api", heartbeatRunId: "run-123" }))).toBe(true);
+  });
+
+  it("keeps explicit manual tasks out of the automated bucket even when attached to a run", () => {
+    expect(
+      isAutomatedSession(
+        createTask({
+          source: "manual",
+          heartbeatRunId: "run-123",
+          issueId: "issue-123",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("still treats legacy heartbeat tasks without an explicit manual source as automated", () => {
+    expect(isAutomatedSession(createTask({ heartbeatRunId: "run-123" }))).toBe(true);
   });
 });
 

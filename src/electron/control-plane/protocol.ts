@@ -284,6 +284,9 @@ export const Methods = {
   WORKSPACE_GET: "workspace.get",
   WORKSPACE_CREATE: "workspace.create",
 
+  // File operations (for remote file selection)
+  FILE_LIST_DIRECTORY: "file.listDirectory",
+
   // Managed account operations (API-first signup/account lifecycle)
   ACCOUNT_LIST: "account.list",
   ACCOUNT_GET: "account.get",

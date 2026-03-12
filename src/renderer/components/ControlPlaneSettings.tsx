@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Play } from "lucide-react";
 import type {
   ControlPlaneSettingsData,
@@ -30,6 +30,14 @@ export function ControlPlaneSettings() {
   const [localToken, setLocalToken] = useState("");
   const [showRemoteToken, setShowRemoteToken] = useState(false);
   const [allowLAN, setAllowLAN] = useState(false);
+  const remoteConfigDirtyRef = useRef(false);
+
+  // Reset dirty ref when switching away so next load can overwrite
+  useEffect(() => {
+    return () => {
+      remoteConfigDirtyRef.current = false;
+    };
+  }, []);
 
   // Remote config form state
   const [remoteUrl, setRemoteUrl] = useState("ws://127.0.0.1:18789");
@@ -95,11 +103,13 @@ export function ControlPlaneSettings() {
         setAllowLAN(settingsData.host === "0.0.0.0");
       }
 
-      // Set remote config from settings
+      // Avoid clobbering in-progress edits during background status polling.
       if (settingsData?.remote) {
-        setRemoteUrl(settingsData.remote.url || "ws://127.0.0.1:18789");
-        setRemoteToken(settingsData.remote.token || "");
-        setRemoteDeviceName(settingsData.remote.deviceName || "CoWork Remote Client");
+        if (!remoteConfigDirtyRef.current) {
+          setRemoteUrl(settingsData.remote.url || "ws://127.0.0.1:18789");
+          setRemoteToken(settingsData.remote.token || "");
+          setRemoteDeviceName(settingsData.remote.deviceName || "CoWork Remote Client");
+        }
 
         // Set SSH tunnel config from settings
         const remoteSshTunnel = (settingsData.remote as { sshTunnel?: SSHTunnelConfig }).sshTunnel;
@@ -271,6 +281,7 @@ export function ControlPlaneSettings() {
         token: remoteToken,
         deviceName: remoteDeviceName,
       });
+      remoteConfigDirtyRef.current = false;
       await loadData();
     } catch (error) {
       console.error("Failed to save remote config:", error);
@@ -692,7 +703,10 @@ export function ControlPlaneSettings() {
               <input
                 type="text"
                 value={remoteUrl}
-                onChange={(e) => setRemoteUrl(e.target.value)}
+                onChange={(e) => {
+                  remoteConfigDirtyRef.current = true;
+                  setRemoteUrl(e.target.value);
+                }}
                 placeholder="ws://127.0.0.1:18789"
                 className="settings-input"
               />
@@ -704,7 +718,10 @@ export function ControlPlaneSettings() {
                 <input
                   type={showRemoteToken ? "text" : "password"}
                   value={remoteToken}
-                  onChange={(e) => setRemoteToken(e.target.value)}
+                  onChange={(e) => {
+                    remoteConfigDirtyRef.current = true;
+                    setRemoteToken(e.target.value);
+                  }}
                   placeholder="Enter authentication token"
                   className="token-input"
                 />
@@ -723,7 +740,10 @@ export function ControlPlaneSettings() {
               <input
                 type="text"
                 value={remoteDeviceName}
-                onChange={(e) => setRemoteDeviceName(e.target.value)}
+                onChange={(e) => {
+                  remoteConfigDirtyRef.current = true;
+                  setRemoteDeviceName(e.target.value);
+                }}
                 placeholder="CoWork Remote Client"
                 className="settings-input"
               />

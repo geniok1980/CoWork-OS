@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, Fragment } from "react";
-import { Filter, Cpu, EyeOff } from "lucide-react";
+import { Filter, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Server } from "lucide-react";
 import { Task, Workspace, UiDensity, InfraStatus } from "../../shared/types";
 
 interface SidebarProps {
@@ -58,11 +58,15 @@ export function getSessionMode(task: Task): SessionMode {
  *  directly). These are grouped into a collapsible "Automated" folder at the
  *  bottom of the sidebar so they don't push user sessions off screen. */
 export function isAutomatedSession(task: Task): boolean {
+  if (task.source === "manual") return false;
+  if (task.source === "cron" || task.source === "improvement") return true;
+  if (task.source === "hook") return false;
+  if (task.source === "api") {
+    return Boolean(
+      task.companyId || task.goalId || task.projectId || task.issueId || task.heartbeatRunId,
+    );
+  }
   return (
-    task.source === "improvement" ||
-    task.source === "cron" ||
-    task.source === "hook" ||
-    task.source === "api" ||
     !!task.heartbeatRunId
   );
 }
@@ -792,6 +796,42 @@ export function Sidebar({
     onSelectTask(null);
   };
 
+  const navigateDevicesSection = useCallback(
+    (section: "overview" | "tasks" | "devices" | "apps" | "storage" | "alerts") => {
+      window.dispatchEvent(new CustomEvent("devices:navigate", { detail: { section } }));
+    },
+    [],
+  );
+
+  const triggerDevicesAction = useCallback((action: "pairing") => {
+    window.dispatchEvent(new CustomEvent("devices:action", { detail: { action } }));
+  }, []);
+
+  const remoteTasks = useMemo(
+    () => tasks.filter((task) => !!task.targetNodeId),
+    [tasks],
+  );
+
+  const remoteDeviceIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const task of remoteTasks) {
+      if (task.targetNodeId) ids.add(task.targetNodeId);
+    }
+    return ids;
+  }, [remoteTasks]);
+
+  const remoteAttentionCount = useMemo(
+    () =>
+      remoteTasks.filter(
+        (task) =>
+          task.status === "blocked" ||
+          task.status === "failed" ||
+          task.terminalStatus === "awaiting_approval" ||
+          task.terminalStatus === "needs_user_action",
+      ).length,
+    [remoteTasks],
+  );
+
   // Render a task node and its children recursively
   const renderTaskNode = (
     node: TaskTreeNode,
@@ -1038,15 +1078,15 @@ export function Sidebar({
             className={`new-task-btn cli-new-task-btn cli-action-btn sidebar-home-btn ${isHomeActive ? "active" : ""}`}
             onClick={onOpenHome}
             aria-pressed={isHomeActive}
-            title="Automated"
+            title="Automations"
           >
             <span className="cli-btn-text">
-              <span className="terminal-only">automated</span>
+              <span className="terminal-only">automation</span>
               <span className="modern-only cli-new-task-modern-label">
                 <span className="sidebar-home-btn-icon" aria-hidden="true" style={{ display: 'flex' }}>
                   <Cpu size={16} strokeWidth={2} style={{ display: 'block' }} />
                 </span>
-                <span>Automated</span>
+                <span>Automations</span>
               </span>
             </span>
           </button>
@@ -1074,96 +1114,167 @@ export function Sidebar({
         </div>
       </div>
 
-      {/* Sessions List Header (Unified with top navigation buttons structure) */}
-      <div className="sidebar-header-sessions" style={{ padding: "0 12px", marginBottom: "8px" }}>
-        <div className="new-task-btn cli-new-task-btn cli-action-btn cli-sessions-header" style={{ margin: 0 }}>
-          <button
-            type="button"
-            className="cli-list-header-toggle"
-            onClick={() => setSessionsCollapsed((value) => !value)}
-            aria-expanded={!sessionsCollapsed}
-            title={sessionsCollapsed ? "Expand sessions" : "Collapse sessions"}
-          >
-            <span className="cli-section-prompt cli-sessions-collapse-indicator">
-              {sessionsCollapsed ? "▸" : "▾"}
-            </span>
-            <span className="terminal-only">SESSIONS</span>
-            <span className="modern-only cli-sessions-title">Sessions</span>
-          </button>
-          <div className="cli-list-header-actions">
-            {(availableModes.length > 1 || activeModeFilters.size > 0) && (
-              <button
-                type="button"
-                className={`session-filter-toggle ${showFilterBar || activeModeFilters.size > 0 ? "active" : ""}`}
-                onClick={() => setShowFilterBar(!showFilterBar)}
-                title="Filter by mode"
-                style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}
-              >
-                <Filter size={13} strokeWidth={2.5} style={{ display: 'block' }} />
-                {activeModeFilters.size > 0 && (
-                  <span className="filter-count" style={{ marginLeft: '4px', fontSize: '10px' }}>{activeModeFilters.size}</span>
-                )}
+      {isDevicesActive ? (
+        <div className="devices-sidebar-panel">
+          <div className="devices-sidebar-header">
+            <div className="devices-sidebar-home">
+              <button type="button" className="devices-sidebar-home-btn active" onClick={() => navigateDevicesSection("overview")}>
+                <span className="devices-sidebar-home-icon">
+                  <Server size={14} />
+                </span>
+                <span>Fleet Home</span>
+                <span className="devices-sidebar-home-count">{remoteDeviceIds.size}</span>
               </button>
-            )}
-            {failedSessionCount > 0 && (
-              <button
-                type="button"
-                className={`show-failed-toggle ${showFailedSessions ? "active" : ""}`}
-                onClick={() => setShowFailedSessions(!showFailedSessions)}
-                style={{ cursor: 'pointer', padding: '2px 4px' }}
-              >
-                {showFailedSessions ? "Hide" : "Show"} failed ({failedSessionCount})
+            </div>
+            <div className="devices-sidebar-grid">
+              <button type="button" className="devices-sidebar-link" onClick={() => triggerDevicesAction("pairing")}>
+                <Server size={14} />
+                <span>Pair remote</span>
+                <strong>+</strong>
               </button>
-            )}
+              <button type="button" className="devices-sidebar-link" onClick={() => navigateDevicesSection("alerts")}>
+                <Bell size={14} />
+                <span>Attention queue</span>
+                <strong>{remoteAttentionCount}</strong>
+              </button>
+              <button type="button" className="devices-sidebar-link" onClick={() => navigateDevicesSection("apps")}>
+                <AppWindow size={14} />
+                <span>Setup inbox</span>
+              </button>
+              <button type="button" className="devices-sidebar-link" onClick={() => navigateDevicesSection("storage")}>
+                <HardDrive size={14} />
+                <span>Isolation check</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="devices-sidebar-subhead">
+            <span>Observer</span>
+            <button type="button" className="devices-sidebar-sort" onClick={() => navigateDevicesSection("alerts")}>
+              Attention {remoteAttentionCount > 0 ? `(${remoteAttentionCount})` : ""}
+            </button>
+          </div>
+
+          <div className="devices-sidebar-list">
+            <button type="button" className="devices-sidebar-item featured" onClick={() => navigateDevicesSection("tasks")}>
+              <div className="devices-sidebar-item-top">
+                <Rows3 size={14} />
+                <span className="devices-sidebar-item-label">Execution lane</span>
+                <span className="devices-sidebar-item-dot" />
+              </div>
+              <strong>{remoteTasks.length > 0 ? `${remoteTasks.length} remote runs in view` : "No remote runs yet"}</strong>
+              <span>Use this page to launch and supervise work happening on paired remotes.</span>
+            </button>
+            <button type="button" className="devices-sidebar-item" onClick={() => triggerDevicesAction("pairing")}>
+              <div className="devices-sidebar-item-top">
+                <Server size={14} />
+                <span>Fleet shape</span>
+              </div>
+              <strong>{remoteDeviceIds.size > 0 ? `${remoteDeviceIds.size} remotes paired or active` : "Start with your first remote"}</strong>
+              <span>Separate work, personal, archive, or automation machines without mixing disks.</span>
+            </button>
+            <button type="button" className="devices-sidebar-item" onClick={() => navigateDevicesSection("alerts")}>
+              <div className="devices-sidebar-item-top">
+                <Bell size={14} />
+                <span>Observer feed</span>
+              </div>
+              <strong>{remoteAttentionCount > 0 ? `${remoteAttentionCount} issues waiting` : "Observer is quiet"}</strong>
+              <span>Approvals, failed app connections, and offline remotes surface here.</span>
+            </button>
           </div>
         </div>
-
-        {pinActionError && (
-          <div className="cli-sidebar-error" role="alert" style={{ marginTop: '4px', marginLeft: '4px', marginRight: '4px' }}>
-            {pinActionError}
-          </div>
-        )}
-
-        {showFilterBar && (
-          <div className="session-filters-bar cli-session-filters">
-            <div className="session-filters-scroll">
+      ) : (
+        <>
+          {/* Sessions List Header (Unified with top navigation buttons structure) */}
+          <div className="sidebar-header-sessions" style={{ padding: "0 12px", marginBottom: "8px" }}>
+            <div className="new-task-btn cli-new-task-btn cli-action-btn cli-sessions-header" style={{ margin: 0 }}>
               <button
                 type="button"
-                className={`session-filter-chip standard ${activeModeFilters.size === 0 ? "active" : ""}`}
-                onClick={() => setActiveModeFilters(new Set())}
+                className="cli-list-header-toggle"
+                onClick={() => setSessionsCollapsed((value) => !value)}
+                aria-expanded={!sessionsCollapsed}
+                title={sessionsCollapsed ? "Expand sessions" : "Collapse sessions"}
               >
-                All
+                <span className="cli-section-prompt cli-sessions-collapse-indicator">
+                  {sessionsCollapsed ? "▸" : "▾"}
+                </span>
+                <span className="terminal-only">SESSIONS</span>
+                <span className="modern-only cli-sessions-title">Sessions</span>
               </button>
-              {availableModes.map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  className={`session-filter-chip ${mode} ${activeModeFilters.has(mode) ? "active" : ""}`}
-                  onClick={() => toggleModeFilter(mode)}
-                >
-                  <span className="filter-chip-dot" />
-                  {mode}
-                </button>
-              ))}
+              <div className="cli-list-header-actions">
+                {(availableModes.length > 1 || activeModeFilters.size > 0) && (
+                  <button
+                    type="button"
+                    className={`session-filter-toggle ${showFilterBar || activeModeFilters.size > 0 ? "active" : ""}`}
+                    onClick={() => setShowFilterBar(!showFilterBar)}
+                    title="Filter by mode"
+                    style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}
+                  >
+                    <Filter size={13} strokeWidth={2.5} style={{ display: 'block' }} />
+                    {activeModeFilters.size > 0 && (
+                      <span className="filter-count" style={{ marginLeft: '4px', fontSize: '10px' }}>{activeModeFilters.size}</span>
+                    )}
+                  </button>
+                )}
+                {failedSessionCount > 0 && (
+                  <button
+                    type="button"
+                    className={`show-failed-toggle ${showFailedSessions ? "active" : ""}`}
+                    onClick={() => setShowFailedSessions(!showFailedSessions)}
+                    style={{ cursor: 'pointer', padding: '2px 4px' }}
+                  >
+                    {showFailedSessions ? "Hide" : "Show"} failed ({failedSessionCount})
+                  </button>
+                )}
+              </div>
             </div>
-            {activeModeFilters.size > 0 && (
-              <button
-                type="button"
-                className="session-filter-clear"
-                onClick={() => setActiveModeFilters(new Set())}
-                title="Clear filters"
-              >
-                Clear
-              </button>
+
+            {pinActionError && (
+              <div className="cli-sidebar-error" role="alert" style={{ marginTop: '4px', marginLeft: '4px', marginRight: '4px' }}>
+                {pinActionError}
+              </div>
+            )}
+
+            {showFilterBar && (
+              <div className="session-filters-bar cli-session-filters">
+                <div className="session-filters-scroll">
+                  <button
+                    type="button"
+                    className={`session-filter-chip standard ${activeModeFilters.size === 0 ? "active" : ""}`}
+                    onClick={() => setActiveModeFilters(new Set())}
+                  >
+                    All
+                  </button>
+                  {availableModes.map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={`session-filter-chip ${mode} ${activeModeFilters.has(mode) ? "active" : ""}`}
+                      onClick={() => toggleModeFilter(mode)}
+                    >
+                      <span className="filter-chip-dot" />
+                      {mode}
+                    </button>
+                  ))}
+                </div>
+                {activeModeFilters.size > 0 && (
+                  <button
+                    type="button"
+                    className="session-filter-clear"
+                    onClick={() => setActiveModeFilters(new Set())}
+                    title="Clear filters"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
             )}
           </div>
-        )}
-      </div>
 
-      {/* Sessions Scrollable List */}
-      <div className="task-list cli-task-list" ref={taskListRef}>
-        {!sessionsCollapsed && (
-          <>
+          {/* Sessions Scrollable List */}
+          <div className="task-list cli-task-list" ref={taskListRef}>
+            {!sessionsCollapsed && (
+              <>
             {/* Automated sessions folder — collapsed by default, shown at top */}
             {automatedTaskTree.length > 0 && (
               <div className="automated-sessions-folder">
@@ -1240,9 +1351,11 @@ export function Sidebar({
                 <span className="modern-only">Loading more sessions…</span>
               </div>
             )}
-          </>
-        )}
-      </div>
+              </>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Footer */}
       <div className="sidebar-footer cli-sidebar-footer">

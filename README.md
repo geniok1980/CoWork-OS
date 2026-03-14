@@ -51,8 +51,8 @@
 - **Evolving Intelligence** — Unified Memory Synthesizer merges all 6 memory subsystems into a single coherent context block. Adaptive Style Engine learns your communication preferences from message patterns and feedback. Evolution Metrics dashboard quantifies improvement over time (correction rate, knowledge growth, style alignment).
 - **Usage Insights** — Dashboard showing task stats, cost/token tracking by model, activity heatmaps, top skills, and per-pack analytics.
 - **ChatGPT History Import** — Import your full ChatGPT conversation history. CoWork OS instantly knows your preferences, past projects, and context — no cold start. All data stays encrypted on your machine and never leaves it.
-- **Security-first** — Approval workflows, sandboxed execution, configurable guardrails, encrypted storage, and 3200+ tests.
-- **Structured guidance** — In propose-style flows, the agent can pause with short multiple-choice prompts instead of ambiguous free-text follow-ups.
+- **Security-first** — Approval workflows, sandboxed execution, configurable guardrails, encrypted storage, and 4000+ tests.
+- **Structured guidance** — In plan-mode flows, the agent can pause with short multiple-choice prompts instead of ambiguous free-text follow-ups.
 - **Runtime resilience** — Adaptive turn budgets, context-overflow recovery, and safe path normalization keep long-running tasks moving without silent file drift.
 - **Local-first & BYOK** — Your data and API keys stay on your machine. No telemetry. No middleman.
 
@@ -60,6 +60,9 @@
 
 Since `v0.4.13`, the main product updates are:
 
+- **Browser automation enhancements** — Chrome DevTools attach mode (`browser_attach` with `debugger_url`) for controlling existing signed-in Chrome sessions; batched actions (`browser_act_batch`) for sequential click/fill/type; profile presets (`user`, `chrome-relay`, `workspace`). See [Browser Automation](docs/features.md#browser-automation).
+- **Dashboard performance** — Tool-heavy event streams are batched to prevent UI freeze during rapid tool execution.
+- **Docker & systemd timezone** — Set `COWORK_TZ` (e.g. `America/New_York`) in Docker Compose or systemd env for correct cron/timestamps.
 - **Devices tab + managed remote devices** — CoWork OS can now save remote machines, connect over direct/Tailscale/SSH-backed control-plane routes, inspect device summaries, browse remote workspaces, attach files from remote machines, and open remote task history in a dedicated session view.
 - **Automations section refresh** — `Settings` now groups Task Queue, Self-Improve, Scheduled Tasks, Webhooks, Event Triggers, and Daily Briefing under **Automations**, while the home dashboard highlights recent automation work instead of burying it in settings.
 - **Bounded self-improvement campaigns** — The improvement loop now favors smaller, PR-first campaigns with explicit stages, provider-health reporting, verification/promotion gates, cooldowns, and candidate parking when repeated failures indicate the loop should stop retrying.
@@ -135,7 +138,7 @@ See the [Development Guide](docs/development.md) for prerequisites and details.
 1. **Create a task** — Describe what you want ("organize my Downloads by file type", "create a quarterly report spreadsheet"). No workspace needed — a temp folder is used automatically if you don't select one.
 2. **Choose a mode** — Run normally, or toggle **Autonomous** (auto-approve actions), **Collaborative** (multi-agent perspectives), or **Multi-LLM** (compare providers with a judge) per task.
 3. **Monitor execution** — Watch the real-time task timeline as the agent plans, executes, and produces artifacts. Parallel tool bursts are grouped into lane summaries, and shell commands run in a live terminal view where you can see output in real-time, stop execution, or provide input (e.g. `y`/`n`) directly.
-4. **Respond when needed** — Destructive operations require explicit approval (unless Autonomous mode is on), and propose-mode tasks can pause for structured multiple-choice input before continuing.
+4. **Respond when needed** — Destructive operations require explicit approval (unless Autonomous mode is on), and plan-mode tasks can pause for structured multiple-choice input before continuing.
 
 ## Features
 
@@ -159,7 +162,7 @@ Completion state and file availability are now explicit:
 
 Long-running tasks now have clearer operator handoffs and stronger recovery defaults:
 
-- **Structured input cards**: propose-mode tasks can pause with 1-3 short multiple-choice prompts, with answers captured inline in the desktop UI or via the Control Plane web dashboard
+- **Structured input cards**: plan-mode tasks can pause with 1-3 short multiple-choice prompts, with answers captured inline in the desktop UI or via the Control Plane web dashboard
 - **Adaptive turn recovery**: execute-mode tasks reserve room for a final answer, soft-stop exhausted follow-up windows, and make a bounded recovery attempt before triggering a safety stop
 - **Context overflow retry**: context-capacity failures trigger compaction and retry instead of immediate hard failure when the model context window is exceeded
 - **Path repair**: `/workspace/...` aliases and drifted relative paths can be normalized back into the active workspace or pinned task root, with strict-fail policies available when you want hard enforcement
@@ -274,7 +277,9 @@ Built-in structured entity and relationship memory backed by SQLite. The agent b
 
 ### Memory & Context
 
-Persistent memory with privacy protection, FTS5 search, LLM compression, and workspace kit (`.cowork/`) for durable project context. **Import your ChatGPT history** to eliminate the cold-start problem — CoWork OS knows you from day one. All imported data is stored locally and encrypted on your machine. **Proactive session compaction** automatically generates comprehensive structured summaries when context reaches 90% capacity — preserving user messages, decisions, file changes, errors, and pending work so the agent continues seamlessly without losing critical context. [Learn more](docs/features.md#persistent-memory-system) | [Context Compaction](docs/context-compaction.md)
+Persistent memory with privacy protection, FTS5 search, LLM compression, and a contract-driven workspace kit (`.cowork/`) for durable human-edited context. The workspace kit now separates workspace-wide files such as `AGENTS.md`, `USER.md`, `MEMORY.md`, `TOOLS.md`, `SOUL.md`, `IDENTITY.md`, `RULES.md`, `VIBES.md`, and `LORE.md` from project-scoped files such as `.cowork/projects/<projectId>/CONTEXT.md` and `.cowork/projects/<projectId>/ACCESS.md`. Special files get dedicated lifecycle handling: `BOOTSTRAP.md` is a one-time onboarding checklist tracked through `.cowork/workspace-state.json`, while `HEARTBEAT.md` is reserved for recurring heartbeat-only checks instead of general task context.
+
+Every tracked file follows a shared parser/linter model with freshness windows, secret detection, missing-file status, and revision snapshots stored under `.cowork/**/.history/`. Workspace kit health is surfaced in the app and can be checked locally with `npm run kit:lint` for human-readable output or JSON export. **Import your ChatGPT history** to eliminate the cold-start problem — CoWork OS knows you from day one. All imported data is stored locally and encrypted on your machine. **Proactive session compaction** automatically generates comprehensive structured summaries when context reaches 90% capacity — preserving user messages, decisions, file changes, errors, and pending work so the agent continues seamlessly without losing critical context. [Learn more](docs/features.md#persistent-memory-system) | [Context Compaction](docs/context-compaction.md)
 
 <p align="center">
   <img src="screenshots/cowork-os-agents.png" alt="Agent Personas" width="700">
@@ -329,7 +334,7 @@ See [Architecture](docs/architecture.md) for the full technical deep-dive.
 - **Approval workflows**: User consent required for destructive operations
 - **Sandbox isolation**: macOS `sandbox-exec` (native), Docker containers, or process-level isolation on Windows
 - **Encrypted storage**: OS keychain + AES-256 fallback
-- **3200+ tests** including 132+ security unit tests and 259+ WebSocket protocol tests
+- **4000+ tests** including 132+ security unit tests and 259+ WebSocket protocol tests
 
 See [Security Guide](docs/security-guide.md) and [Security Architecture](docs/security/) for details.
 
@@ -391,7 +396,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full history of completed features.
 | [Getting Started](docs/getting-started.md) | First-time setup and usage |
 | [Use Case Showcase](docs/showcase.md) | Comprehensive guide to what you can build and automate |
 | [Features](docs/features.md) | Complete feature reference |
-| [Platform Updates](docs/integration-skill-bootstrap-lifecycle.md) | Detailed implementation notes for integration setup, skill proposals, and bootstrap lifecycle |
+| [Platform Updates](docs/integration-skill-bootstrap-lifecycle.md) | Detailed implementation notes for integration setup, skill proposals, workspace-kit contracts, and bootstrap lifecycle |
 | [Channels](docs/channels.md) | Messaging channel setup (15 channels) |
 | [X Mention Triggers](docs/x-mention-triggers.md) | Configure `do:` mention-triggered task ingress on desktop and headless |
 | [Providers](docs/providers.md) | LLM provider configuration |

@@ -283,9 +283,19 @@ export function ImprovementSettingsPanel(props?: {
       setSettings(nextSettings);
       setEligibility(nextEligibility);
       setWorkspaces(combined);
-      const preferred = props?.initialWorkspaceId || combined[0]?.id || "";
-      setSelectedWorkspaceId(preferred);
-      if (preferred) await refreshWorkspaceData(preferred);
+
+      const defaultWorkspaceId =
+        combined.find((workspace) => workspace.id === ALL_WORKSPACES_VALUE)?.id || combined[0]?.id || "";
+      let workspaceToLoad = defaultWorkspaceId;
+
+      setSelectedWorkspaceId((current) => {
+        const nextSelected =
+          current && combined.some((workspace) => workspace.id === current) ? current : defaultWorkspaceId;
+        workspaceToLoad = nextSelected;
+        return nextSelected;
+      });
+
+      if (workspaceToLoad) await refreshWorkspaceData(workspaceToLoad);
     } finally {
       setLoading(false);
     }
@@ -428,6 +438,33 @@ export function ImprovementSettingsPanel(props?: {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || "Retry could not start.");
+      setActionMessage(message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resetHistory = async () => {
+    const confirmed = window.confirm(
+      "Delete all self-improvement findings, campaigns, variants, and verdict history so the loop can start fresh? Existing code and general task history will not be removed.",
+    );
+    if (!confirmed) return;
+
+    try {
+      setBusy(true);
+      const result = await window.electronAPI.resetImprovementHistory();
+      if (selectedWorkspaceId) await refreshWorkspaceData(selectedWorkspaceId);
+      const totalDeleted =
+        result.deleted.candidates +
+        result.deleted.campaigns +
+        result.deleted.variantRuns +
+        result.deleted.judgeVerdicts +
+        result.deleted.legacyRuns;
+      setActionMessage(
+        `Reset self-improvement history. Removed ${totalDeleted} record(s) (${result.deleted.candidates} candidates, ${result.deleted.campaigns} campaigns, ${result.deleted.variantRuns} variant runs, ${result.deleted.judgeVerdicts} judge verdicts, ${result.deleted.legacyRuns} legacy runs) and cancelled ${result.cancelledTaskIds.length} active improvement task(s).`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || "Unable to reset self-improvement history.");
       setActionMessage(message);
     } finally {
       setBusy(false);
@@ -782,6 +819,9 @@ export function ImprovementSettingsPanel(props?: {
             </button>
             <button className="settings-button" onClick={() => void runNextExperiment()} disabled={busy || !settings.enabled || eligibilityBlocked}>
               Run Next Campaign
+            </button>
+            <button className="settings-button settings-button-secondary" onClick={() => void resetHistory()} disabled={busy}>
+              Reset History
             </button>
           </div>
         </div>

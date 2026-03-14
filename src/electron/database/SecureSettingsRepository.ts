@@ -68,6 +68,7 @@ export type SettingsCategory =
   | "proactive-suggestions-state"
   | "improvement-loop"
   | "improvement-owner"
+  | "improvement-history"
   | "webaccess"
   | "adaptive-style-engine"
   | `plugin:${string}`;

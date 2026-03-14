@@ -60,10 +60,15 @@ export class OpenRouterProvider implements LLMProvider {
         const errorData = (await response.json().catch(() => ({}))) as {
           error?: { message?: string };
         };
-        throw new Error(
+        const detail = errorData.error?.message || response.statusText;
+        const fullMessage =
           `OpenRouter API error: ${response.status} ${response.statusText}` +
-            (errorData.error?.message ? ` - ${errorData.error.message}` : ""),
-        );
+          (detail ? ` - ${detail}` : "");
+        const err = new Error(fullMessage) as Error & { retryable?: boolean };
+        if (response.status === 429 || /rate limit|too many requests|free-models-per-min/i.test(detail)) {
+          err.retryable = true;
+        }
+        throw err;
       }
 
       const data = (await response.json()) as Any;

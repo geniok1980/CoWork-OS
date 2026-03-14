@@ -272,7 +272,10 @@ export class InfraTools {
     }
 
     const toolDefs: LLMTool[] = [];
-    if (settings.enabledCategories.sandbox) toolDefs.push(...sandboxTools);
+    // Only offer cloud sandbox tools when E2B is fully configured (API key set)
+    const sandboxConfigured =
+      settings.enabledCategories.sandbox && !!settings.e2b?.apiKey?.trim();
+    if (sandboxConfigured) toolDefs.push(...sandboxTools);
     if (settings.enabledCategories.domains) toolDefs.push(...domainTools);
     if (settings.enabledCategories.payments) toolDefs.push(...paymentTools);
     toolDefs.push(...statusTools);

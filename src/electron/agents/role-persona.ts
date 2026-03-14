@@ -1,21 +1,10 @@
-import * as fs from "fs";
-import * as path from "path";
-
 import { InputSanitizer } from "../agent/security/input-sanitizer";
+import { buildRoleKitSection } from "../context/kit-injection";
 import { redactSensitiveMarkdownContent } from "../memory/MarkdownMemoryIndexService";
 
-const KIT_DIRNAME = ".cowork";
-const ROLE_PROFILE_DIR = "agents";
-const ROLE_PROFILE_FILES: Array<{ file: string; title: string }> = [
-  { file: "VIBES.md", title: "Role Vibes" },
-  { file: "SOUL.md", title: "Role Persona" },
-  { file: "IDENTITY.md", title: "Role Identity" },
-  { file: "RULES.md", title: "Role Rules" },
-];
-
-const MAX_FILE_BYTES = 96 * 1024;
+const ROLE_FILE_ORDER = ["IDENTITY.md", "RULES.md", "SOUL.md", "VIBES.md"] as const;
+const TOTAL_ROLE_PROFILE_FILES = ROLE_FILE_ORDER.length;
 const MAX_FILE_CHARS = 4000;
-const TOTAL_ROLE_PROFILE_FILES = ROLE_PROFILE_FILES.length;
 
 interface RolePersonaOptions {
   workspacePath?: string | null;
@@ -37,38 +26,6 @@ function clampSection(text: string, maxChars: number): string {
 function sanitizePersonaText(text: string): string {
   const redacted = redactSensitiveMarkdownContent(text || "");
   return InputSanitizer.sanitizeMemoryContent(redacted).trim();
-}
-
-function safeResolveWithinWorkspace(workspacePath: string, relPath: string): string | null {
-  const root = path.resolve(workspacePath);
-  const candidate = path.resolve(workspacePath, relPath);
-  const relative = path.relative(root, candidate);
-  const isInsideWorkspace =
-    relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-
-  if (isInsideWorkspace) {
-    return candidate;
-  }
-  return null;
-}
-
-function readFilePrefix(absPath: string, maxBytes: number): string | null {
-  try {
-    const stat = fs.statSync(absPath);
-    if (!stat.isFile()) return null;
-
-    const size = Math.min(stat.size, maxBytes);
-    const fd = fs.openSync(absPath, "r");
-    try {
-      const buf = Buffer.alloc(size);
-      const bytesRead = fs.readSync(fd, buf, 0, size, 0);
-      return buf.toString("utf8", 0, bytesRead);
-    } finally {
-      fs.closeSync(fd);
-    }
-  } catch {
-    return null;
-  }
 }
 
 function slugifyRoleName(input: string): string {
@@ -164,26 +121,12 @@ function buildRoleProfileFromFiles(role: RolePersonaInput, workspacePath?: strin
   const dirs = getRoleFolderCandidates(role);
 
   for (const roleDir of dirs) {
-    for (const fileSpec of ROLE_PROFILE_FILES) {
-      if (profileByFile.has(fileSpec.file)) {
-        continue;
-      }
+    for (const file of ROLE_FILE_ORDER) {
+      if (profileByFile.has(file)) continue;
 
-      const relPath = path.join(KIT_DIRNAME, ROLE_PROFILE_DIR, roleDir, fileSpec.file);
-      const absPath = safeResolveWithinWorkspace(workspacePath, relPath);
-      if (!absPath) continue;
-
-      const raw = readFilePrefix(absPath, MAX_FILE_BYTES);
-      if (!raw) continue;
-      if (raw.trim().length < 2) continue;
-
-      const content = sanitizePersonaText(clampSection(raw, MAX_FILE_CHARS));
-      if (!content) continue;
-
-      profileByFile.set(
-        fileSpec.file,
-        `### ${fileSpec.title} (${relPath.replace(/\\/g, "/")})\n${content}`,
-      );
+      const section = buildRoleKitSection(workspacePath, roleDir, file);
+      if (!section) continue;
+      profileByFile.set(file, section.rendered);
     }
 
     if (profileByFile.size >= TOTAL_ROLE_PROFILE_FILES) {
@@ -195,16 +138,10 @@ function buildRoleProfileFromFiles(role: RolePersonaInput, workspacePath?: strin
     return "";
   }
 
-  const sections: string[] = [];
-  for (const fileSpec of ROLE_PROFILE_FILES) {
-    const section = profileByFile.get(fileSpec.file);
-    if (!section) continue;
-
-    sections.push(section);
-    sections.push("");
-  }
-
-  return sections.join("\n").trim();
+  return ROLE_FILE_ORDER.map((file) => profileByFile.get(file))
+    .filter((section): section is string => Boolean(section))
+    .join("\n\n")
+    .trim();
 }
 
 export function buildRolePersonaPrompt(

@@ -6,6 +6,9 @@ services:
       # Persist database/settings.
       - COWORK_USER_DATA_DIR=/data
 
+      # Optional: IANA timezone for the container (e.g. America/New_York, Europe/London).
+      # - COWORK_TZ=America/New_York
+
       # Optional: bootstrap a default workspace inside the container.
       - COWORK_BOOTSTRAP_WORKSPACE_PATH=/workspace
       - COWORK_BOOTSTRAP_WORKSPACE_NAME=main
@@ -41,6 +44,7 @@ services:
     restart: unless-stopped
     environment:
       - COWORK_USER_DATA_DIR=/data
+      # Optional: COWORK_TZ=America/New_York  # IANA timezone
       - COWORK_BOOTSTRAP_WORKSPACE_PATH=/workspace
       - COWORK_BOOTSTRAP_WORKSPACE_NAME=main
       - COWORK_IMPORT_ENV_SETTINGS=1

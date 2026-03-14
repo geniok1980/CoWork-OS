@@ -2,6 +2,7 @@ import { ipcMain } from "electron";
 import {
   IPC_CHANNELS,
   type ImprovementEligibility,
+  type ImprovementHistoryResetResult,
   type ImprovementLoopSettings,
 } from "../../shared/types";
 import { ImprovementLoopService } from "../improvement/ImprovementLoopService";
@@ -51,6 +52,11 @@ export function setupImprovementHandlers(service: ImprovementLoopService): void 
   ipcMain.handle(IPC_CHANNELS.IMPROVEMENT_REFRESH, async () => service.refreshCandidates());
 
   ipcMain.handle(IPC_CHANNELS.IMPROVEMENT_RUN_NEXT, async () => service.runNextExperiment());
+
+  ipcMain.handle(
+    IPC_CHANNELS.IMPROVEMENT_RESET_HISTORY,
+    async (): Promise<ImprovementHistoryResetResult> => service.resetHistory(),
+  );
 
   ipcMain.handle(IPC_CHANNELS.IMPROVEMENT_RETRY_RUN, async (_event, campaignId: string) =>
     service.retryCampaign(campaignId),

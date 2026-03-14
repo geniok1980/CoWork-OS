@@ -295,12 +295,15 @@ export function buildDisabledToolResult(opts: {
 export function buildUnavailableToolResult(opts: {
   toolName: string;
   toolUseId: string;
+  hint?: string;
 }): LLMToolResult {
+  const baseError = `Tool "${opts.toolName}" is not available in this context. Please choose a different tool or check permissions/integrations.`;
+  const error = opts.hint ? `${baseError} ${opts.hint}` : baseError;
   return {
     type: "tool_result",
     tool_use_id: opts.toolUseId,
     content: JSON.stringify({
-      error: `Tool "${opts.toolName}" is not available in this context. Please choose a different tool or check permissions/integrations.`,
+      error,
       unavailable: true,
     }),
     is_error: true,

@@ -50,7 +50,7 @@ export function buildModeDomainContract(executionMode: ExecutionMode, taskDomain
     `TASK DOMAIN: ${taskDomain}`,
     executionMode === "execute"
       ? "- Mode policy: full tool execution is allowed when needed."
-      : executionMode === "propose"
+      : executionMode === "plan"
         ? "- Mode policy: planning-only. Do not use mutating tools."
         : "- Mode policy: strict analysis/read-only. Do not use mutating tools.",
     taskDomain === "code" || taskDomain === "operations"

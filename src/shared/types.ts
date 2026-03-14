@@ -1229,6 +1229,18 @@ export interface ImprovementEligibility {
   };
 }
 
+export interface ImprovementHistoryResetResult {
+  resetAt: number;
+  deleted: {
+    candidates: number;
+    campaigns: number;
+    variantRuns: number;
+    judgeVerdicts: number;
+    legacyRuns: number;
+  };
+  cancelledTaskIds: string[];
+}
+
 export const DEFAULT_IMPROVEMENT_LOOP_SETTINGS: ImprovementLoopSettings = {
   enabled: false,
   autoRun: true,
@@ -3712,6 +3724,7 @@ export const IPC_CHANNELS = {
   IMPROVEMENT_RETRY_RUN: "improvement:retryRun",
   IMPROVEMENT_DISMISS_CANDIDATE: "improvement:dismissCandidate",
   IMPROVEMENT_REVIEW_RUN: "improvement:reviewRun",
+  IMPROVEMENT_RESET_HISTORY: "improvement:resetHistory",
 
   // Citation Engine
   CITATION_GET_FOR_TASK: "citation:getForTask",

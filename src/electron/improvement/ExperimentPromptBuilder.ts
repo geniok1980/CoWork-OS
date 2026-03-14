@@ -129,6 +129,9 @@ export function buildImprovementVariantPrompt(
   }
 
   lines.push("", "Improvement charter:");
+  lines.push(
+    "Use the observed workspace for failure context and evidence, but inspect and modify code only in the execution workspace git repository.",
+  );
   lines.push(context.program.instructions);
   lines.push("");
   lines.push("Mutable scope:");

@@ -78,12 +78,6 @@ import { EmailSettings } from "./EmailSettings";
 import { TeamsSettings } from "./TeamsSettings";
 import { GoogleChatSettings } from "./GoogleChatSettings";
 import { XSettings } from "./XSettings";
-import { NotionSettings } from "./NotionSettings";
-import { BoxSettings } from "./BoxSettings";
-import { OneDriveSettings } from "./OneDriveSettings";
-import { GoogleWorkspaceSettings } from "./GoogleWorkspaceSettings";
-import { DropboxSettings } from "./DropboxSettings";
-import { SharePointSettings } from "./SharePointSettings";
 import { SearchSettings } from "./SearchSettings";
 import { UpdateSettings } from "./UpdateSettings";
 import { GuardrailSettings } from "./GuardrailSettings";
@@ -172,14 +166,6 @@ type SecondaryChannel =
   | "email"
   | "googlechat";
 
-// App integrations shown inside "Integrations" tab
-type IntegrationChannel =
-  | "notion"
-  | "box"
-  | "onedrive"
-  | "googleworkspace"
-  | "dropbox"
-  | "sharepoint";
 
 interface SettingsProps {
   onBack: () => void;
@@ -460,17 +446,16 @@ const sidebarItems: Array<{
     group: "Communication",
     icon: <MoreHorizontal {...I} />,
   },
-  { tab: "integrations", label: "Integrations", group: "Integrations", icon: <Settings2 {...I} /> },
   { tab: "guardrails", label: "Safety Limits", group: "AI & Models", icon: <Shield {...I} /> },
   { tab: "memory", label: "Memory", group: "AI & Models", icon: <Brain {...I} /> },
   { tab: "queue", label: "Task Queue", group: "Automations", icon: <ListOrdered {...I} /> },
   { tab: "improvement", label: "Self-Improve", group: "Automations", icon: <Sparkles {...I} /> },
   { tab: "git", label: "Git", group: "Integrations", icon: <GitBranch {...I} /> },
+  { tab: "connectors", label: "Integrations", group: "Integrations", icon: <LayoutGrid {...I} /> },
+  { tab: "infrastructure", label: "Infrastructure", group: "Integrations", icon: <Zap {...I} /> },
   { tab: "skills", label: "Custom Skills", group: "Skills & Tools", icon: <Wrench {...I} /> },
   { tab: "skillhub", label: "Skill Store", group: "Skills & Tools", icon: <Store {...I} /> },
   { tab: "scheduled", label: "Scheduled Tasks", group: "Automations", icon: <Clock {...I} /> },
-  { tab: "connectors", label: "Connectors", group: "Integrations", icon: <LayoutGrid {...I} /> },
-  { tab: "infrastructure", label: "Infrastructure", group: "Integrations", icon: <Zap {...I} /> },
   { tab: "mcp", label: "Connected Tools", group: "Skills & Tools", icon: <Monitor {...I} /> },
   {
     tab: "tools",
@@ -506,15 +491,6 @@ const secondaryChannelItems: Array<{ key: SecondaryChannel; label: string; icon:
   { key: "bluebubbles", label: "BlueBubbles", icon: <Smile {...S} /> },
 ];
 
-// App integrations configuration for "Integrations" tab
-const integrationItems: Array<{ key: IntegrationChannel; label: string; icon: ReactNode }> = [
-  { key: "notion", label: "Notion", icon: <FileText {...S} /> },
-  { key: "sharepoint", label: "SharePoint", icon: <FileText {...S} /> },
-  { key: "onedrive", label: "OneDrive", icon: <Cloud {...S} /> },
-  { key: "googleworkspace", label: "Google Workspace", icon: <Star {...S} /> },
-  { key: "box", label: "Box", icon: <Box {...S} /> },
-  { key: "dropbox", label: "Dropbox", icon: <Droplets {...S} /> },
-];
 
 const LLM_PROVIDER_ICONS: Record<string, ReactNode> = {
   anthropic: <Layers {...S} />,
@@ -569,7 +545,6 @@ export function Settings({
   const [missionControlCompanyId, setMissionControlCompanyId] = useState<string | null>(null);
   const [digitalTwinsCompanyId, setDigitalTwinsCompanyId] = useState<string | null>(null);
   const [activeSecondaryChannel, setActiveSecondaryChannel] = useState<SecondaryChannel>("discord");
-  const [activeIntegration, setActiveIntegration] = useState<IntegrationChannel>("notion");
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [settings, setSettings] = useState<LLMSettingsData>({
     providerType: "anthropic",
@@ -2247,35 +2222,6 @@ export function Settings({
                   {activeSecondaryChannel === "bluebubbles" && <BlueBubblesSettings />}
                   {activeSecondaryChannel === "email" && <EmailSettings />}
                   {activeSecondaryChannel === "googlechat" && <GoogleChatSettings />}
-                </div>
-              </div>
-            ) : activeTab === "integrations" ? (
-              <div className="integrations-panel">
-                <div className="integrations-header">
-                  <h2>Integrations</h2>
-                  <p className="settings-description">
-                    Connect productivity and storage tools for the agent
-                  </p>
-                </div>
-                <div className="integrations-tabs">
-                  {integrationItems.map((item) => (
-                    <button
-                      key={item.key}
-                      className={`integrations-tab ${activeIntegration === item.key ? "active" : ""}`}
-                      onClick={() => setActiveIntegration(item.key)}
-                    >
-                      {item.icon}
-                      <span>{item.label}</span>
-                    </button>
-                  ))}
-                </div>
-                <div className="integrations-content">
-                  {activeIntegration === "notion" && <NotionSettings />}
-                  {activeIntegration === "box" && <BoxSettings />}
-                  {activeIntegration === "onedrive" && <OneDriveSettings />}
-                  {activeIntegration === "googleworkspace" && <GoogleWorkspaceSettings />}
-                  {activeIntegration === "dropbox" && <DropboxSettings />}
-                  {activeIntegration === "sharepoint" && <SharePointSettings />}
                 </div>
               </div>
             ) : activeTab === "search" ? (

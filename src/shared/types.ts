@@ -457,7 +457,8 @@ export type ApprovalType =
   | "bulk_rename"
   | "network_access"
   | "external_service"
-  | "run_command";
+  | "run_command"
+  | "risk_gate";
 
 // ============ Security Tool Groups & Risk Levels ============
 
@@ -903,7 +904,24 @@ export interface AgentConfig {
   sideChannelDuringExecution?: "paused" | "limited" | "enabled";
   /** Side-channel budget per execution window when mode is limited */
   sideChannelMaxCallsPerWindow?: number;
+  /**
+   * Capability hint for model routing via ModelCapabilityRegistry.
+   * When set (and modelKey is absent), selects a model suited for the given capability.
+   */
+  capabilityHint?: ModelCapability;
 }
+
+/**
+ * Capability dimension for model routing.
+ * Used by ModelCapabilityRegistry to select the best model for a task type.
+ */
+export type ModelCapability = "code" | "math" | "research" | "vision" | "fast" | "long_context";
+
+/** Memory tier for three-tier promotion system */
+export type MemoryTier = "short" | "medium" | "long";
+
+/** Risk classification for human-in-the-loop confirmation gates */
+export type ConfirmationRisk = "low" | "medium" | "high";
 
 /** Specification for one LLM participant in a multi-LLM run */
 export interface MultiLlmParticipant {
@@ -1112,6 +1130,14 @@ export type ImprovementCandidateStatus =
   | "resolved"
   | "dismissed";
 
+export type ImprovementCandidateReadiness =
+  | "ready"
+  | "cooling_down"
+  | "parked"
+  | "blocked_provider"
+  | "needs_more_evidence"
+  | "unknown";
+
 export type ImprovementRunStatus =
   | "queued"
   | "running"
@@ -1163,6 +1189,8 @@ export interface ImprovementCandidate {
   fingerprint: string;
   source: ImprovementCandidateSource;
   status: ImprovementCandidateStatus;
+  readiness?: ImprovementCandidateReadiness;
+  readinessReason?: string;
   title: string;
   summary: string;
   severity: number;
@@ -1179,6 +1207,8 @@ export interface ImprovementCandidate {
   cooldownUntil?: number;
   parkReason?: string;
   parkedAt?: number;
+  lastSkipReason?: string;
+  lastSkipAt?: number;
   lastAttemptFingerprint?: string;
   lastFailureClass?: ImprovementFailureClass;
   resolvedAt?: number;
@@ -1203,6 +1233,9 @@ export interface ImprovementLoopSettings {
   maxQueuedImprovementCampaigns: number;
   maxOpenCandidatesPerWorkspace: number;
   requireWorktree: boolean;
+  requireRepoChecks: boolean;
+  enforcePatchScope: boolean;
+  maxPatchFiles: number;
   reviewRequired: boolean;
   judgeRequired: boolean;
   promotionMode: ImprovementPromotionMode;
@@ -1252,6 +1285,9 @@ export const DEFAULT_IMPROVEMENT_LOOP_SETTINGS: ImprovementLoopSettings = {
   maxQueuedImprovementCampaigns: 1,
   maxOpenCandidatesPerWorkspace: 25,
   requireWorktree: true,
+  requireRepoChecks: true,
+  enforcePatchScope: true,
+  maxPatchFiles: 8,
   reviewRequired: false,
   judgeRequired: false,
   promotionMode: "github_pr",
@@ -1350,16 +1386,64 @@ export interface ImprovementProgramConfig {
   scoringPriorities: string[];
 }
 
+export interface ImprovementVariantArtifactSummary {
+  reproductionMethod?: string;
+  changedFiles: string[];
+  verificationCommands: string[];
+  prReadiness: "ready" | "not_ready" | "unknown";
+  rootCauseSummary?: string;
+  missingEvidence: string[];
+}
+
+export interface ImprovementVariantObservability {
+  stage?: string;
+  executionMode?: "analyze" | "verified";
+  artifactSummary?: ImprovementVariantArtifactSummary;
+  evaluation?: {
+    targetedVerificationPassed: boolean;
+    verificationPassed: boolean;
+    promotable: boolean;
+    reproductionEvidenceFound: boolean;
+    verificationEvidenceFound: boolean;
+    prReadinessEvidenceFound: boolean;
+    replayPassRate: number;
+    diffSizePenalty: number;
+    regressionSignals: string[];
+    safetySignals: string[];
+  };
+}
+
+export interface ImprovementCampaignObservability {
+  selectedAt?: number;
+  candidateSelectionReason?: string;
+  candidateSelectionScore?: number;
+  variantCount?: number;
+  verificationCommands?: string[];
+  stageTransitions?: Array<{
+    stage: string;
+    at: number;
+    detail?: string;
+  }>;
+  promotionAttempts?: number;
+  lastPromotionError?: string;
+}
+
 export interface ImprovementVariantEvaluation {
   variantId: string;
   lane: ImprovementVariantLane;
   score: number;
   targetedVerificationPassed: boolean;
   verificationPassed: boolean;
+  promotable: boolean;
+  reproductionEvidenceFound: boolean;
+  verificationEvidenceFound: boolean;
+  prReadinessEvidenceFound: boolean;
   regressionSignals: string[];
+  safetySignals: string[];
   failureClassResolved: boolean;
   replayPassRate: number;
   diffSizePenalty: number;
+  artifactSummary: ImprovementVariantArtifactSummary;
   summary: string;
   notes: string[];
 }
@@ -1394,6 +1478,7 @@ export interface ImprovementVariantRun {
   outcomeMetrics?: EvalBaselineMetrics;
   verdictSummary?: string;
   evaluationNotes?: string;
+  observability?: ImprovementVariantObservability;
   createdAt: number;
   startedAt?: number;
   completedAt?: number;
@@ -1412,6 +1497,8 @@ export interface ImprovementCampaign {
   stopReason?: string;
   providerHealthSnapshot?: Record<string, unknown>;
   stageBudget?: Record<string, unknown>;
+  verificationCommands?: string[];
+  observability?: ImprovementCampaignObservability;
   prRequired?: boolean;
   winnerVariantId?: string;
   promotedTaskId?: string;
@@ -3220,6 +3307,9 @@ export const IPC_CHANNELS = {
   KIT_GET_STATUS: "kit:getStatus",
   KIT_INIT: "kit:init",
   KIT_PROJECT_CREATE: "kit:projectCreate",
+  KIT_OPEN_FILE: "kit:openFile",
+  KIT_RESET_ADAPTIVE_STYLE: "kit:resetAdaptiveStyle",
+  KIT_SUBMIT_MESSAGE_FEEDBACK: "kit:submitMessageFeedback",
 
   // Task Board (Kanban)
   TASK_MOVE_COLUMN: "task:moveColumn",
@@ -3257,6 +3347,7 @@ export const IPC_CHANNELS = {
   // Task events (streaming and history)
   TASK_EVENT: "task:event",
   TASK_EVENTS: "task:events",
+  TASK_SEMANTIC_TIMELINE: "task:semanticTimeline",
   TASK_SEND_MESSAGE: "task:sendMessage",
   TASK_STEP_FEEDBACK: "task:stepFeedback", // Send feedback on an in-progress step
   TASK_SEND_STDIN: "task:sendStdin", // Send stdin input to running command
@@ -4462,6 +4553,12 @@ export interface GuardrailSettings {
   // Cross-Channel Persona Coherence
   /** Enable channel-specific persona adaptation (Slack, Email, etc. get tailored communication styles). Default false. */
   channelPersonaEnabled: boolean;
+
+  // Human-in-the-Loop Safety Gates
+  /** Enable pre-flight risk classification before mutating tool execution. Default false. */
+  hitlEnabled?: boolean;
+  /** Minimum risk level that requires user confirmation ("low" gates everything, "high" only gates high-risk). Default: "high". */
+  hitlRiskThreshold?: ConfirmationRisk;
 }
 
 // Default trusted command patterns (glob-like patterns)

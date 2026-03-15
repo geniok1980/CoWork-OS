@@ -80,7 +80,7 @@ const RENDERER_NOISE_EVENT_TYPES = new Set([
   "task_analysis",
   "executing",
 ]);
-const RENDERER_DROPPED_EVENT_TYPES = new Set(["log", "llm_usage", "task_analysis"]);
+const RENDERER_DROPPED_EVENT_TYPES = new Set(["log", "task_analysis"]);
 const RENDERER_THROTTLED_EVENT_TYPES = new Set(["progress_update", "executing", "llm_streaming"]);
 const RENDERER_NOISE_THROTTLE_MS = 250;
 /** Tool-heavy events batched to avoid UI freeze/re-render storms (OpenClaw-style fix) */

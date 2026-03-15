@@ -369,6 +369,11 @@ Each revision records:
 
 The `KIT_OPEN_FILE` IPC handler (`kit:openFile`) opens any `.cowork/`-scoped file in the system editor. If the file does not exist it is seeded from a default template (with full frontmatter and section scaffolding) before opening.
 
+This channel is part of the shared IPC contract exported from `src/shared/types.ts`, which keeps preload, renderer, and Electron handlers aligned on the same channel names. Related behavior-adaptation IPC channels in that shared contract include:
+
+- `KIT_RESET_ADAPTIVE_STYLE` → `kit:resetAdaptiveStyle`
+- `KIT_SUBMIT_MESSAGE_FEEDBACK` → `kit:submitMessageFeedback`
+
 Exposed in **Memory Hub → Per Workspace** as "Open USER.md" and "Open MEMORY.md" buttons.
 
 Security constraints:

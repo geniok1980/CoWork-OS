@@ -1103,14 +1103,66 @@ const SOURCE_ENTRY_INLINE_SPLIT_REGEX =
   /\s+(\[\d+\]\s*(?:(?:\[[^\]]+\]\([^)]+\))|https?:\/\/))/gi;
 const SOURCE_ENTRY_DETECT_REGEX =
   /\[\d+\]\s*(?:(?:\[[^\]]+\]\([^)]+\))|https?:\/\/\S+)/i;
+/** Split pipe-separated sources onto separate lines. */
+const SOURCE_PIPE_SEPARATOR_REGEX = /\s*\|\s*/g;
+/** Split inline sources: "[1] ... [2] ..." -> one per line (whitespace before [N]). */
+const SOURCE_INLINE_BEFORE_NUMBER_REGEX = /\s+(?=\[\d+\])/g;
 
 /**
  * Pre-process assistant message text to convert bare domain URLs into markdown links.
  * e.g. "spectrum.ieee.org/quantum" → "[spectrum.ieee.org/quantum](https://spectrum.ieee.org/quantum)"
  */
-function autolinkBareUrls(text: string): string {
+export function autolinkBareUrls(text: string): string {
   return text.replace(BARE_URL_REGEX, (_match, url) => {
     return `[${url}](https://${url})`;
+  });
+}
+
+/**
+ * Convert bare domains (domain.tld without path) into markdown links.
+ * e.g. "learn.microsoft.com" → "[learn.microsoft.com](https://learn.microsoft.com)"
+ * Only matches when not already inside a link or brackets.
+ */
+const BARE_DOMAIN_REGEX =
+  /(?<!\(|\[|\/)(?:^|(?<=\s))((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(?=[\s\]\)\|,;:]|$)/gi;
+const COMMON_BARE_DOMAIN_EXCLUSIONS = new Set(["e.g", "i.e"]);
+
+function shouldAutolinkBareDomain(domain: string): boolean {
+  const normalized = domain.toLowerCase();
+  if (COMMON_BARE_DOMAIN_EXCLUSIONS.has(normalized)) return false;
+
+  const labels = normalized.split(".").filter(Boolean);
+  if (labels.length < 2) return false;
+
+  const firstLabel = labels[0] || "";
+  const tld = labels[labels.length - 1] || "";
+
+  if (/^v?\d+$/.test(firstLabel)) return false;
+  if (labels.length === 2 && firstLabel.length < 3 && tld.length < 3) return false;
+
+  return true;
+}
+
+export function autolinkBareDomains(text: string): string {
+  return text.replace(BARE_DOMAIN_REGEX, (_match, domain) => {
+    if (!shouldAutolinkBareDomain(domain)) return _match;
+    return `[${domain}](https://${domain})`;
+  });
+}
+
+/**
+ * Convert URLs inside square brackets to clickable markdown links.
+ * Handles formats like [learn.microsoft.com], [https://example.com/path], [domain.com/path].
+ * Skips citation numbers [1], [2] and existing markdown links [text](url).
+ */
+const BRACKETED_URL_REGEX =
+  /\[(https?:\/\/[^\]\s]+)\](?!\s*\()|\[((?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.)+[a-z]{2,}(?:\/[^\]\s]*)?)\](?!\s*\()/gi;
+export function autolinkUrlsInBrackets(text: string): string {
+  return text.replace(BRACKETED_URL_REGEX, (_match, fullUrl: string | undefined, bareDomain: string | undefined) => {
+    const url = fullUrl ?? bareDomain;
+    if (!url) return _match;
+    const href = url.startsWith("http") ? url : `https://${url}`;
+    return `[${url}](${href})`;
   });
 }
 
@@ -1160,36 +1212,63 @@ function autolinkJsonPathPayloadLines(text: string): string {
 
 /**
  * In a "Sources" section, force each numbered source entry onto its own line.
- * Example: "[1] ... [2] ..." -> "[1] ...  \n[2] ..."
+ * Handles pipe-separated sources ("[1] ... | [2] ...") and inline sources ("[1] ... [2] ...").
+ * Works whether content is on the same line as "Sources:" or on following lines.
  */
-function normalizeSourcesSection(text: string): string {
+export function normalizeSourcesSection(text: string): string {
   const heading = SOURCES_HEADING_REGEX.exec(text);
   if (!heading) return text;
 
   const headingStart = heading.index + (heading[1] ? heading[1].length : 0);
+  const headingMatch = heading[0];
   const headingLineEnd = text.indexOf("\n", headingStart);
-  if (headingLineEnd === -1) return text;
 
-  const sectionStart = headingLineEnd + 1;
-  const remainder = text.slice(sectionStart);
-  const nextHeading = /\n#{1,6}\s+\S/.exec(remainder);
-  const sectionEnd = nextHeading ? sectionStart + nextHeading.index + 1 : text.length;
+  let sectionStart: number;
+  let sectionEnd: number;
+
+  if (headingLineEnd === -1) {
+    // Content on same line as "Sources:" (e.g. "Sources: [1] ... | [2] ...")
+    const sourcesLabelEnd = headingMatch.match(/sources\b[:\s]*/i)?.[0]?.length ?? 0;
+    sectionStart = heading.index + sourcesLabelEnd;
+    sectionEnd = text.length;
+  } else {
+    sectionStart = headingLineEnd + 1;
+    const remainder = text.slice(sectionStart);
+    const nextHeading = /\n#{1,6}\s+\S/.exec(remainder);
+    sectionEnd = nextHeading ? sectionStart + nextHeading.index + 1 : text.length;
+  }
+
   const sectionBody = text.slice(sectionStart, sectionEnd);
-  if (!SOURCE_ENTRY_DETECT_REGEX.test(sectionBody)) return text;
+  const normalizedForDetection = sectionBody
+    .replace(SOURCE_PIPE_SEPARATOR_REGEX, "\n")
+    .replace(SOURCE_INLINE_BEFORE_NUMBER_REGEX, "\n")
+    .trimStart();
 
-  const normalizedSectionBody = sectionBody
+  if (
+    !SOURCE_ENTRY_DETECT_REGEX.test(normalizedForDetection) &&
+    !/\[\d+\]/.test(normalizedForDetection)
+  ) {
+    return text;
+  }
+
+  const normalizedSectionBody = normalizedForDetection
     .replace(SOURCE_ENTRY_INLINE_SPLIT_REGEX, "  \n$1")
     .trimStart();
 
   return `${text.slice(0, sectionStart)}${normalizedSectionBody}${text.slice(sectionEnd)}`;
 }
 
-function normalizeMarkdownForDisplay(text: string): string {
+export function normalizeMarkdownForDisplay(text: string): string {
   const sanitized = sanitizeToolCallTextFromAssistant(text).text;
-  return normalizeSourcesSection(autolinkJsonPathPayloadLines(protectGlobTokens(sanitized)));
+  const protected_ = protectGlobTokens(sanitized);
+  const withJsonPaths = autolinkJsonPathPayloadLines(protected_);
+  const withBareUrls = transformOutsideFencedCodeBlocks(withJsonPaths, (seg) =>
+    autolinkUrlsInBrackets(autolinkBareDomains(autolinkBareUrls(seg))),
+  );
+  return normalizeSourcesSection(withBareUrls);
 }
 
-function normalizeTimelineTitleMarkdownForDisplay(text: string): string {
+export function normalizeTimelineTitleMarkdownForDisplay(text: string): string {
   // Timeline titles should stay compact inline text; escape ATX headings so
   // shell comments like "# route check ..." are not rendered as <h1>.
   return normalizeMarkdownForDisplay(text).replace(
@@ -1199,7 +1278,7 @@ function normalizeTimelineTitleMarkdownForDisplay(text: string): string {
   );
 }
 
-function cleanAssistantMessageForDisplay(message: string): string {
+export function cleanAssistantMessageForDisplay(message: string): string {
   return normalizeMarkdownForDisplay(
     String(message || "")
       .replace(/\[\[speak\]\]([\s\S]*?)\[\[\/speak\]\]/gi, "$1")
@@ -6709,7 +6788,10 @@ export function MainContent({
                     return -1;
                   })();
                   const isActive = timelineIndex === lastActionBlockIndex;
-                  const { summary, actionCount } = buildActionBlockSummary(item.events);
+                  const { summary, toolCallCount, durationMs, outputTokens } = buildActionBlockSummary(
+                    item.events,
+                    events,
+                  );
                   const expanded =
                     isActive || expandedActionBlocks.has(item.blockId);
                   const onToggle = () => {
@@ -6734,7 +6816,9 @@ export function MainContent({
                       <ActionBlock
                         blockId={item.blockId}
                         summary={summary}
-                        actionCount={actionCount}
+                        toolCallCount={toolCallCount}
+                        durationMs={durationMs}
+                        outputTokens={outputTokens}
                         isActive={isActive}
                         expanded={expanded}
                         onToggle={onToggle}
@@ -6827,7 +6911,9 @@ export function MainContent({
                                 )
                               }
                               timeLabel={formatTime(event.timestamp)}
-                              indicator={resolveTimelineIndicator(event)}
+                              indicator={resolveTimelineIndicator(event, {
+                                isTaskCompleted: !isTaskWorking,
+                              })}
                               showConnectorAbove={showChildConnectorAbove}
                               showConnectorBelow={showChildConnectorBelow}
                               showBranchStub={shouldShowTimelineBranchStub(event)}
@@ -7209,7 +7295,9 @@ export function MainContent({
                         )
                       }
                       timeLabel={formatTime(event.timestamp)}
-                      indicator={resolveTimelineIndicator(event)}
+                      indicator={resolveTimelineIndicator(event, {
+                        isTaskCompleted: !isTaskWorking,
+                      })}
                       showConnectorAbove={showConnectorAbove}
                       showConnectorBelow={showConnectorBelow}
                       showBranchStub={shouldShowTimelineBranchStub(event)}
@@ -7390,18 +7478,6 @@ export function MainContent({
               </div>
             </div>
           )}
-          {task.status === "completed" &&
-            task.terminalStatus === "partial_success" &&
-            verboseSteps && (
-              <div className="task-status-banner task-status-banner-paused">
-                <div className="task-status-banner-content">
-                  <strong>Completed with preserved outputs</strong>
-                  <span className="task-status-banner-detail">
-                    Cowork kept the files and summary it produced, even though some checks or steps did not fully finish.
-                  </span>
-                </div>
-              </div>
-            )}
           <div className="input-row">
             <button
               className="attachment-btn attachment-btn-left"
@@ -7950,6 +8026,90 @@ function formatStepContractEscalatedMessage(reason: string): string {
   }
 }
 
+/** Maps technical timeline/log messages to user-friendly text for verbose mode */
+function humanizeTimelineMessage(message: string): string {
+  if (!message || typeof message !== "string") return message;
+  const m = message.trim();
+
+  // Prompt budget / context optimization
+  if (/prompt budget applied$/i.test(m)) return "Optimized context to fit limits";
+
+  // Auto-waive completion gate messages
+  if (m.includes("Auto-waived verification-only failed steps") && m.includes("partial_success")) {
+    return "Completed with some verification steps skipped (results were good enough)";
+  }
+  if (m.includes("Auto-waived budget-constrained failed steps") && m.includes("partial_success")) {
+    return "Completed with some steps skipped (reached context limit)";
+  }
+  if (
+    m.includes("Auto-waived failed steps because the task already produced substantive outputs") &&
+    m.includes("partial_success")
+  ) {
+    return "Completed with some steps skipped (task already had useful results)";
+  }
+
+  // Raw event type names that may appear as messages
+  if (m === "timeline_step_updated" || m === "progress_update") return "Progress update";
+  if (m === "executing") return "Working";
+
+  // Execution outcome messages
+  if (m === "Execution completed with partial results.") return "Completed with partial results";
+  if (m.startsWith("Execution failed:") && m.includes("step(s) failed")) {
+    const n = m.match(/(\d+)\s+step\(s\)\s+failed/)?.[1];
+    return n ? `Failed: ${n} step(s) didn't complete` : "Execution failed";
+  }
+  if (m.includes("Completed with warnings:") && m.includes("optional step(s) failed")) {
+    return "Completed with some steps skipped (main work done)";
+  }
+  if (m.includes("Completed with warnings:") && m.includes("final deliverable was produced")) {
+    return "Completed with some steps skipped (output was produced)";
+  }
+  if (m.includes("Completed with warnings:") && m.includes("majority of work succeeded")) {
+    return "Completed with some steps skipped (most work done)";
+  }
+  if (m.includes("mutation-required steps failed unrecovered")) {
+    return "Failed: required file changes didn't complete";
+  }
+  if (m.includes("high-risk verification gate did not pass")) {
+    return "Failed: verification did not pass";
+  }
+
+  // Completion guard / contract messages
+  if (m.includes("Completion guard blocked finalization") && m.includes("artifact contract")) {
+    return "Paused: output didn't match requirements";
+  }
+  if (m.includes("Completion blocked:") && m.includes("unresolved")) {
+    return m.replace(/^Completion blocked:\s*unresolved\s+/, "Blocked: ");
+  }
+
+  // Other technical patterns
+  if (m.startsWith("execution_run_summary")) return "Execution summary";
+  if (/^\[verified-mode\]/i.test(m)) return m.replace(/^\[verified-mode\]\s*/i, "").trim() || "Verification";
+  if (m.includes("Suppressed raw tool-call markup")) return "Cleaned up model output";
+  if (m.includes("Security:") && m.includes("Suspicious output")) return "Security check applied";
+  if (m.includes("Security:") && m.includes("Potential injection")) return "Security check applied";
+  if (m.includes("Pre-compaction memory flush saved")) return "Freed up context space";
+  if (m.includes("LLM route selected:")) return "Selected model";
+  if (m.includes("Creating execution plan")) return m; // Already friendly
+  if (m.includes("Step timeout detected")) return "Step took too long; finishing with best effort";
+  if (m.includes("Wrap-up requested")) return "Finishing up";
+  if (m.includes("Answer-first short-circuit")) return "Answered directly (simple prompt)";
+  if (m.includes("Answer-first non-execute short-circuit")) return "Answered directly (no execution needed)";
+  if (m.includes("Pre-flight framing failed")) return "Continuing with execution";
+  if (m.includes("Answer-first pre-response failed")) return "Continuing with full execution";
+  if (m.includes("Applied /batch external=none policy")) return "Running in batch mode (no external tools)";
+  if (m.includes("User granted explicit external side-effect approval")) return "Approved to use external tools";
+  if (m.includes("External side-effect approval request failed")) return "Could not get approval for external tools";
+  if (m.includes("Normalized /") && m.includes("to deterministic skill")) return "Running skill";
+  if (m.includes("Detected inline /") && m.includes("chain")) return "Running skill chain";
+  if (m.includes("Step soft deadline reached")) return "Step time limit approached";
+  if (m.includes("Key factual claims are missing evidence links")) {
+    return "Some claims need evidence links";
+  }
+
+  return message;
+}
+
 function getSummaryStageLabel(stage: string): string | null {
   switch (stage.trim().toUpperCase()) {
     case "DISCOVER":
@@ -8085,9 +8245,9 @@ function renderEventTitle(
   }
 
   if (event.type === "timeline_step_updated" && effectiveType === "progress_update") {
-    const msg =
+    const rawMsg =
       typeof event.payload?.message === "string" ? event.payload.message : "Progress update";
-    if (msg === "Thinking...") {
+    if (rawMsg === "Thinking...") {
       return (
         <span className="thinking-title">
           Thinking
@@ -8099,7 +8259,7 @@ function renderEventTitle(
         </span>
       );
     }
-    return msg;
+    return humanizeTimelineMessage(rawMsg);
   }
 
   switch (effectiveType) {
@@ -8362,8 +8522,10 @@ function renderEventTitle(
       return "Structured input submitted";
     case "input_request_dismissed":
       return "Structured input dismissed";
-    case "log":
-      return event.payload.message;
+    case "log": {
+      const logMsg = event.payload?.message;
+      return typeof logMsg === "string" ? humanizeTimelineMessage(logMsg) : "Log";
+    }
     case "verification_started":
       return getMessage("verifying", msgCtx);
     case "verification_passed":
@@ -8380,8 +8542,10 @@ function renderEventTitle(
       return "Verification requires user action";
     case "retry_started":
       return getMessage("retrying", msgCtx, String(event.payload.attempt));
-    default:
-      return event.type;
+    default: {
+      const friendly = humanizeTimelineMessage(event.type);
+      return friendly !== event.type ? friendly : event.type;
+    }
   }
 }
 
@@ -8422,16 +8586,21 @@ function renderEventDetails(
       typeof event.payload?.stage === "string" && event.payload.stage.trim().length > 0
         ? event.payload.stage.trim()
         : "";
-    const groupId = typeof event.groupId === "string" ? event.groupId : event.payload?.groupId;
+    const groupLabel =
+      (typeof event.payload?.groupLabel === "string" && event.payload.groupLabel.trim()) || "";
     const maxParallel =
       typeof event.payload?.maxParallel === "number" && Number.isFinite(event.payload.maxParallel)
         ? Math.max(1, Math.floor(event.payload.maxParallel))
         : undefined;
+    const phaseLabel = stage ? getSummaryStageLabel(stage) || stage : null;
+    const isSubStage = groupLabel && groupLabel.toUpperCase() !== stage;
     return (
       <div className="event-details">
-        {stage ? <div>Stage: {stage}</div> : null}
-        {groupId ? <div>Group: {String(groupId)}</div> : null}
-        {typeof maxParallel === "number" ? <div>Parallel lanes: {maxParallel}</div> : null}
+        {phaseLabel ? <div>Phase: {phaseLabel}</div> : null}
+        {isSubStage ? <div>Step: {groupLabel}</div> : null}
+        {typeof maxParallel === "number" && maxParallel > 1 ? (
+          <div>{maxParallel} tasks in parallel</div>
+        ) : null}
       </div>
     );
   }
@@ -8697,8 +8866,7 @@ function renderEventDetails(
         </div>
       );
     case "assistant_message": {
-      const cleanedMessage = cleanAssistantMessageForDisplay(event.payload.message);
-      const linkedMessage = autolinkBareUrls(cleanedMessage);
+      const linkedMessage = cleanAssistantMessageForDisplay(event.payload.message);
       return (
         <div className="event-details assistant-message event-details-scrollable">
           <div className="markdown-content">

@@ -35,6 +35,7 @@ import { saveImprovementResetBaselineAt } from "./ImprovementHistoryState";
 import { ImprovementSettingsManager } from "./ImprovementSettingsManager";
 
 type Any = any;
+type ImprovementStageTransition = { stage: string; at: number; detail?: string };
 
 interface ImprovementLoopServiceDeps {
   notify?: (params: {
@@ -47,7 +48,13 @@ interface ImprovementLoopServiceDeps {
 }
 
 const SCOUT_LANE: ImprovementVariantLane = "root_cause";
-const IMPLEMENT_LANE: ImprovementVariantLane = "minimal_patch";
+// Keep this list in sync with the bounded 1..3 variants-per-campaign setting.
+// Multi-variant fan-out relies on worktree isolation so lanes never share a writable checkout.
+const IMPLEMENTATION_LANES: ImprovementVariantLane[] = [
+  "minimal_patch",
+  "test_first",
+  "guardrail_hardening",
+];
 const COWORK_WORKSPACE_SCORE_THRESHOLD = 18;
 
 export class ImprovementLoopService {
@@ -152,14 +159,14 @@ export class ImprovementLoopService {
   }
 
   getSettings(): ImprovementLoopSettings {
-    return this.applyEligibilityGuard(ImprovementSettingsManager.loadSettings());
+    return this.applyEligibilityGuard(this.normalizeSettings(ImprovementSettingsManager.loadSettings()));
   }
 
   saveSettings(settings: ImprovementLoopSettings): ImprovementLoopSettings {
-    ImprovementSettingsManager.saveSettings(this.applyEligibilityGuard(settings));
+    ImprovementSettingsManager.saveSettings(this.applyEligibilityGuard(this.normalizeSettings(settings)));
     const next = ImprovementSettingsManager.loadSettings();
     this.resetInterval();
-    return this.applyEligibilityGuard(next);
+    return this.applyEligibilityGuard(this.normalizeSettings(next));
   }
 
   listCandidates(workspaceId?: string): ImprovementCandidate[] {
@@ -370,6 +377,21 @@ export class ImprovementLoopService {
           costBudget: settings.campaignCostBudget,
         },
       },
+      observability: {
+        selectedAt: Date.now(),
+        candidateSelectionReason: "Top runnable candidate selected for bounded self-improvement campaign.",
+        candidateSelectionScore: candidate.priorityScore,
+        variantCount: Math.max(1, settings.variantsPerCampaign),
+        verificationCommands: [],
+        stageTransitions: [
+          {
+            stage: "queued",
+            at: Date.now(),
+            detail: `Candidate ${candidate.id} selected for execution workspace ${executionWorkspace.id}.`,
+          },
+        ],
+        promotionAttempts: 0,
+      },
     });
 
     this.candidateService.markCandidateRunning(candidate.id);
@@ -389,6 +411,7 @@ export class ImprovementLoopService {
         stage: "reproducing",
         startedAt: Date.now(),
         providerHealthSnapshot: preflight.providerHealthSnapshot,
+        observability: this.appendStageTransition(campaign, "reproducing", "Preflight passed. Starting scout variant."),
       });
       this.taskRepo.update(rootTask.id, {
         status: "executing",
@@ -433,6 +456,7 @@ export class ImprovementLoopService {
       baselineMetrics: campaign.baselineMetrics || this.evaluationService.snapshot(settings.evalWindowDays),
       evalWindowDays: settings.evalWindowDays,
       replayCases: campaign.replayCases,
+      maxPatchFiles: settings.maxPatchFiles,
     });
 
     this.variantRepo.update(variant.id, {
@@ -447,6 +471,24 @@ export class ImprovementLoopService {
       verdictSummary: evaluation.summary,
       evaluationNotes: evaluation.notes.join("\n"),
       branchName: variant.branchName || task.worktreeBranch,
+      observability: {
+        ...(variant.observability || {}),
+        stage: campaign.stage,
+        executionMode: variant.observability?.executionMode,
+        artifactSummary: evaluation.artifactSummary,
+        evaluation: {
+          targetedVerificationPassed: evaluation.targetedVerificationPassed,
+          verificationPassed: evaluation.verificationPassed,
+          promotable: evaluation.promotable,
+          reproductionEvidenceFound: evaluation.reproductionEvidenceFound,
+          verificationEvidenceFound: evaluation.verificationEvidenceFound,
+          prReadinessEvidenceFound: evaluation.prReadinessEvidenceFound,
+          replayPassRate: evaluation.replayPassRate,
+          diffSizePenalty: evaluation.diffSizePenalty,
+          regressionSignals: evaluation.regressionSignals,
+          safetySignals: evaluation.safetySignals,
+        },
+      },
     });
     const updatedVariant = this.variantRepo.findById(variant.id);
     const enriched = this.getCampaign(campaign.id);
@@ -466,22 +508,69 @@ export class ImprovementLoopService {
     }
 
     if (campaign.stage === "implementing") {
-      if (!evaluation.targetedVerificationPassed) {
+      const implementationVariants = this.variantRepo
+        .listByCampaignId(campaign.id)
+        .filter((item) => item.lane !== SCOUT_LANE);
+      const pendingVariants = implementationVariants.filter(
+        (item) => item.status === "queued" || item.status === "running",
+      );
+      if (pendingVariants.length > 0) {
+        return;
+      }
+
+      const judged = this.evaluationService.evaluateCampaign({
+        campaign: enriched,
+        variants: implementationVariants,
+        evalWindowDays: settings.evalWindowDays,
+      });
+      this.judgeVerdictRepo.upsert(judged.verdict);
+
+      const allVerificationCommands = judged.evaluations.flatMap(
+        (item) => item.artifactSummary.verificationCommands,
+      );
+
+      if (!judged.winner) {
+        this.campaignRepo.update(campaign.id, {
+          winnerVariantId: undefined,
+          verdictSummary: judged.verdict.summary,
+          evaluationNotes: judged.verdict.notes.join("\n"),
+          outcomeMetrics: judged.outcomeMetrics,
+          verificationCommands: [...new Set(allVerificationCommands)],
+          observability: this.appendStageTransition(
+            campaign,
+            "implementing",
+            "All implementation variants completed, but no winner cleared promotion gates.",
+          ),
+        });
         await this.failCampaign(campaign.id, candidate, {
-          failureClass: this.classifyFailureFromTask(task),
-          message: evaluation.summary,
+          failureClass: "non_promotable_result",
+          message: judged.verdict.summary,
         });
         return;
       }
+
+      const winnerVariant = this.variantRepo.findById(judged.winner.variantId) || updatedVariant;
       this.campaignRepo.update(campaign.id, {
-        status: "verifying",
+        status: settings.reviewRequired ? "ready_for_review" : "verifying",
         stage: "verifying",
-        winnerVariantId: updatedVariant.id,
-        verdictSummary: evaluation.summary,
-        evaluationNotes: evaluation.notes.join("\n"),
-        outcomeMetrics: this.evaluationService.snapshot(settings.evalWindowDays),
+        winnerVariantId: winnerVariant.id,
+        verdictSummary: judged.verdict.summary,
+        evaluationNotes: judged.verdict.notes.join("\n"),
+        outcomeMetrics: judged.outcomeMetrics,
+        verificationCommands: [...new Set(judged.winner.artifactSummary.verificationCommands)],
+        observability: this.appendStageTransition(
+          campaign,
+          "verifying",
+          `Selected ${winnerVariant.lane} as campaign winner after ${implementationVariants.length} implementation variant(s).`,
+        ),
       });
-      await this.promoteCampaign(campaign.id, updatedVariant, "accepted");
+
+      if (settings.reviewRequired) {
+        this.candidateService.markCandidateReview(campaign.candidateId);
+        return;
+      }
+
+      await this.promoteCampaign(campaign.id, winnerVariant, "accepted");
     }
   }
 
@@ -507,6 +596,19 @@ export class ImprovementLoopService {
       promotionError: undefined,
       status: "verifying",
       stage: "verifying",
+      observability: {
+        ...(campaign.observability || {}),
+        promotionAttempts: (campaign.observability?.promotionAttempts || 0) + 1,
+        lastPromotionError: undefined,
+        stageTransitions: [
+            ...this.getStageTransitions(campaign.observability),
+          {
+            stage: "verifying",
+            at: Date.now(),
+            detail: `Promoting winner ${winner.lane}.`,
+          },
+        ],
+      },
     });
     if (campaign.rootTaskId) {
       this.taskRepo.update(campaign.rootTaskId, {
@@ -540,6 +642,19 @@ export class ImprovementLoopService {
         promotedTaskId: winner.taskId,
         promotedBranchName: winner.branchName,
         completedAt: Date.now(),
+        observability: {
+          ...(campaign.observability || {}),
+          promotionAttempts: (campaign.observability?.promotionAttempts || 0) + 1,
+          lastPromotionError: undefined,
+          stageTransitions: [
+            ...this.getStageTransitions(campaign.observability),
+            {
+              stage: "completed",
+              at: Date.now(),
+              detail: `Draft PR opened successfully for ${winner.lane}.`,
+            },
+          ],
+        },
       });
       this.candidateService.markCandidateResolved(campaign.candidateId);
       if (campaign.rootTaskId) {
@@ -614,12 +729,13 @@ export class ImprovementLoopService {
 
   private async pickNextCandidate(requireWorktree: boolean): Promise<ImprovementCandidate | undefined> {
     const workspaces = this.workspaceRepo.findAll();
-    const ranked: Array<{ candidate: ImprovementCandidate; promotable: boolean }> = [];
+    const ranked: Array<{ candidate: ImprovementCandidate; promotable: boolean; score: number }> = [];
     const worktreeManager = this.agentDaemon?.getWorktreeManager();
     for (const workspace of workspaces) {
       const candidate = this.candidateService.getTopCandidateForWorkspace(workspace.id);
       if (!candidate) continue;
       const executionWorkspace = this.resolveExecutionWorkspace(candidate, workspace);
+      const score = this.scoreExecutionWorkspace(executionWorkspace, candidate);
       const promotable =
         !!executionWorkspace &&
         (!requireWorktree ||
@@ -628,11 +744,21 @@ export class ImprovementLoopService {
               executionWorkspace.path,
               executionWorkspace.isTemp,
             ))));
-      ranked.push({ candidate, promotable });
+      if (!promotable) {
+        this.candidateService.recordCandidateSkip(
+          candidate.id,
+          requireWorktree
+            ? `Skipped because execution workspace ${executionWorkspace.name} cannot provide required git worktree isolation.`
+            : `Skipped because execution workspace ${executionWorkspace.name} is not promotable.`,
+        );
+        continue;
+      }
+      ranked.push({ candidate, promotable, score });
     }
     ranked.sort(
       (a, b) =>
         Number(b.promotable) - Number(a.promotable) ||
+        b.score - a.score ||
         b.candidate.priorityScore - a.candidate.priorityScore ||
         b.candidate.lastSeenAt - a.candidate.lastSeenAt,
     );
@@ -880,20 +1006,28 @@ export class ImprovementLoopService {
       status: "implementing",
       stage: "implementing",
       verdictSummary: "Scout stage passed. Starting implementation stage.",
+      observability: this.appendStageTransition(
+        campaign,
+        "implementing",
+        `Scout stage passed. Starting ${Math.max(1, settings.variantsPerCampaign)} implementation variant(s).`,
+      ),
     });
-    await this.startVariantTask({
-      campaignId,
-      candidate,
-      lane: IMPLEMENT_LANE,
-      stage: "implementing",
-      sourceWorkspace,
-      executionWorkspace,
-      settings,
-      executionMode: "verified",
-      verificationAgent: true,
-      maxTurns: 12,
-      maxTokens: 24000,
-    });
+    const lanes = IMPLEMENTATION_LANES.slice(0, Math.max(1, settings.variantsPerCampaign));
+    for (const lane of lanes) {
+      await this.startVariantTask({
+        campaignId,
+        candidate,
+        lane,
+        stage: "implementing",
+        sourceWorkspace,
+        executionWorkspace,
+        settings,
+        executionMode: "verified",
+        verificationAgent: true,
+        maxTurns: 12,
+        maxTokens: 24000,
+      });
+    }
   }
 
   private async startVariantTask(params: {
@@ -926,6 +1060,10 @@ export class ImprovementLoopService {
       lane: params.lane,
       status: "queued",
       baselineMetrics: campaign.baselineMetrics,
+      observability: {
+        stage: params.stage,
+        executionMode: params.executionMode,
+      },
     });
     const stageInstruction =
       params.stage === "reproducing"
@@ -969,6 +1107,11 @@ export class ImprovementLoopService {
       taskId: task.id,
       status: "running",
       startedAt: Date.now(),
+      observability: {
+        ...(variant.observability || {}),
+        stage: params.stage,
+        executionMode: params.executionMode,
+      },
     });
   }
 
@@ -988,6 +1131,11 @@ export class ImprovementLoopService {
       stopReason: params.failureClass,
       verdictSummary: params.message,
       completedAt: Date.now(),
+      observability: this.appendStageTransition(
+        campaign,
+        "completed",
+        `Campaign failed: ${params.message}`,
+      ),
     });
     if (campaign.rootTaskId) {
       this.taskRepo.update(campaign.rootTaskId, {
@@ -1029,6 +1177,19 @@ export class ImprovementLoopService {
       pullRequest: pullRequest as Any,
       stopReason: "promotion_failed",
       completedAt: Date.now(),
+      observability: {
+        ...(campaign.observability || {}),
+        lastPromotionError: message,
+        promotionAttempts: (campaign.observability?.promotionAttempts || 0) + 1,
+        stageTransitions: [
+          ...this.getStageTransitions(campaign.observability),
+          {
+            stage: "completed",
+            at: Date.now(),
+            detail: `Promotion failed: ${message}`,
+          },
+        ],
+      },
     });
     if (campaign.rootTaskId) {
       this.taskRepo.update(campaign.rootTaskId, {
@@ -1167,6 +1328,19 @@ export class ImprovementLoopService {
     };
   }
 
+  private normalizeSettings(settings: ImprovementLoopSettings): ImprovementLoopSettings {
+    const variantsPerCampaign = Math.max(
+      1,
+      Math.min(IMPLEMENTATION_LANES.length, Math.floor(settings.variantsPerCampaign || 1)),
+    );
+
+    return {
+      ...settings,
+      variantsPerCampaign,
+      requireWorktree: variantsPerCampaign > 1 ? true : settings.requireWorktree,
+    };
+  }
+
   private assertImprovementEligible(): void {
     const eligibility = getImprovementEligibility();
     if (!eligibility.eligible) {
@@ -1192,6 +1366,32 @@ export class ImprovementLoopService {
       winner.taskId ? `- Task: ${winner.taskId}` : "",
     ];
     return lines.filter(Boolean).join("\n");
+  }
+
+  private appendStageTransition(
+    campaign: ImprovementCampaign,
+    stage: string,
+    detail?: string,
+  ): ImprovementCampaign["observability"] {
+    const prior = campaign.observability || {};
+    const transitions = [
+      ...this.getStageTransitions(prior),
+      {
+        stage,
+        at: Date.now(),
+        detail,
+      },
+    ];
+    return {
+      ...prior,
+      stageTransitions: transitions,
+    };
+  }
+
+  private getStageTransitions(
+    observability: ImprovementCampaign["observability"] | undefined,
+  ): ImprovementStageTransition[] {
+    return [...((observability?.stageTransitions || []) as ImprovementStageTransition[])];
   }
 
   private async notify(params: {

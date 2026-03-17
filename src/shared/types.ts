@@ -3417,6 +3417,12 @@ export const IPC_CHANNELS = {
   LLM_GET_PI_MODELS: "llm:getPiModels",
   LLM_GET_PI_PROVIDERS: "llm:getPiProviders",
   LLM_GET_OPENAI_COMPATIBLE_MODELS: "llm:getOpenAICompatibleModels",
+  LOCAL_AI_CHECK_HF: "localai:checkHf",
+  LOCAL_AI_DETECT_HARDWARE: "localai:detectHardware",
+  LOCAL_AI_START_SERVER: "localai:startServer",
+  LOCAL_AI_STOP_SERVER: "localai:stopServer",
+  LOCAL_AI_GET_SERVER_STATUS: "localai:getServerStatus",
+  LOCAL_AI_GET_SERVER_LOG: "localai:getServerLog",
   LLM_REFRESH_CUSTOM_PROVIDER_MODELS: "llm:refreshCustomProviderModels",
   LLM_OPENAI_OAUTH_START: "llm:openaiOAuthStart",
   LLM_OPENAI_OAUTH_LOGOUT: "llm:openaiOAuthLogout",
@@ -3881,6 +3887,7 @@ export const CUSTOM_LLM_PROVIDER_TYPES = [
   "kimi-code",
   "kimi-coding",
   "anthropic-compatible",
+  "hf-agents",
 ] as const;
 
 export const LLM_PROVIDER_TYPES = [
@@ -4004,6 +4011,11 @@ export interface LLMSettingsData {
     apiKey?: string;
     baseUrl?: string;
     model?: string;
+  } & ProviderRoutingSettings;
+  hfAgents?: {
+    baseUrl?: string;
+    model?: string;
+    apiKey?: string;
   } & ProviderRoutingSettings;
   // Cached models from API (populated when user refreshes)
   cachedGeminiModels?: CachedModelInfo[];
@@ -4860,6 +4872,7 @@ export interface SkillMetadata {
     outputs?: string;
     successCriteria?: string;
     expectedArtifacts?: string[];
+    keywords?: string[]; // Explicit trigger phrases for high-confidence routing
     examples?: {
       positive: string[];
       negative: string[];

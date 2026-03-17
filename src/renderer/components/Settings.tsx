@@ -14,7 +14,6 @@ import {
   UsersRound,
   AtSign,
   MoreHorizontal,
-  Settings2,
   Shield,
   Brain,
   ListOrdered,
@@ -39,12 +38,10 @@ import {
   Square,
   Tv,
   CircleDot,
-  FileText,
   Cloud,
   Star,
   Globe,
   Box,
-  Droplets,
   Link,
   Hexagon,
   Crosshair,
@@ -504,6 +501,7 @@ const LLM_PROVIDER_ICONS: Record<string, ReactNode> = {
   kimi: <Sparkles {...S} />,
   bedrock: <Hexagon {...S} />,
   pi: <Pi {...S} />,
+  "hf-agents": <Zap {...S} />,
 };
 
 const getLLMProviderIcon = (providerType: string, customEntry?: { compatibility?: string }) => {
@@ -667,6 +665,46 @@ export function Settings({
   >([]);
   const [loadingOpenAICompatModels, setLoadingOpenAICompatModels] = useState(false);
 
+  // HuggingFace Local AI (hf-agents) state
+  const [hfStatus, setHfStatus] = useState<{
+    installed: boolean;
+    hfInstalled?: boolean;
+    version?: string;
+    message?: string;
+    mlxInstalled?: "ok" | "broken" | false;
+    mlxMessage?: string;
+    isMac?: boolean;
+  } | null>(null);
+  const [hfServerStatus, setHfServerStatus] = useState<{
+    serverRunning: boolean;
+    processAlive: boolean;
+    models?: string[];
+    lastError?: string | null;
+  } | null>(null);
+  const [hfHardwareOutput, setHfHardwareOutput] = useState<{
+    models: string[];
+    modelDetails?: Array<{
+      spec: string;
+      name: string;
+      hasGguf: boolean;
+      runtime: string;
+      params: string;
+      tps: number;
+      memoryGb: number;
+      quant: string;
+      fitLevel: string;
+    }>;
+    output: string;
+  } | null>(null);
+  const [detectingHardware, setDetectingHardware] = useState(false);
+  const [startingServer, setStartingServer] = useState(false);
+  const [stoppingServer, setStoppingServer] = useState(false);
+  const [serverLog, setServerLog] = useState<{
+    lines: string[];
+    state: "idle" | "downloading" | "loading" | "ready" | "error";
+    downloadingFile?: string;
+  } | null>(null);
+
   // Custom provider state
   const [customProviders, setCustomProviders] = useState<Record<string, CustomProviderConfig>>({});
   const [loadingCustomProviderModels, setLoadingCustomProviderModels] = useState(false);
@@ -681,6 +719,19 @@ export function Settings({
   useEffect(() => {
     loadConfigStatus();
   }, []);
+
+  // Poll hf-agents server status when that provider is active
+  useEffect(() => {
+    if (settings.providerType !== "hf-agents") return;
+    const poll = () => {
+      window.electronAPI.getLocalAIServerStatus?.().then((result: Any) => {
+        if (result) setHfServerStatus(result);
+      });
+    };
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => clearInterval(interval);
+  }, [settings.providerType]);
 
   useEffect(() => {
     if (!supportsTraySettings && activeTab === "tray") {
@@ -1531,6 +1582,11 @@ export function Settings({
       if (openaiCompatBaseUrl) {
         loadOpenAICompatibleModels();
       }
+    } else if (providerType === "hf-agents") {
+      window.electronAPI.checkHf?.().then((result: Any) => { if (result) setHfStatus(result); });
+      window.electronAPI.getLocalAIServerStatus?.().then((result: Any) => {
+        if (result) setHfServerStatus(result);
+      });
     }
   };
 
@@ -1554,6 +1610,67 @@ export function Settings({
       setTestResult({ success: false, error: error.message || "OAuth failed" });
     } finally {
       setOpenaiOAuthLoading(false);
+    }
+  };
+
+  const handleHfDetectHardware = async () => {
+    setDetectingHardware(true);
+    try {
+      const result = await window.electronAPI.detectHardware?.();
+      setHfHardwareOutput(result || { models: [], output: "" });
+    } catch (err: Any) {
+      setHfHardwareOutput({ models: [], output: err.message || "Detection failed" });
+    } finally {
+      setDetectingHardware(false);
+    }
+  };
+
+  const handleHfStartServer = async () => {
+    setStartingServer(true);
+    try {
+      const model = customProviders["hf-agents"]?.model;
+      const result = await window.electronAPI.startLocalAIServer?.(model);
+      if (result && !result.ok && result.error) {
+        // Show error in the server log panel — NOT in hfHardwareOutput
+        setServerLog({ lines: result.error.split("\n"), state: "error" });
+        setStartingServer(false);
+        return;
+      }
+      // Poll status + log every 2s while the process is alive
+      // (model may be downloading — could take many minutes)
+      let pollCount = 0;
+      const maxPolls = 450; // 15 min max at 2s intervals
+      const poll = async () => {
+        const [status, log] = await Promise.all([
+          window.electronAPI.getLocalAIServerStatus?.(),
+          window.electronAPI.getLocalAIServerLog?.(),
+        ]);
+        if (status) setHfServerStatus(status);
+        if (log) setServerLog(log);
+        if (status?.serverRunning || !status?.processAlive || pollCount >= maxPolls) {
+          if (status?.serverRunning) setServerLog(null); // clear log panel on success
+          setStartingServer(false);
+          return;
+        }
+        pollCount++;
+        setTimeout(poll, 2000);
+      };
+      setTimeout(poll, 2000);
+    } catch (err: Any) {
+      setHfHardwareOutput(prev => ({ ...(prev ?? { models: [], modelDetails: [] }), output: `Error: ${(err as Any)?.message || "Unknown error"}` }));
+      setStartingServer(false);
+    }
+  };
+
+  const handleHfStopServer = async () => {
+    setStoppingServer(true);
+    setServerLog(null);
+    try {
+      await window.electronAPI.stopLocalAIServer?.();
+      const status = await window.electronAPI.getLocalAIServerStatus?.();
+      if (status) setHfServerStatus(status);
+    } finally {
+      setStoppingServer(false);
     }
   };
 
@@ -3263,6 +3380,334 @@ export function Settings({
                             }
                           />
                         )}
+                      </div>
+                    </>
+                  )}
+
+                  {resolvedProviderType === "hf-agents" && (
+                    <>
+                      {/* Installation status */}
+                      <div className="settings-section">
+                        <h3>Local AI Status</h3>
+                        {hfStatus === null ? (
+                          <p className="settings-description">Checking hf-agents installation...</p>
+                        ) : hfStatus.installed ? (
+                          <p className="settings-description" style={{ color: "var(--color-success, #16a34a)" }}>
+                            hf-agents {hfStatus.version} installed
+                          </p>
+                        ) : (
+                          <div>
+                            <p className="settings-description" style={{ color: "var(--color-warning, #d97706)" }}>
+                              {hfStatus.message}
+                            </p>
+                            <div
+                              style={{
+                                background: "var(--color-bg-secondary, rgba(0,0,0,0.1))",
+                                borderRadius: "6px",
+                                padding: "10px 12px",
+                                marginTop: "8px",
+                                fontFamily: "monospace",
+                                fontSize: "12px",
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: "4px",
+                              }}
+                            >
+                              {!hfStatus.hfInstalled && (
+                                <span># Step 1 — install hf CLI</span>
+                              )}
+                              {!hfStatus.hfInstalled && (
+                                <span>pip install huggingface_hub</span>
+                              )}
+                              <span style={{ marginTop: !hfStatus.hfInstalled ? "6px" : 0 }}>
+                                {!hfStatus.hfInstalled ? "# Step 2 — install agents extension" : "# Install agents extension"}
+                              </span>
+                              <span>hf extensions install hf-agents</span>
+                            </div>
+                          </div>
+                        )}
+                        {/* Server running indicator */}
+                        <div style={{ marginTop: "10px", display: "flex", alignItems: "center", gap: "8px" }}>
+                          <span
+                            style={{
+                              width: "10px",
+                              height: "10px",
+                              borderRadius: "50%",
+                              background: hfServerStatus?.serverRunning
+                                ? "var(--color-success, #16a34a)"
+                                : hfServerStatus?.processAlive
+                                  ? "var(--color-warning, #d97706)"
+                                  : "var(--color-text-muted, #888)",
+                              flexShrink: 0,
+                            }}
+                          />
+                          <span className="settings-description" style={{ margin: 0 }}>
+                            {hfServerStatus?.serverRunning
+                              ? `Server running on :8080${hfServerStatus.models?.length ? ` · ${hfServerStatus.models[0]}` : ""}`
+                              : hfServerStatus?.processAlive
+                                ? "Starting… (model may be downloading)"
+                                : "Server not running"}
+                          </span>
+                        </div>
+                        {/* Live server log panel — shown while starting or after error */}
+                        {serverLog && !hfServerStatus?.serverRunning && (
+                          <div style={{ marginTop: "10px", borderRadius: "8px", overflow: "hidden", border: "1px solid var(--color-border, rgba(0,0,0,0.1))" }}>
+                            {/* Status bar */}
+                            <div style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "8px",
+                              padding: "6px 10px",
+                              background: serverLog.state === "error"
+                                ? "rgba(220,38,38,0.08)"
+                                : serverLog.state === "downloading"
+                                  ? "rgba(59,130,246,0.08)"
+                                  : "rgba(0,0,0,0.04)",
+                              borderBottom: "1px solid var(--color-border, rgba(0,0,0,0.08))",
+                            }}>
+                              {serverLog.state !== "error" && (
+                                <span style={{
+                                  display: "inline-block",
+                                  width: "8px", height: "8px",
+                                  borderRadius: "50%",
+                                  background: serverLog.state === "downloading" ? "#3b82f6" : "#f59e0b",
+                                  animation: "pulse 1.5s ease-in-out infinite",
+                                }} />
+                              )}
+                              {serverLog.state === "error" && <span style={{ color: "var(--color-error, #dc2626)" }}>⚠</span>}
+                              <span style={{ fontSize: "12px", fontWeight: 500 }}>
+                                {serverLog.state === "downloading"
+                                  ? `Downloading${serverLog.downloadingFile ? ` ${serverLog.downloadingFile}` : " model"}…`
+                                  : serverLog.state === "loading"
+                                    ? "Loading model into memory…"
+                                    : serverLog.state === "error"
+                                      ? "Server failed to start"
+                                      : "Starting server…"}
+                              </span>
+                            </div>
+                            {/* Log lines */}
+                            <pre style={{
+                              margin: 0,
+                              padding: "8px 10px",
+                              fontSize: "10px",
+                              lineHeight: "1.5",
+                              fontFamily: "monospace",
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-all",
+                              maxHeight: "160px",
+                              overflowY: "auto",
+                              background: "var(--color-bg-secondary, rgba(0,0,0,0.04))",
+                              color: "var(--color-text-secondary, #666)",
+                            }}>
+                              {serverLog.lines.join("\n")}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Hardware detection */}
+                      <div className="settings-section">
+                        <h3>Detect Hardware</h3>
+                        <p className="settings-description">
+                          Run <code>hf agents fit</code> to detect your hardware and get model
+                          recommendations. The best model will be selected automatically.
+                        </p>
+                        <button
+                          className="button-small button-secondary"
+                          onClick={handleHfDetectHardware}
+                          disabled={detectingHardware || !hfStatus?.installed}
+                        >
+                          {detectingHardware ? "Detecting..." : "Detect Hardware"}
+                        </button>
+                        {hfHardwareOutput && (hfHardwareOutput.modelDetails?.length ?? hfHardwareOutput.models?.length ?? 0) > 0 && (
+                          <div style={{ marginTop: "12px" }}>
+                            {/* Model list — show all, mark MLX-only as not usable with llama-server */}
+                            {(hfHardwareOutput.modelDetails ?? []).length > 0 ? (
+                              <>
+                                <p className="settings-description" style={{ marginBottom: "8px" }}>
+                                  Recommended models for your hardware. Click a model to select it.{" "}
+                                  <span style={{ color: "var(--color-success, #16a34a)" }}>GGUF</span> runs via llama-server.{" "}
+                                  {hfStatus?.mlxInstalled === "ok"
+                                    ? <><span style={{ color: "#8b5cf6" }}>MLX</span> runs natively on Apple Silicon via mlx_lm — fastest on your M-series Mac.</>
+                                    : hfStatus?.isMac
+                                      ? <><span style={{ color: "var(--color-text-muted, #888)" }}>MLX</span> models require mlx_lm (see below).</>
+                                      : <><span style={{ color: "var(--color-text-muted, #888)" }}>MLX</span> requires Apple Silicon.</>
+                                  }
+                                </p>
+                                {hfStatus?.isMac && hfStatus.mlxInstalled !== "ok" && (
+                                  <div style={{ marginBottom: "8px", padding: "7px 10px", borderRadius: "6px", background: "rgba(139,92,246,0.08)", border: "1px solid rgba(139,92,246,0.25)" }}>
+                                    <span style={{ fontSize: "12px" }}>
+                                      {hfStatus.mlxInstalled === "broken"
+                                        ? <>{hfStatus.mlxMessage || "MLX installed but broken."} <code style={{ fontSize: "11px" }}>pip install mlx mlx-metal --force-reinstall --no-cache-dir</code></>
+                                        : <>MLX not installed. To use MLX models: <code style={{ fontSize: "11px" }}>pip install mlx-lm</code></>
+                                      }
+                                    </span>
+                                  </div>
+                                )}
+                                <div style={{ display: "flex", flexDirection: "column", gap: "4px", marginBottom: "10px", maxHeight: "280px", overflowY: "auto", paddingRight: "2px" }}>
+                                  {hfHardwareOutput.modelDetails!.map((m, i) => (
+                                    <div
+                                      key={m.spec}
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: "8px",
+                                        padding: "6px 10px",
+                                        borderRadius: "6px",
+                                        background: "var(--color-bg-secondary, rgba(0,0,0,0.06))",
+                                        opacity: (m.hasGguf || (m.runtime === "MLX" && hfStatus?.mlxInstalled === "ok")) ? 1 : 0.4,
+                                        cursor: (m.hasGguf || (m.runtime === "MLX" && hfStatus?.mlxInstalled === "ok")) ? "pointer" : "not-allowed",
+                                      }}
+                                      onClick={() => {
+                                        const input = document.getElementById("hf-model-input") as HTMLInputElement;
+                                        if (!input) return;
+                                        if (m.hasGguf) {
+                                          input.value = m.spec;
+                                        } else if (m.runtime === "MLX" && hfStatus?.mlxInstalled === "ok") {
+                                          input.value = `mlx://${m.name}`;
+                                        }
+                                      }}
+                                    >
+                                      <span style={{
+                                        fontSize: "10px",
+                                        fontWeight: 600,
+                                        padding: "1px 5px",
+                                        borderRadius: "3px",
+                                        background: m.hasGguf
+                                          ? "var(--color-success, #16a34a)"
+                                          : (m.runtime === "MLX" && hfStatus?.mlxInstalled === "ok")
+                                            ? "#8b5cf6"
+                                            : "var(--color-text-muted, #888)",
+                                        color: "#fff",
+                                        flexShrink: 0,
+                                      }}>
+                                        {m.runtime}
+                                      </span>
+                                      <span style={{ flex: 1, fontSize: "12px", fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                        {m.name}
+                                        {i === 0 && <span style={{ marginLeft: "6px", fontSize: "10px", color: "var(--color-text-muted, #888)" }}>★ best</span>}
+                                      </span>
+                                      <span style={{ fontSize: "11px", color: "var(--color-text-muted, #888)", flexShrink: 0 }}>
+                                        {m.params}{m.memoryGb ? ` · ${m.memoryGb}GB` : ""}{m.tps ? ` · ~${m.tps}tok/s` : ""}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                                {/* Smaller model quick-picks — always shown since hf agents fit only recommends top-scoring (large) models */}
+                                <div style={{ marginBottom: "8px", padding: "8px 10px", borderRadius: "6px", background: "var(--color-bg-secondary, rgba(0,0,0,0.04))", border: "1px solid var(--color-border, rgba(0,0,0,0.08))" }}>
+                                  <p className="settings-description" style={{ margin: "0 0 8px 0", fontSize: "11px" }}>
+                                    Smaller models (faster download, great for most tasks):
+                                  </p>
+                                  {hfStatus?.mlxInstalled === "ok" && (
+                                    <div style={{ marginBottom: "6px" }}>
+                                      <span style={{ fontSize: "10px", fontWeight: 600, color: "#8b5cf6", marginRight: "6px" }}>MLX</span>
+                                      {[
+                                        { label: "Qwen3-8B · ~5GB · fast", spec: "mlx://mlx-community/Qwen3-8B-4bit" },
+                                        { label: "Qwen3-14B · ~9GB", spec: "mlx://mlx-community/Qwen3-14B-4bit" },
+                                        { label: "Qwen3-30B-A3B · ~19GB", spec: "mlx://mlx-community/Qwen3-30B-A3B-4bit" },
+                                      ].map(({ label, spec }) => (
+                                        <button
+                                          key={spec}
+                                          className="button-small button-secondary"
+                                          style={{ fontSize: "11px", marginRight: "4px", borderColor: "#8b5cf6", color: "#8b5cf6" }}
+                                          onClick={() => {
+                                            const input = document.getElementById("hf-model-input") as HTMLInputElement;
+                                            if (input) input.value = spec;
+                                          }}
+                                        >
+                                          {label}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                  <div>
+                                    <span style={{ fontSize: "10px", fontWeight: 600, color: "var(--color-success, #16a34a)", marginRight: "6px" }}>GGUF</span>
+                                    {[
+                                      { label: "Qwen3-8B · ~5GB · fast", spec: "unsloth/Qwen3-8B-GGUF:Q4_K_M" },
+                                      { label: "Qwen3-14B · ~9GB", spec: "unsloth/Qwen3-14B-GGUF:Q4_K_M" },
+                                      { label: "Qwen3-32B · ~20GB", spec: "unsloth/Qwen3-32B-GGUF:Q4_K_M" },
+                                    ].map(({ label, spec }) => (
+                                      <button
+                                        key={spec}
+                                        className="button-small button-secondary"
+                                        style={{ fontSize: "11px", marginRight: "4px" }}
+                                        onClick={() => {
+                                          const input = document.getElementById("hf-model-input") as HTMLInputElement;
+                                          if (input) input.value = spec;
+                                        }}
+                                      >
+                                        {label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </>
+                            ) : null}
+                            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                              <input
+                                id="hf-model-input"
+                                className="settings-input"
+                                style={{ flex: 1, fontSize: "12px" }}
+                                defaultValue={hfHardwareOutput.models[0] ?? ""}
+                                placeholder="e.g. unsloth/Qwen3-4B-GGUF:Q4_K_M"
+                              />
+                              <button
+                                className="button-small button-primary"
+                                onClick={() => {
+                                  const input = document.getElementById("hf-model-input") as HTMLInputElement;
+                                  if (input?.value) updateCustomProvider("hf-agents", { model: input.value });
+                                }}
+                              >
+                                Use
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        {hfHardwareOutput && hfHardwareOutput.output && (
+                          <details style={{ marginTop: "8px" }}>
+                            <summary style={{ fontSize: "11px", cursor: "pointer", color: "var(--color-text-secondary, #888)" }}>
+                              Raw output
+                            </summary>
+                            <pre
+                              style={{
+                                marginTop: "4px",
+                                fontSize: "11px",
+                                maxHeight: "160px",
+                                overflow: "auto",
+                                background: "var(--color-bg-secondary, rgba(0,0,0,0.1))",
+                                padding: "8px",
+                                borderRadius: "4px",
+                              }}
+                            >
+                              {hfHardwareOutput.output}
+                            </pre>
+                          </details>
+                        )}
+                      </div>
+
+                      {/* Start / Stop server */}
+                      <div className="settings-section">
+                        <h3>Server Control</h3>
+                        <p className="settings-description">
+                          Start the llama.cpp server with your selected model. The server exposes an
+                          OpenAI-compatible API at <code>http://localhost:8080</code>.
+                        </p>
+                        <div style={{ display: "flex", gap: "8px" }}>
+                          <button
+                            className="button-small button-primary"
+                            onClick={handleHfStartServer}
+                            disabled={startingServer || !hfStatus?.installed || hfServerStatus?.serverRunning}
+                          >
+                            {startingServer ? "Starting..." : "Start Server"}
+                          </button>
+                          <button
+                            className="button-small button-secondary"
+                            onClick={handleHfStopServer}
+                            disabled={stoppingServer || !hfServerStatus?.processAlive}
+                          >
+                            {stoppingServer ? "Stopping..." : "Stop Server"}
+                          </button>
+                        </div>
                       </div>
                     </>
                   )}

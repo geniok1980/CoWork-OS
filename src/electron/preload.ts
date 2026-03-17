@@ -299,6 +299,13 @@ const IPC_CHANNELS = {
   LLM_OPENAI_OAUTH_START: "llm:openaiOAuthStart",
   LLM_OPENAI_OAUTH_LOGOUT: "llm:openaiOAuthLogout",
   LLM_GET_BEDROCK_MODELS: "llm:getBedrockModels",
+  // Local AI (hf-agents)
+  LOCAL_AI_CHECK_HF: "localai:checkHf",
+  LOCAL_AI_DETECT_HARDWARE: "localai:detectHardware",
+  LOCAL_AI_START_SERVER: "localai:startServer",
+  LOCAL_AI_STOP_SERVER: "localai:stopServer",
+  LOCAL_AI_GET_SERVER_STATUS: "localai:getServerStatus",
+  LOCAL_AI_GET_SERVER_LOG: "localai:getServerLog",
   // Gateway / Channels
   GATEWAY_GET_CHANNELS: "gateway:getChannels",
   GATEWAY_ADD_CHANNEL: "gateway:addChannel",
@@ -2410,6 +2417,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getPiProviders: () => ipcRenderer.invoke(IPC_CHANNELS.LLM_GET_PI_PROVIDERS),
   getOpenAICompatibleModels: (baseUrl: string, apiKey?: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.LLM_GET_OPENAI_COMPATIBLE_MODELS, baseUrl, apiKey),
+  // Local AI (hf-agents + llama.cpp)
+  checkHf: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_AI_CHECK_HF),
+  detectHardware: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_AI_DETECT_HARDWARE),
+  startLocalAIServer: (model?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.LOCAL_AI_START_SERVER, model),
+  stopLocalAIServer: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_AI_STOP_SERVER),
+  getLocalAIServerStatus: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_AI_GET_SERVER_STATUS),
+  getLocalAIServerLog: () => ipcRenderer.invoke(IPC_CHANNELS.LOCAL_AI_GET_SERVER_LOG),
   openaiOAuthStart: () => ipcRenderer.invoke(IPC_CHANNELS.LLM_OPENAI_OAUTH_START),
   openaiOAuthLogout: () => ipcRenderer.invoke(IPC_CHANNELS.LLM_OPENAI_OAUTH_LOGOUT),
   getBedrockModels: (config?: {
@@ -3835,6 +3850,31 @@ export interface ElectronAPI {
     baseUrl: string,
     apiKey?: string,
   ) => Promise<Array<{ key: string; displayName: string; description: string }>>;
+  // Local AI (hf-agents + llama.cpp)
+  checkHf?: () => Promise<{
+    installed: boolean;
+    hfInstalled?: boolean;
+    version?: string;
+    message?: string;
+    mlxInstalled?: "ok" | "broken" | false;
+    mlxMessage?: string;
+    isMac?: boolean;
+  }>;
+  detectHardware?: () => Promise<{ ok: boolean; models: string[]; output: string; error?: string }>;
+  startLocalAIServer?: (model?: string) => Promise<{ ok: boolean; pid?: number; alreadyRunning?: boolean; error?: string }>;
+  stopLocalAIServer?: () => Promise<{ ok: boolean; wasRunning?: boolean; error?: string }>;
+  getLocalAIServerStatus?: () => Promise<{
+    serverRunning: boolean;
+    processAlive: boolean;
+    pid?: number;
+    models?: string[];
+    lastError?: string | null;
+  }>;
+  getLocalAIServerLog?: () => Promise<{
+    lines: string[];
+    state: "idle" | "downloading" | "loading" | "ready" | "error";
+    downloadingFile?: string;
+  }>;
   openaiOAuthStart: () => Promise<{ success: boolean; error?: string }>;
   openaiOAuthLogout: () => Promise<{ success: boolean }>;
   getBedrockModels: (config?: {

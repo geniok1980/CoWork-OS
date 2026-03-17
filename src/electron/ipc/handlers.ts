@@ -3,7 +3,7 @@ import { normalizeTaskEvents } from "../agent/timeline/timeline-normalizer";
 import * as path from "path";
 import * as fs from "fs/promises";
 import * as fsSync from "fs";
-import { execFile } from "child_process";
+import { execFile, spawn as spawnProcess } from "child_process";
 import { promisify } from "util";
 import { promises as dns } from "dns";
 import { isIP } from "net";
@@ -139,6 +139,10 @@ import { XSettingsManager } from "../settings/x-manager";
 import { testXConnection, checkBirdInstalled } from "../utils/x-cli";
 import { getCustomSkillLoader } from "../agent/custom-skill-loader";
 import { CustomSkill } from "../../shared/types";
+import {
+  isSpawnSubagentsPrompt,
+  parseSpawnAgentCount,
+} from "../../shared/spawn-intent-detection";
 import { MCPSettingsManager } from "../mcp/settings";
 import { MCPClientManager } from "../mcp/client/MCPClientManager";
 import { MCPRegistryManager } from "../mcp/registry/MCPRegistryManager";
@@ -1540,12 +1544,19 @@ export async function setupIpcHandlers(
       agentConfig,
       images: validatedImages,
     } = validated;
-    const normalizedAgentConfig: AgentConfig | undefined = agentConfig
+    let normalizedAgentConfig: AgentConfig | undefined = agentConfig
       ? {
           ...agentConfig,
           ...(agentConfig.autonomousMode ? { allowUserInput: false } : {}),
         }
       : undefined;
+
+    // Auto-enable collaborative mode when prompt requests spawning subagents/agents
+    // (e.g. "spawn 3 subagents", "spawn agents") — before any other processing
+    if (isSpawnSubagentsPrompt(`${title}\n${prompt}`)) {
+      normalizedAgentConfig = { ...(normalizedAgentConfig ?? {}), collaborativeMode: true };
+    }
+
     const task = taskRepo.create({
       title,
       prompt,
@@ -1601,7 +1612,13 @@ export async function setupIpcHandlers(
       void (async () => {
         try {
           const activeRoles = agentRoleRepo.findAll(false);
-          const { members, leader } = await selectAgentsForTask(`${title}\n${prompt}`, activeRoles);
+          const fullText = `${title}\n${prompt}`;
+          const requestedCount = parseSpawnAgentCount(fullText);
+          const { members, leader } = await selectAgentsForTask(
+            fullText,
+            activeRoles,
+            requestedCount ?? undefined,
+          );
 
           // Create ephemeral team
           const team = teamRepo.create({
@@ -1630,9 +1647,12 @@ export async function setupIpcHandlers(
             collaborativeMode: true,
           });
 
-          // One item per agent — each gets the full prompt (Grok model)
+          // One item per agent — each gets the full prompt (Grok model).
+          // Exclude "Synthesis" role from initial items — it is created only after all
+          // sub-agents complete, in the synthesis phase.
           for (let i = 0; i < members.length; i++) {
             const m = members[i];
+            if (m.displayName === "Synthesis") continue;
             teamItemRepo.create({
               teamRunId: run.id,
               title: `${m.icon} ${m.displayName}`,
@@ -4469,6 +4489,9 @@ export async function setupIpcHandlers(
   // Scraping (Scrapling) handlers
   setupScrapingHandlers();
 
+  // Local AI (hf-agents / llama.cpp) handlers
+  setupLocalAIHandlers();
+
   // Notification handlers
   setupNotificationHandlers();
 
@@ -7279,4 +7302,450 @@ function setupMemoryHandlers(): void {
   });
 
   logger.debug("[Voice] Handlers initialized");
+}
+
+/**
+ * Set up Local AI (hf-agents + llama.cpp) IPC handlers
+ */
+function setupLocalAIHandlers(): void {
+  const execFileAsync = promisify(execFile);
+
+  let hfAgentsProcess: import("child_process").ChildProcess | null = null;
+  let lastServerError: string | null = null;
+  let mlxServerLog: string[] = [];        // stdout/stderr captured from mlx_lm.server
+  let activeRuntime: "gguf" | "mlx" | null = null;
+
+  // Expand PATH so Electron can find `hf` installed by brew Python
+  const hfExtraPath = [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/lib/python3.11/bin",
+    "/opt/homebrew/lib/python3.12/bin",
+    "/usr/local/bin",
+    `${process.env.HOME}/.local/bin`,
+  ].join(":");
+  const hfEnv = {
+    ...process.env,
+    PATH: `${hfExtraPath}:${process.env.PATH || ""}`,
+  };
+
+  /**
+   * Check if `hf` CLI with agents extension is available
+   */
+  ipcMain.handle(IPC_CHANNELS.LOCAL_AI_CHECK_HF, async () => {
+    // Check hf-agents
+    let installed = false;
+    let hfInstalled = false;
+    let version = "";
+    let message = "";
+    try {
+      const { stdout } = await execFileAsync("hf", ["agents", "--version"], {
+        timeout: 8000,
+        env: hfEnv,
+      });
+      installed = true;
+      version = (stdout as string).trim();
+    } catch (e: Any) {
+      const stderr: string = e?.stderr || e?.message || "";
+      try {
+        const versionResult = await execFileAsync("hf", ["--version"], { timeout: 5000, env: hfEnv }) as Any;
+        hfInstalled = true;
+        // Detect the huggingface_hub downgrade case: old hf CLI has no 'agents' subcommand
+        if (stderr.includes("invalid choice") && stderr.includes("agents")) {
+          message = "huggingface_hub was downgraded (e.g. by mlx-lm). Restore it with: pip install \"huggingface_hub>=1.0\" --force-reinstall\nThen re-run: hf extensions install hf-agents";
+        } else {
+          const hfVersion: string = (versionResult.stdout as string).trim();
+          message = `hf CLI ${hfVersion} found but hf-agents extension not installed. Run: hf extensions install hf-agents`;
+        }
+      } catch {
+        message = "hf CLI not found. Install with: pip install huggingface_hub && hf extensions install hf-agents";
+      }
+    }
+
+    // Check mlx_lm (macOS/Apple Silicon only)
+    // "ok" = importable, "broken" = package found but dylib/import fails, false = not installed
+    let mlxInstalled: "ok" | "broken" | false = false;
+    let mlxMessage = "";
+    if (process.platform === "darwin") {
+      try {
+        await execFileAsync("python3", ["-c", "import mlx_lm; import mlx.core"], {
+          timeout: 8000,
+          env: hfEnv,
+        });
+        mlxInstalled = "ok";
+      } catch (mlxErr: Any) {
+        // Import failed — check if package is present at all (without triggering dylib load)
+        try {
+          const { stdout: spec } = await execFileAsync(
+            "python3",
+            ["-c", "import importlib.util; s=importlib.util.find_spec('mlx_lm'); print('found' if s else 'missing')"],
+            { timeout: 5000, env: hfEnv }
+          ) as Any;
+          if ((spec as string).trim() === "found") {
+            mlxInstalled = "broken";
+            const raw: string = [mlxErr?.stderr, mlxErr?.message].filter(Boolean).join("\n");
+            mlxMessage = raw.includes("libmlx.dylib") || raw.includes("Library not loaded") || raw.includes("dlopen")
+              ? "MLX dylib missing — run: pip install mlx mlx-metal --force-reinstall --no-cache-dir"
+              : "mlx_lm is installed but failed to import. Try reinstalling: pip install mlx-lm --force-reinstall";
+          }
+        } catch { /* python3 not found at all */ }
+      }
+    }
+
+    return { installed, hfInstalled, version, message, mlxInstalled, mlxMessage, isMac: process.platform === "darwin" };
+  });
+
+  /**
+   * Run `hf agents fit recommend -n 5` (non-interactive) to get model recommendations,
+   * then `hf agents fit system` for hardware info.
+   */
+  ipcMain.handle(IPC_CHANNELS.LOCAL_AI_DETECT_HARDWARE, async () => {
+    try {
+      // Use non-interactive subcommands — plain `hf agents fit` launches a TUI
+      const [recResult, sysResult] = await Promise.allSettled([
+        execFileAsync("hf", ["agents", "fit", "recommend"], {
+          timeout: 60000,
+          env: hfEnv,
+        }),
+        execFileAsync("hf", ["agents", "fit", "system"], {
+          timeout: 15000,
+          env: hfEnv,
+        }),
+      ]);
+
+      const recOut = recResult.status === "fulfilled"
+        ? ((recResult.value.stdout as string) + (recResult.value.stderr as string)).trim()
+        : (recResult.reason?.stderr || recResult.reason?.message || "");
+      const sysOut = sysResult.status === "fulfilled"
+        ? ((sysResult.value.stdout as string) + (sysResult.value.stderr as string)).trim()
+        : "";
+
+      const output = [sysOut, recOut].filter(Boolean).join("\n\n");
+
+      // Parse JSON output from `hf agents fit recommend`.
+      // Each entry has gguf_sources: [{ provider, repo }] — empty array means MLX-only.
+      // For llama-server we need GGUF: build spec as "gguf_repo:best_quant".
+      let models: string[] = [];
+      interface ModelDetail {
+        spec: string;
+        name: string;
+        hasGguf: boolean;
+        runtime: string;
+        params: string;
+        tps: number;
+        memoryGb: number;
+        quant: string;
+        fitLevel: string;
+      }
+      let modelDetails: ModelDetail[] = [];
+      let rawEntries: Any[] = [];
+      try {
+        const parsed = JSON.parse(recOut);
+        rawEntries = Array.isArray(parsed) ? parsed : (parsed?.models ?? []);
+        for (const e of rawEntries) {
+          const ggufSources: Array<{ provider: string; repo: string }> =
+            Array.isArray(e.gguf_sources) ? e.gguf_sources : [];
+          const ggufSource = ggufSources[0];
+          const hasGguf = !!ggufSource;
+          // GGUF spec: "unsloth/Model-GGUF:Q4_K_M" — only valid for llama-server
+          const spec = hasGguf
+            ? `${ggufSource.repo}:${e.best_quant}`
+            : (e.name || e.repo_id || e.id || null);
+          if (!spec) continue;
+          if (hasGguf) models.push(spec);
+          modelDetails.push({
+            spec,
+            name: e.name || spec,
+            hasGguf,
+            runtime: hasGguf ? "GGUF" : (e.runtime || "MLX"),
+            params: e.parameter_count || "",
+            tps: e.estimated_tps || 0,
+            memoryGb: e.memory_required_gb || 0,
+            quant: e.best_quant || "",
+            fitLevel: e.fit_level || "",
+          });
+        }
+      } catch {
+        // Fall back to numbered list format: "1. unsloth/Model:q4_k_n"
+        const modelLines = recOut.split("\n").filter((l: string) => /^\s*\d+[\.\)]\s+\S/.test(l));
+        models = modelLines.map((l: string) => {
+          const match = l.match(/\d+[\.\)]\s+(\S+)/);
+          return match ? match[1] : l.trim();
+        }).filter(Boolean);
+        modelDetails = models.map((spec) => ({
+          spec, name: spec, hasGguf: true, runtime: "GGUF",
+          params: "", tps: 0, memoryGb: 0, quant: "", fitLevel: "",
+        }));
+      }
+
+      return { ok: true, output, models, modelDetails, rawEntries };
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const errStderr = (err as { stderr?: string })?.stderr ?? "";
+      return { ok: false, models: [], error: errMsg, output: errStderr || errMsg };
+    }
+  });
+
+  /**
+   * Read the last N lines of the llama-server log for error diagnostics
+   */
+  async function readLlamaLog(lines = 20): Promise<string> {
+    try {
+      const content: string = await fs.readFile("/tmp/hf-agents-llama-server.log", "utf-8");
+      const tail = content.trim().split("\n").slice(-lines).join("\n");
+      return tail;
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * Start the local AI server — either mlx_lm.server (MLX) or hf agents run pi (GGUF).
+   * MLX models are passed as "mlx://<repo_id>", GGUF as plain "repo:quant" strings.
+   */
+  ipcMain.handle(IPC_CHANNELS.LOCAL_AI_START_SERVER, async (_, model?: string) => {
+    if (hfAgentsProcess && !hfAgentsProcess.killed) {
+      return { ok: true, pid: hfAgentsProcess.pid, alreadyRunning: true };
+    }
+    lastServerError = null;
+    mlxServerLog = [];
+
+    const isMLX = model?.startsWith("mlx://");
+    const modelId = isMLX ? model!.slice(6) : model;
+    activeRuntime = isMLX ? "mlx" : "gguf";
+
+    let cmd: string;
+    let args: string[];
+
+    if (isMLX) {
+      // Pre-flight: verify mlx_lm actually imports (catches dylib/path issues early)
+      try {
+        await execFileAsync("python3", ["-c", "import mlx_lm; import mlx.core"], {
+          timeout: 8000,
+          env: hfEnv,
+        });
+      } catch (e: Any) {
+        // execFileAsync puts Python stderr in e.stderr; also check e.message
+        const raw: string = [e?.stderr, e?.stdout, e?.message].filter(Boolean).join("\n");
+        const isLibMissing = raw.includes("libmlx.dylib") || raw.includes("Library not loaded") || raw.includes("dlopen");
+        const hint = isLibMissing
+          ? "MLX dylib not found — reinstall with:\npip install mlx mlx-metal --force-reinstall --no-cache-dir"
+          : raw
+            ? `mlx_lm failed to import:\n${raw.split("\n").filter(Boolean).slice(-3).join("\n")}`
+            : "mlx_lm failed to import. Try: pip install mlx mlx-metal --force-reinstall --no-cache-dir";
+        return { ok: false, error: hint };
+      }
+      // MLX: python3 -m mlx_lm.server --model <repo_id> --port 8080
+      cmd = "python3";
+      args = ["-m", "mlx_lm.server", "--model", modelId!, "--port", "8080"];
+    } else {
+      // GGUF: hf agents run pi [--model <spec>]
+      cmd = "hf";
+      args = ["agents", "run", "pi"];
+      if (modelId && modelId !== "auto") args.push("--model", modelId);
+    }
+
+    return await new Promise((resolve) => {
+      let stderrOutput = "";
+      let settled = false;
+
+      const getEarlyExitMsg = () =>
+        isMLX
+          ? (mlxServerLog.slice(-5).join("\n") || "mlx_lm.server exited immediately.")
+          : (stderrOutput || "Server process exited immediately.");
+
+      const proc = spawnProcess(cmd, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: false,
+        env: hfEnv,
+      });
+
+      const appendMLXLog = (chunk: Buffer) => {
+        const lines = chunk.toString().split("\n").filter((l: string) => l.trim());
+        mlxServerLog.push(...lines);
+        if (mlxServerLog.length > 200) mlxServerLog = mlxServerLog.slice(-200);
+      };
+
+      if (isMLX) {
+        proc.stdout?.on("data", appendMLXLog);
+        proc.stderr?.on("data", appendMLXLog);
+      } else {
+        proc.stderr?.on("data", (chunk: Buffer) => { stderrOutput += chunk.toString(); });
+      }
+
+      proc.on("error", (err: NodeJS.ErrnoException) => {
+        const cmdName = isMLX ? "python3 -m mlx_lm.server" : "hf";
+        const spawnError = err.code === "ENOENT"
+          ? `'${cmdName}' not found. ${isMLX ? "Install with: pip install mlx-lm" : "Make sure huggingface_hub is installed and 'hf' is in your PATH."}`
+          : err.message;
+        lastServerError = spawnError;
+        hfAgentsProcess = null;
+        if (!settled) {
+          settled = true;
+          clearInterval(pollId);
+          resolve({ ok: false, error: spawnError });
+        }
+      });
+
+      proc.on("exit", async (code: number | null) => {
+        if (hfAgentsProcess === proc) hfAgentsProcess = null;
+        if (code !== 0 && code !== null) {
+          if (isMLX) {
+            const detail = mlxServerLog.slice(-20).join("\n") || `mlx_lm.server exited with code ${code}`;
+            lastServerError = detail;
+          } else {
+            const logTail = await readLlamaLog(20);
+            lastServerError = logTail
+              ? `llama-server exited unexpectedly. Last 20 lines of log:\n${logTail}`
+              : (stderrOutput || `hf agents exited with code ${code}`);
+          }
+          logger.warn(`[LocalAI] ${cmd} exited with code ${code}.`);
+          if (!settled) {
+            settled = true;
+            clearInterval(pollId);
+            resolve({ ok: false, error: lastServerError ?? getEarlyExitMsg() });
+          }
+        }
+      });
+
+      hfAgentsProcess = proc;
+
+      // Poll /v1/models every 2s for up to 30s. Resolve as soon as the server
+      // responds 200; fall through to "downloading" state when the poll times out
+      // (the model may still be loading — status continues to update via getServerStatus).
+      let attempts = 0;
+      const MAX_POLL_ATTEMPTS = 15; // 15 × 2s = 30s
+      const pollId = setInterval(async () => {
+        if (settled) {
+          clearInterval(pollId);
+          return;
+        }
+        if (!hfAgentsProcess || hfAgentsProcess.killed) {
+          if (!settled) {
+            settled = true;
+            clearInterval(pollId);
+            resolve({ ok: false, error: getEarlyExitMsg() });
+          }
+          return;
+        }
+        attempts++;
+        try {
+          const res = await fetch("http://localhost:8080/v1/models", {
+            signal: AbortSignal.timeout(1500),
+          });
+          if (res.ok) {
+            settled = true;
+            clearInterval(pollId);
+            resolve({ ok: true, pid: hfAgentsProcess?.pid, runtime: activeRuntime, serverReady: true });
+            return;
+          }
+        } catch {
+          // Server not up yet — keep polling
+        }
+        if (attempts >= MAX_POLL_ATTEMPTS) {
+          // Process still alive but server hasn't responded yet — model likely downloading
+          settled = true;
+          clearInterval(pollId);
+          resolve({ ok: true, pid: hfAgentsProcess?.pid, runtime: activeRuntime, downloading: true });
+        }
+      }, 2000);
+    });
+  });
+
+  /**
+   * Stop the running hf-agents server process
+   */
+  ipcMain.handle(IPC_CHANNELS.LOCAL_AI_STOP_SERVER, async () => {
+    if (!hfAgentsProcess || hfAgentsProcess.killed) {
+      hfAgentsProcess = null;
+      return { ok: true, wasRunning: false };
+    }
+    try {
+      hfAgentsProcess.kill("SIGTERM");
+      hfAgentsProcess = null;
+      return { ok: true, wasRunning: true };
+    } catch (err: unknown) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  /**
+   * Get current server status: probes :8080/v1/models + checks process alive
+   */
+  ipcMain.handle(IPC_CHANNELS.LOCAL_AI_GET_SERVER_STATUS, async () => {
+    const processAlive = !!(hfAgentsProcess && !hfAgentsProcess.killed);
+    try {
+      const res = await fetch("http://localhost:8080/v1/models", {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok) {
+        const data = (await res.json().catch(() => null)) as Any;
+        const models = data?.data?.map((m: Any) => m.id) || [];
+        lastServerError = null; // clear error on successful connect
+        return { serverRunning: true, processAlive, pid: hfAgentsProcess?.pid, models };
+      }
+      return { serverRunning: false, processAlive, pid: hfAgentsProcess?.pid, lastError: lastServerError };
+    } catch {
+      return { serverRunning: false, processAlive, pid: hfAgentsProcess?.pid, lastError: lastServerError };
+    }
+  });
+
+  /**
+   * Read the server log and classify current state for live progress UI.
+   * MLX: reads from in-memory mlxServerLog buffer.
+   * GGUF: reads /tmp/hf-agents-llama-server.log.
+   */
+  ipcMain.handle(IPC_CHANNELS.LOCAL_AI_GET_SERVER_LOG, async () => {
+    if (activeRuntime === "mlx") {
+      const lines = mlxServerLog.slice(-30);
+      const joined = lines.join("\n");
+      let state: "idle" | "downloading" | "loading" | "ready" | "error" = "idle";
+      let downloadingFile: string | undefined;
+
+      if (joined.includes("Application startup complete") || joined.includes("Uvicorn running on") || joined.includes("running on http")) {
+        state = "ready";
+      } else if (joined.includes("Fetching") || joined.includes("Downloading") || joined.includes("fetch")) {
+        state = "downloading";
+        const dlMatch = joined.match(/Fetching\s+\d+\s+files?/);
+        downloadingFile = dlMatch ? dlMatch[0] : undefined;
+      } else if (joined.match(/error|failed|Error|Failed/)) {
+        state = "error";
+      } else if (lines.length > 0) {
+        state = "loading";
+      }
+      return { lines, state, downloadingFile, runtime: "mlx" };
+    }
+
+    // GGUF: read llama-server log file
+    try {
+      const content: string = await fs.readFile("/tmp/hf-agents-llama-server.log", "utf-8");
+      const allLines = content.split("\n");
+      const lines = allLines.slice(-30).filter((l: string) => l.trim());
+      const joined = lines.join("\n");
+      let state: "idle" | "downloading" | "loading" | "ready" | "error" = "idle";
+      let downloadingFile: string | undefined;
+
+      if (joined.includes("HTTP server listening") || joined.includes("server is listening")) {
+        state = "ready";
+      } else if (joined.includes("llm_load_tensors") || joined.includes("llm_load_print_meta") || joined.includes("loading model")) {
+        state = "loading";
+      } else if (joined.includes("downloadInProgress") || joined.includes("downloading from")) {
+        state = "downloading";
+        const dlLines = allLines.filter((l: string) => l.includes("downloading from"));
+        if (dlLines.length > 0) {
+          const last = dlLines[dlLines.length - 1];
+          const match = last.match(/resolve\/main\/([^\s]+?\.gguf)/);
+          downloadingFile = match ? match[1] : undefined;
+        }
+      } else if (joined.match(/\b(error|failed|CUDA error)/i)) {
+        state = "error";
+      } else if (lines.length > 0) {
+        state = "loading";
+      }
+      return { lines, state, downloadingFile, runtime: "gguf" };
+    } catch {
+      return { lines: [] as string[], state: "idle" as const, runtime: activeRuntime ?? "gguf" };
+    }
+  });
+
+  logger.debug("[LocalAI] Handlers initialized");
 }

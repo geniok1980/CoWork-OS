@@ -165,13 +165,13 @@ describe("LLMProviderFactory custom provider config resolution", () => {
         description: "MiniMax Portal model",
       },
       {
-        key: "MiniMax-M2.5-highspeed",
-        displayName: "MiniMax-M2.5-highspeed",
+        key: "MiniMax-M2.1",
+        displayName: "MiniMax-M2.1",
         description: "MiniMax Portal model",
       },
       {
-        key: "MiniMax-M2.1",
-        displayName: "MiniMax-M2.1",
+        key: "MiniMax-M2.5-highspeed",
+        displayName: "MiniMax-M2.5-highspeed",
         description: "MiniMax Portal model",
       },
       {

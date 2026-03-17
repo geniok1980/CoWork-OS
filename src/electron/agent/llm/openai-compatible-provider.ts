@@ -154,8 +154,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
         id: model.id,
         name: model.id,
       }));
-    } catch (error) {
-      console.error(`[${this.providerName}] Failed to fetch models:`, error);
+    } catch (error: Any) {
+      // ECONNREFUSED means the local server simply isn't running yet — not an error worth logging loudly
+      const isOffline = error?.cause?.code === "ECONNREFUSED" || error?.code === "ECONNREFUSED";
+      if (!isOffline) {
+        console.error(`[${this.providerName}] Failed to fetch models:`, error);
+      }
       return [];
     }
   }

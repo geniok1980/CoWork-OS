@@ -212,6 +212,18 @@ export const CUSTOM_PROVIDER_CATALOG: ProviderCatalogEntry[] = [
     apiKeyPlaceholder: "sk-...",
     requiresBaseUrl: true,
   },
+  {
+    id: "hf-agents",
+    name: "HuggingFace Local AI",
+    compatibility: "openai",
+    baseUrl: "http://localhost:8080",
+    defaultModel: "auto",
+    apiKeyLabel: "API Key (optional)",
+    apiKeyPlaceholder: "sk-... (leave empty for local)",
+    apiKeyOptional: true,
+    description:
+      "Run local models via hf-agents + llama.cpp. Zero API cost, fully private. Setup: (1) pip install huggingface_hub  (2) hf extensions install hf-agents",
+  },
 ];
 
 export const CUSTOM_PROVIDER_MAP = new Map(

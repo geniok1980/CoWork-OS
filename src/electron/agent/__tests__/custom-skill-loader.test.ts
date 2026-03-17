@@ -641,6 +641,50 @@ describe("listModelInvocableSkills", () => {
     expect(invocableSkills).toHaveLength(1);
     expect(invocableSkills[0].id).toBe("safe-skill");
   });
+
+  it("can include binary-dependent skills for routing even when run_command is unavailable", async () => {
+    const binarySkill = createTestSkill({
+      id: "binary-skill",
+      description: "Run a CLI-backed review workflow",
+      requires: { bins: ["claude"] },
+    });
+    const safeSkill = createTestSkill({ id: "safe-skill" });
+
+    mockFiles.set("binary-skill.json", JSON.stringify(binarySkill));
+    mockFiles.set("safe-skill.json", JSON.stringify(safeSkill));
+
+    await loader.reloadSkills();
+    const invocableSkills = loader.listModelInvocableSkills({
+      availableToolNames: new Set(["read_file", "web_fetch"]),
+      includePrereqBlockedSkills: true,
+    });
+
+    expect(invocableSkills).toHaveLength(2);
+    expect(invocableSkills.map((skill) => skill.id)).toContain("binary-skill");
+  });
+
+  it('should require the keyword "codex" for codex-cli ranking', async () => {
+    const codexSkill = createTestSkill({
+      id: "codex-cli",
+      name: "Codex CLI Agent",
+      description: "Run Codex CLI tasks",
+      metadata: {
+        routing: {
+          keywords: ["codex"],
+        },
+      },
+    });
+
+    mockFiles.set("codex-cli.json", JSON.stringify(codexSkill));
+
+    await loader.reloadSkills();
+
+    expect(loader.rankModelInvocableSkillsForQuery("run a generic agent on this issue")).toEqual([]);
+
+    const ranked = loader.rankModelInvocableSkillsForQuery("run codex on this issue");
+    expect(ranked).toHaveLength(1);
+    expect(ranked[0]?.skill.id).toBe("codex-cli");
+  });
 });
 
 describe("getSkillDescriptionsForModel", () => {
@@ -819,6 +863,85 @@ describe("getSkillDescriptionsForModel", () => {
     expect(descriptions).toContain("render-deploy");
     expect(descriptions).not.toContain("crypto-trading");
     expect(descriptions).not.toContain("speech");
+  });
+
+  it("should prefer codex-cli over coding-agent for Codex-specific review prompts", async () => {
+    const codexCli = createTestSkill({
+      id: "codex-cli",
+      name: "Codex CLI Agent",
+      description:
+        "Review a PR with Codex CLI.",
+      category: "Development",
+      metadata: {
+        routing: {
+          keywords: ["codex"],
+          useWhen:
+            "Use when the user wants to review a PR with Codex CLI. Triggers on: 'codex review', 'spin up codex for review', 'review PR with codex'.",
+          dontUseWhen:
+            "Do not use for planning or discussion only.",
+          outputs:
+            "Review output from Codex CLI agent.",
+          successCriteria:
+            "Codex CLI completes the review and returns output.",
+          examples: {
+            positive: [
+              "Review PR #55 with Codex",
+              "Spin up Codex to review this PR",
+              "Use codex to review my PR",
+            ],
+            negative: ["Fix this issue (use coding-agent for generic)"],
+          },
+        },
+      },
+    });
+    const codingAgent = createTestSkill({
+      id: "coding-agent",
+      name: "Coding-agent",
+      description:
+        "Run Codex CLI, OpenCode, or Pi Coding Agent via background process.",
+      category: "Tools",
+      metadata: {
+        routing: {
+          useWhen:
+            "Use when the user asks to run a coding agent. Triggers on: 'coding agent', 'run agent'.",
+          dontUseWhen:
+            "Do not use when the user explicitly names Codex CLI (use codex-cli).",
+          outputs:
+            "Task result from coding agent.",
+          successCriteria:
+            "Coding agent executes the requested task.",
+          examples: {
+            positive: [
+              "Run a coding agent on this",
+              "Use the coding-agent skill",
+            ],
+            negative: ["Review PR with Codex (use codex-cli)"],
+          },
+        },
+      },
+    });
+
+    mockFiles.set("codex-cli.json", JSON.stringify(codexCli));
+    mockFiles.set("coding-agent.json", JSON.stringify(codingAgent));
+
+    await loader.reloadSkills();
+
+    const ranked = loader.rankModelInvocableSkillsForQuery(
+      "We need to review PR #55 on cowork os repo. Spin up Codex to review it.",
+      { limit: 2 },
+    );
+
+    expect(ranked[0]?.skill.id).toBe("codex-cli");
+    expect(ranked[0]?.score).toBeGreaterThan(ranked[1]?.score ?? 0);
+
+    const descriptions = loader.getSkillDescriptionsForModel({
+      routingQuery:
+        "We need to review PR #55 on cowork os repo. Spin up Codex to review it.",
+      shortlistSize: 1,
+    });
+
+    expect(descriptions).toContain("codex-cli");
+    expect(descriptions).not.toContain("- coding-agent:");
   });
 
   it("should include fallback discovery hint when routing confidence is low", async () => {

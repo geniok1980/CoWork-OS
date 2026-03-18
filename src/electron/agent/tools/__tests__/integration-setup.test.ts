@@ -37,13 +37,7 @@ const mocks = vi.hoisted(() => {
       GOOGLE_ACCESS_TOKEN: "",
       GOOGLE_REFRESH_TOKEN: "",
     },
-    "google-calendar": {
-      GOOGLE_CLIENT_ID: "",
-      GOOGLE_CLIENT_SECRET: "",
-      GOOGLE_ACCESS_TOKEN: "",
-      GOOGLE_REFRESH_TOKEN: "",
-    },
-    "google-drive": {
+    "google-workspace": {
       GOOGLE_CLIENT_ID: "",
       GOOGLE_CLIENT_SECRET: "",
       GOOGLE_ACCESS_TOKEN: "",
@@ -116,13 +110,6 @@ const mocks = vi.hoisted(() => {
         accessToken: "jira_oauth_access",
         refreshToken: "jira_oauth_refresh",
         resources: [{ id: "site-1", name: "Acme", url: "https://acme.atlassian.net" }],
-      };
-    }
-    if (request.provider === "slack") {
-      return {
-        provider: "slack",
-        accessToken: "slack_oauth_access",
-        refreshToken: "slack_oauth_refresh",
       };
     }
     return {
@@ -278,6 +265,13 @@ vi.mock("../../../security/policy-manager", () => ({
 
 vi.mock("../builtin-settings", () => ({
   BuiltinToolsSettingsManager: {
+    loadSettings: vi.fn().mockReturnValue({
+      categories: {},
+      toolOverrides: {},
+      toolTimeouts: {},
+      toolAutoApprove: {},
+      runCommandApprovalMode: "per_command",
+    }),
     isToolEnabled: vi.fn().mockReturnValue(true),
     getToolCategory: vi.fn().mockReturnValue("meta"),
     getToolPriority: vi.fn().mockReturnValue("normal"),
@@ -341,9 +335,12 @@ describe("integration_setup tool", () => {
 
     expect(result.success).toBe(true);
     expect(Array.isArray(result.providers)).toBe(true);
-    expect(result.providers).toHaveLength(14);
+    expect(result.providers).toHaveLength(8);
     expect(result.providers.some((provider: Any) => provider.provider === "resend")).toBe(true);
     expect(result.providers.some((provider: Any) => provider.provider === "jira")).toBe(true);
+    expect(result.providers.some((provider: Any) => provider.provider === "google-workspace")).toBe(
+      true,
+    );
   });
 
   it("inspect mode for Jira returns missing setup guidance and plan hash", async () => {

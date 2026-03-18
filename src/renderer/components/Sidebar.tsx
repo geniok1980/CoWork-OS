@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, Fragment } from "react";
-import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, MessageSquare, Rows3, Server, Workflow } from "lucide-react";
+import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Server, Workflow } from "lucide-react";
 import { getEmojiIcon } from "../utils/emoji-icon-map";
 import { stripAllEmojis } from "../utils/emoji-replacer";
 import { Task, Workspace, UiDensity, InfraStatus } from "../../shared/types";
@@ -1267,36 +1267,20 @@ export function Sidebar({
         <>
           {/* Sessions List Header (Unified with top navigation buttons structure) */}
           <div className="sidebar-header-sessions" style={{ padding: "0 12px", marginBottom: "8px" }}>
-            <div className="new-task-btn cli-new-task-btn cli-action-btn cli-sessions-header" style={{ margin: 0 }}>
+            <div className="new-task-btn cli-new-task-btn cli-action-btn cli-sessions-header" style={{ margin: 0, display: 'flex', justifyContent: 'flex-start' }}>
               <button
                 type="button"
                 className="cli-list-header-toggle"
                 onClick={() => setSessionsCollapsed((value) => !value)}
                 aria-expanded={!sessionsCollapsed}
                 title={sessionsCollapsed ? "Expand sessions" : "Collapse sessions"}
+                style={{ display: 'flex', justifyContent: 'flex-start', textAlign: 'left' }}
               >
                 <span className="cli-section-prompt terminal-only">{sessionsCollapsed ? "▸" : "▾"}</span>
                 <span className="terminal-only">SESSIONS</span>
-                <span className="modern-only cli-new-task-modern-label" style={{ flex: 1, minWidth: 0 }}>
+                <span className="modern-only cli-new-task-modern-label" style={{ flex: 1, minWidth: 0, display: 'inline-flex', justifyContent: 'flex-start' }}>
                   <span className="sidebar-home-btn-icon cli-sessions-icon" aria-hidden="true">
-                    {(availableModes.length > 1 || activeModeFilters.size > 0) ? (
-                      <span
-                        role="button"
-                        tabIndex={0}
-                        className={`session-filter-toggle ${showFilterBar || activeModeFilters.size > 0 ? "active" : ""}`}
-                        onClick={(e) => { e.stopPropagation(); setShowFilterBar(!showFilterBar); }}
-                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setShowFilterBar(!showFilterBar); } }}
-                        title="Filter by mode"
-                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0, border: 0, background: 'transparent', color: 'inherit' }}
-                      >
-                        <SlidersHorizontal size={16} strokeWidth={2} style={{ display: 'block' }} />
-                        {activeModeFilters.size > 0 && (
-                          <span className="filter-count" style={{ marginLeft: '4px', fontSize: '10px' }}>{activeModeFilters.size}</span>
-                        )}
-                      </span>
-                    ) : (
-                      <MessageSquare size={16} strokeWidth={2} style={{ display: 'block' }} />
-                    )}
+                    <SlidersHorizontal size={16} strokeWidth={2} style={{ display: 'block' }} />
                   </span>
                   <span className="cli-sessions-title">Sessions</span>
                   <span className="cli-sessions-collapse-indicator" aria-hidden="true">

@@ -199,7 +199,7 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     expect(reason).toBeNull();
   });
 
-  it("still preflight-fails verification-only missing artifacts", () => {
+  it("does not preflight-fail verification-only relative paths that are not yet materialized", () => {
     const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
     fakeThis.workspace = { path: process.cwd() };
     const step = {
@@ -214,7 +214,7 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
       fakeThis,
       step,
     );
-    expect(String(reason || "")).toContain("missing_required_workspace_artifact");
+    expect(reason).toBeNull();
   });
 
   it("does not preflight-fail verification steps that reference remote absolute system paths", () => {
@@ -235,7 +235,7 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     expect(reason).toBeNull();
   });
 
-  it("still preflight-fails absolute paths when they are inside the workspace root", () => {
+  it("does not preflight-fail missing absolute workspace paths during verification planning", () => {
     const fakeThis: Any = Object.create((TaskExecutor as Any).prototype);
     const workspacePath = process.cwd();
     fakeThis.workspace = { path: workspacePath };
@@ -251,7 +251,7 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
       fakeThis,
       step,
     );
-    expect(String(reason || "")).toContain("missing_required_workspace_artifact");
+    expect(reason).toBeNull();
   });
 
   it("auto-recovery heuristic includes missing workspace artifact failures", () => {

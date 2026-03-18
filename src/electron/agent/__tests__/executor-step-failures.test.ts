@@ -360,7 +360,7 @@ describe("TaskExecutor executeStep failure handling", () => {
     console.error = originalConsoleError;
   });
 
-  it("keeps the step completed when run_command fails but a direct completion text follows", async () => {
+  it("keeps the step failed when run_command fails even if a direct completion text follows", async () => {
     executor = createExecutorWithStubs(
       [toolUseResponse("run_command", { command: "exit 1" }), textResponse("done")],
       {
@@ -372,8 +372,8 @@ describe("TaskExecutor executeStep failure handling", () => {
 
     await (executor as Any).executeStep(step);
 
-    expect(step.status).toBe("completed");
-    expect(step.error).toBeUndefined();
+    expect(step.status).toBe("failed");
+    expect(step.error).toBeDefined();
   });
 
   it("returns a direct completion response after duplicate non-idempotent tool calls are blocked", async () => {
@@ -2572,7 +2572,7 @@ relationship_memory:
     expect((executor as Any).conversationHistory.at(-1)?.content).toContain("This is attempt 2");
   });
 
-  it("does not auto-insert recovery plan steps for repeated failure signatures", async () => {
+  it("inserts local-runtime recovery steps when recovery mode is active", async () => {
     const executor = createExecutorWithStubs(
       [
         toolUseResponse("run_command", { command: "exit 1" }),
@@ -2596,16 +2596,16 @@ relationship_memory:
     await (executor as Any).executeStep(failedStep);
     await (executor as Any).executeStep(failedStep);
 
-    expect(handlePlanRevisionSpy).not.toHaveBeenCalled();
-    expect(executor.planRevisionCount).toBe(0);
+    expect(handlePlanRevisionSpy).toHaveBeenCalledTimes(1);
+    expect(executor.planRevisionCount).toBe(1);
     const planDescriptions = executor.plan.steps.map((step: Any) => step.description);
     expect(
-      planDescriptions.some((desc: string) => desc.includes("alternative toolchain")),
-    ).toBe(false);
-    expect(planDescriptions.length).toBe(2);
+      planDescriptions.some((desc: string) => desc.includes("local-runtime remediation path")),
+    ).toBe(true);
+    expect(planDescriptions.length).toBeGreaterThan(2);
   });
 
-  it("does not auto-insert recovery steps even when failure reason changes between retries", async () => {
+  it("allows a new recovery revision when the failure signature changes between retries", async () => {
     const executor = createExecutorWithStubs(
       [
         toolUseResponse("run_command", { command: "exit 1" }),
@@ -2640,16 +2640,16 @@ relationship_memory:
     await (executor as Any).executeStep(failedStep);
     await (executor as Any).executeStep(failedStep);
 
-    expect(handlePlanRevisionSpy).not.toHaveBeenCalled();
+    expect(handlePlanRevisionSpy).toHaveBeenCalledTimes(2);
     const planDescriptions = executor.plan.steps.map((step: Any) => step.description);
     expect(
-      planDescriptions.some((desc: string) => desc.includes("alternative toolchain")),
-    ).toBe(false);
-    expect(planDescriptions.length).toBe(2);
-    expect(executor.planRevisionCount).toBe(0);
+      planDescriptions.some((desc: string) => desc.includes("local-runtime remediation path")),
+    ).toBe(true);
+    expect(planDescriptions.length).toBeGreaterThan(2);
+    expect(executor.planRevisionCount).toBe(2);
   });
 
-  it("keeps existing plan steps unchanged when recovery insertion is not triggered", async () => {
+  it("inserts generic recovery steps when recovery mode is active for non-runtime failures", async () => {
     const executor = createExecutorWithStubs(
       [toolUseResponse("run_command", { command: "exit 1" }), textResponse("")],
       {
@@ -2666,16 +2666,13 @@ relationship_memory:
 
     await (executor as Any).executeStep(failedStep);
 
-    expect(failedStep.status).toBe("completed");
+    expect(failedStep.status).toBe("failed");
     const planDescriptions = executor.plan.steps.map((step: Any) => step.description);
-    expect(
-      planDescriptions.some((desc: string) => desc.includes("alternative toolchain")),
-    ).toBe(false);
     expect(planDescriptions).toContain("Validate output");
-    expect(planDescriptions.length).toBe(2);
+    expect(planDescriptions.length).toBe(4);
   });
 
-  it("does not auto-trigger recovery planning when user did not explicitly request recovery", async () => {
+  it("triggers recovery planning when the failure reason itself signals recovery intent", async () => {
     const executor = createExecutorWithStubs(
       [toolUseResponse("run_command", { command: "exit 1" }), textResponse("")],
       {
@@ -2695,11 +2692,9 @@ relationship_memory:
     await (executor as Any).executeStep(failedStep);
 
     const planDescriptions = executor.plan.steps.map((step: Any) => step.description);
-    expect(
-      planDescriptions.some((desc: string) => desc.includes("alternative toolchain")),
-    ).toBe(false);
-    expect(failedStep.status).toBe("completed");
-    expect(executor.planRevisionCount).toBe(0);
+    expect(planDescriptions.length).toBeGreaterThan(2);
+    expect(planDescriptions).toContain("Validate output");
+    expect(failedStep.status).toBe("failed");
   });
 
   it("requires artifact_write_required for summary/report steps with a concrete target path and write intent", () => {

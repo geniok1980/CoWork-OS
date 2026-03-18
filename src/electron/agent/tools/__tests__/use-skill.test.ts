@@ -198,6 +198,7 @@ vi.mock("../../../security/policy-manager", () => ({
 
 vi.mock("../builtin-settings", () => ({
   BuiltinToolsSettingsManager: {
+    loadSettings: vi.fn().mockReturnValue({}),
     isToolEnabled: vi.fn().mockReturnValue(true),
     getToolCategory: vi.fn().mockReturnValue("skills"),
     getToolPriority: vi.fn().mockReturnValue("normal"),

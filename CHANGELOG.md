@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-03-18
+
 ### Added
 - **HuggingFace Local AI provider**: added `hf-agents` + `llama.cpp` local-model support with installation checks, model selection, and local server lifecycle management from Settings.
 - **Research channels**: Telegram and WhatsApp chats can now be designated as link-research channels that automatically turn posted URLs into a structured findings report.
@@ -1073,7 +1075,18 @@ This release is the first recommended Windows install baseline for normal users 
 | 0.1.0 | 2025-01-24 | First public release with core features |
 | 0.0.1 | 2025-01-20 | Initial development setup |
 
-[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.3.91...HEAD
+[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.1
+[0.5.0]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.0
+[0.4.13]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.13
+[0.4.12]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.12
+[0.4.11]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.11
+[0.4.10]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.10
+[0.4.9]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.9
+[0.4.8]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.8
+[0.4.7]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.7
+[0.4.6]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.6
+[0.4.1]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.1
 [0.3.91]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.3.91
 [0.3.90]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.3.90
 [0.3.89]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.3.89

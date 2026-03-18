@@ -2676,6 +2676,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       | "google-calendar"
       | "google-drive"
       | "gmail"
+      | "google-workspace"
       | "docusign"
       | "outreach"
       | "slack";
@@ -4444,6 +4445,20 @@ export interface ElectronAPI {
   testMCPServer: (
     serverId: string,
   ) => Promise<{ success: boolean; error?: string; tools?: number }>;
+  deviceListFiles: (params: {
+    nodeId: string;
+    workspaceId: string;
+    path?: string;
+  }) => Promise<{
+    ok: boolean;
+    files?: Array<{ name: string; type: "file" | "directory"; size: number }>;
+    error?: string;
+  }>;
+  deviceListRemoteWorkspaces: (nodeId: string) => Promise<{
+    ok: boolean;
+    workspaces?: Array<{ id: string; name: string }>;
+    error?: string;
+  }>;
   startConnectorOAuth: (payload: {
     provider:
       | "salesforce"
@@ -4453,6 +4468,7 @@ export interface ElectronAPI {
       | "google-calendar"
       | "google-drive"
       | "gmail"
+      | "google-workspace"
       | "docusign"
       | "outreach"
       | "slack";
@@ -4471,6 +4487,7 @@ export interface ElectronAPI {
       | "google-calendar"
       | "google-drive"
       | "gmail"
+      | "google-workspace"
       | "docusign"
       | "outreach"
       | "slack";

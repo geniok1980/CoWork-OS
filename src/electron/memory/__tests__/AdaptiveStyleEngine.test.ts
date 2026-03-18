@@ -8,8 +8,11 @@ const mockSecureStore = new Map<string, string>();
 vi.mock("../../database/SecureSettingsRepository", () => ({
   SecureSettingsRepository: {
     getInstance: () => ({
-      get: (key: string) => mockSecureStore.get(key) ?? null,
-      set: (key: string, value: string) => mockSecureStore.set(key, value),
+      load: (key: string) => {
+        const raw = mockSecureStore.get(key);
+        return raw ? JSON.parse(raw) : null;
+      },
+      save: (key: string, value: unknown) => mockSecureStore.set(key, JSON.stringify(value)),
     }),
   },
 }));

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-03-18
+
 ### Added
 - **Chrome DevTools attach mode**: `browser_attach` tool for connecting to existing Chrome via CDP. See [Browser Automation](features.md#chrome-devtools-attach-mode).
 - **Batched browser actions**: `browser_act_batch` for sequential click, fill, type, press, wait, scroll with optional delays.
@@ -751,7 +753,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | 0.1.0 | 2025-01-24 | First public release with core features |
 | 0.0.1 | 2025-01-20 | Initial development setup |
 
-[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.3.90...HEAD
+[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.1
+[0.5.0]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.0
+[0.4.13]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.13
+[0.4.12]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.12
+[0.4.11]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.11
+[0.4.10]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.10
+[0.4.9]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.9
+[0.4.8]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.8
+[0.4.7]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.7
+[0.4.6]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.6
+[0.4.1]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.4.1
 [0.3.90]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.3.90
 [0.3.84]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.3.84
 [0.3.83]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.3.83

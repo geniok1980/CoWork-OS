@@ -1,5 +1,10 @@
 import { useState, useEffect } from "react";
-import type { AgentRole } from "../../shared/types";
+
+type AgentRoleOption = {
+  id: string;
+  name: string;
+  displayName?: string;
+};
 
 interface ResearchChannelsSettingsProps {
   channelId: string;
@@ -17,7 +22,7 @@ export function ResearchChannelsSettings({
   const [expanded, setExpanded] = useState(false);
   const [researchChatIds, setResearchChatIds] = useState("");
   const [researchAgentRoleId, setResearchAgentRoleId] = useState("");
-  const [agentRoles, setAgentRoles] = useState<AgentRole[]>([]);
+  const [agentRoles, setAgentRoles] = useState<AgentRoleOption[]>([]);
   const [saving, setSaving] = useState(false);
 
   const ids = (channelConfig.researchChatIds as string[] | undefined) ?? [];
@@ -31,7 +36,7 @@ export function ResearchChannelsSettings({
   useEffect(() => {
     window.electronAPI
       .getAgentRoles?.(false)
-      .then((roles: AgentRole[]) => setAgentRoles(roles))
+      .then((roles) => setAgentRoles(roles ?? []))
       .catch(() => setAgentRoles([]));
   }, []);
 

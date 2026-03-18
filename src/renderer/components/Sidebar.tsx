@@ -225,7 +225,7 @@ export function Sidebar({
   const [showFailedSessions, setShowFailedSessions] = useState(false);
   const [pinActionError, setPinActionError] = useState<string | null>(null);
   const [activeModeFilters, setActiveModeFilters] = useState<Set<SessionMode>>(new Set());
-  const [showFilterBar, setShowFilterBar] = useState(false);
+  const [showFilterBar] = useState(false);
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   // Automated sessions folder is collapsed by default to keep the sidebar clean
   const [automatedFolderCollapsed, setAutomatedFolderCollapsed] = useState(true);
@@ -817,22 +817,24 @@ export function Sidebar({
     if (role?.icon) {
       const Icon = getEmojiIcon(role.icon);
       return (
-        <Icon
-          className="cli-subagent-icon"
-          size={14}
-          strokeWidth={2}
-          title={role.displayName}
-        />
+        <span title={role.displayName}>
+          <Icon
+            className="cli-subagent-icon"
+            size={14}
+            strokeWidth={2}
+          />
+        </span>
       );
     }
     if (task.agentType === "parallel") {
       return (
-        <Workflow
-          className="cli-subagent-icon cli-subagent-icon-parallel"
-          size={14}
-          strokeWidth={2}
-          title="Parallel agent"
-        />
+        <span title="Parallel agent">
+          <Workflow
+            className="cli-subagent-icon cli-subagent-icon-parallel"
+            size={14}
+            strokeWidth={2}
+          />
+        </span>
       );
     }
     return null;

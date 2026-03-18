@@ -9,33 +9,21 @@ export type ConnectorCapabilityId =
   | "hubspot"
   | "zendesk"
   | "servicenow"
-  | "outreach"
-  | "docusign"
   | "linear"
   | "asana"
   | "okta"
   | "resend"
-  | "google-calendar"
-  | "google-drive"
-  | "gmail"
-  | "google-workspace"
-  | "slack";
+  | "google-workspace";
 
 export type Tier1IntegrationProvider =
   | "resend"
-  | "slack"
-  | "gmail"
-  | "google-calendar"
-  | "google-drive"
   | "google-workspace"
   | "jira"
   | "linear"
   | "hubspot"
   | "salesforce"
   | "zendesk"
-  | "servicenow"
-  | "outreach"
-  | "docusign";
+  | "servicenow";
 
 export interface IntegrationLinkSet {
   dashboard?: string;
@@ -188,45 +176,6 @@ const CAPABILITIES: Record<ConnectorCapabilityId, ConnectorCapability> = {
     },
     tier1: true,
   },
-  outreach: {
-    id: "outreach",
-    name: "Outreach",
-    registryEntryId: "outreach",
-    authMethods: ["oauth"],
-    oauthProvider: "outreach",
-    readinessAny: [["OUTREACH_ACCESS_TOKEN"]],
-    readinessByAuth: {
-      oauth: [["OUTREACH_ACCESS_TOKEN", "OUTREACH_REFRESH_TOKEN"]],
-    },
-    healthTool: "outreach.health",
-    links: {
-      dashboard: "https://app.outreach.io",
-      oauth_docs: "https://developers.outreach.io/api/oauth/",
-    },
-    tier1: true,
-  },
-  docusign: {
-    id: "docusign",
-    name: "DocuSign",
-    registryEntryId: "docusign",
-    authMethods: ["api_key", "oauth"],
-    oauthProvider: "docusign",
-    readinessAny: [
-      ["DOCUSIGN_ACCOUNT_ID", "DOCUSIGN_ACCESS_TOKEN"],
-      ["DOCUSIGN_ACCOUNT_ID", "DOCUSIGN_INTEGRATION_KEY", "DOCUSIGN_SECRET_KEY"],
-    ],
-    readinessByAuth: {
-      api_key: [["DOCUSIGN_ACCOUNT_ID", "DOCUSIGN_INTEGRATION_KEY", "DOCUSIGN_SECRET_KEY"]],
-      oauth: [["DOCUSIGN_ACCOUNT_ID", "DOCUSIGN_ACCESS_TOKEN", "DOCUSIGN_REFRESH_TOKEN"]],
-    },
-    healthTool: "docusign.health",
-    links: {
-      dashboard: "https://admindemo.docusign.com",
-      api_keys_docs: "https://developers.docusign.com/platform/auth/",
-      oauth_docs: "https://developers.docusign.com/platform/auth/authcode/",
-    },
-    tier1: true,
-  },
   linear: {
     id: "linear",
     name: "Linear",
@@ -287,77 +236,6 @@ const CAPABILITIES: Record<ConnectorCapabilityId, ConnectorCapability> = {
     supportsInbound: true,
     tier1: true,
   },
-  "google-calendar": {
-    id: "google-calendar",
-    name: "Google Calendar",
-    registryEntryId: "google-calendar",
-    authMethods: ["oauth"],
-    oauthProvider: "google-calendar",
-    readinessAny: [["GOOGLE_ACCESS_TOKEN"]],
-    readinessByAuth: {
-      oauth: [["GOOGLE_ACCESS_TOKEN", "GOOGLE_REFRESH_TOKEN"]],
-    },
-    healthTool: "google-calendar.health",
-    links: {
-      dashboard: "https://console.cloud.google.com/apis/credentials",
-      oauth_docs: "https://developers.google.com/calendar/api/guides/auth",
-    },
-    tier1: true,
-  },
-  "google-drive": {
-    id: "google-drive",
-    name: "Google Drive",
-    registryEntryId: "google-drive",
-    authMethods: ["oauth"],
-    oauthProvider: "google-drive",
-    readinessAny: [["GOOGLE_ACCESS_TOKEN"]],
-    readinessByAuth: {
-      oauth: [["GOOGLE_ACCESS_TOKEN", "GOOGLE_REFRESH_TOKEN"]],
-    },
-    healthTool: "google-drive.health",
-    links: {
-      dashboard: "https://console.cloud.google.com/apis/credentials",
-      oauth_docs: "https://developers.google.com/drive/api/guides/api-specific-auth",
-    },
-    tier1: true,
-  },
-  gmail: {
-    id: "gmail",
-    name: "Gmail",
-    registryEntryId: "gmail",
-    authMethods: ["oauth"],
-    oauthProvider: "gmail",
-    readinessAny: [["GOOGLE_ACCESS_TOKEN"]],
-    readinessByAuth: {
-      oauth: [["GOOGLE_ACCESS_TOKEN", "GOOGLE_REFRESH_TOKEN"]],
-    },
-    healthTool: "gmail.health",
-    links: {
-      dashboard: "https://console.cloud.google.com/apis/credentials",
-      oauth_docs: "https://developers.google.com/gmail/api/auth/about-auth",
-    },
-    tier1: true,
-  },
-  slack: {
-    id: "slack",
-    name: "Slack",
-    registryEntryId: "slack",
-    authMethods: ["api_key", "oauth"],
-    oauthProvider: "slack",
-    readinessAny: [["SLACK_BOT_TOKEN"], ["SLACK_ACCESS_TOKEN"]],
-    readinessByAuth: {
-      api_key: [["SLACK_BOT_TOKEN"], ["SLACK_ACCESS_TOKEN"]],
-      oauth: [["SLACK_ACCESS_TOKEN", "SLACK_REFRESH_TOKEN"]],
-    },
-    healthTool: "slack.health",
-    links: {
-      dashboard: "https://api.slack.com/apps",
-      create_api_key: "https://api.slack.com/apps",
-      api_keys_docs: "https://api.slack.com/authentication/token-types",
-      oauth_docs: "https://api.slack.com/authentication/oauth-v2",
-    },
-    tier1: true,
-  },
   "google-workspace": {
     id: "google-workspace",
     name: "Google Workspace",
@@ -380,10 +258,6 @@ const CAPABILITIES: Record<ConnectorCapabilityId, ConnectorCapability> = {
 
 export const TIER1_CONNECTOR_IDS: Tier1IntegrationProvider[] = [
   "resend",
-  "slack",
-  "gmail",
-  "google-calendar",
-  "google-drive",
   "google-workspace",
   "jira",
   "linear",
@@ -391,8 +265,6 @@ export const TIER1_CONNECTOR_IDS: Tier1IntegrationProvider[] = [
   "salesforce",
   "zendesk",
   "servicenow",
-  "outreach",
-  "docusign",
 ];
 
 export function getConnectorCapability(id: string): ConnectorCapability | undefined {

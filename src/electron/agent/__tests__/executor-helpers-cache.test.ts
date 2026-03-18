@@ -150,6 +150,16 @@ describe("FileOperationTracker cache invalidation", () => {
     );
     expect(tracker.getCreatedFiles()).toHaveLength(2);
   });
+
+  it("does not flag rewriting the same file path as a duplicate creation", () => {
+    const tracker = new FileOperationTracker();
+
+    tracker.recordFileCreation("deliverables/report.md");
+
+    expect(tracker.checkFileCreation("deliverables/report.md")).toEqual(
+      expect.objectContaining({ isDuplicate: false }),
+    );
+  });
 });
 
 describe("ToolFailureTracker browser HTTP status handling", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fetchMentionsWithRetry } from "../fetch";
+import { classifyXMentionFailure, fetchMentionsWithRetry } from "../fetch";
 
 const runBirdCommandMock = vi.fn();
 
@@ -57,6 +57,15 @@ describe("fetchMentionsWithRetry", () => {
       expect.anything(),
       ["mentions", "-n", "10"],
       expect.objectContaining({ json: true, timeoutMs: 90_000 }),
+    );
+  });
+
+  it("classifies persistent cookie and CLI failures for bridge backoff decisions", () => {
+    expect(classifyXMentionFailure(new Error("Command failed: bird --cookie-source chrome"))).toEqual(
+      expect.objectContaining({ code: "auth" }),
+    );
+    expect(classifyXMentionFailure(new Error("spawn EBADF"))).toEqual(
+      expect.objectContaining({ code: "cli" }),
     );
   });
 });

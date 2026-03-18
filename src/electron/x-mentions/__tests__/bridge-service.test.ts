@@ -85,6 +85,32 @@ describe("XMentionBridgeService", () => {
     expect(runBirdCommandMock).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(60_000);
+    expect(runBirdCommandMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(runBirdCommandMock).toHaveBeenCalledTimes(2);
+
+    service.stop();
+  });
+
+  it("backs off aggressively after unsupported JSON failures", async () => {
+    runBirdCommandMock.mockResolvedValueOnce({
+      stdout: "@agent do: run task",
+      jsonFallbackUsed: true,
+    });
+
+    const service = new XMentionBridgeService({} as Any, {
+      isNativeXChannelEnabled: () => false,
+    });
+
+    service.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runBirdCommandMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(runBirdCommandMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(25 * 60_000);
     expect(runBirdCommandMock).toHaveBeenCalledTimes(2);
 
     service.stop();

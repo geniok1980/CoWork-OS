@@ -347,6 +347,34 @@ DOCUMENT CREATION BEST PRACTICES:
     );
   });
 
+  it("prefers the last non-verification answer over a later operational status message", async () => {
+    const executor = createExecuteHarness({
+      title: "Video decision",
+      prompt:
+        "Transcribe this video and let me know if I should spend my time watching it or skip it.",
+      lastOutput: "Created: Dan_Koe_Video_Review.pdf",
+      createdFiles: ["Dan_Koe_Video_Review.pdf"],
+      planStepDescription: "Transcribe the video",
+    });
+    (executor as Any).lastNonVerificationOutput =
+      "You should skip it because the video repeats beginner concepts and adds little beyond the transcript.";
+    (executor as Any).lastAssistantText = "Created: Dan_Koe_Video_Review.pdf";
+    (executor as Any).toolResultMemory = [
+      { tool: "web_fetch", summary: "transcript reviewed", timestamp: Date.now() },
+    ];
+
+    await (executor as Any).execute();
+
+    expect(executor.daemon.completeTask).toHaveBeenCalledTimes(1);
+    expect(executor.daemon.updateTask).not.toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("missing direct answer"),
+      }),
+    );
+  });
+
   it("does not complete high-risk research summaries without dated fetched evidence", async () => {
     const executor = createExecuteHarness({
       title: "Daily AI Agent Trends Research",

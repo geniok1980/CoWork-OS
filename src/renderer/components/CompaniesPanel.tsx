@@ -12,6 +12,7 @@ import {
   Workflow,
   X,
 } from "lucide-react";
+import { getEmojiIcon } from "../utils/emoji-icon-map";
 import type { AgentRoleData } from "../../electron/preload";
 import type {
   Company,
@@ -1236,7 +1237,14 @@ export function CompaniesPanel({
                     {companyRoles.map((role) => (
                       <div key={role.id} className="co-operator-row">
                         <div className="co-operator-info">
-                          {role.icon && <span className="co-operator-icon">{role.icon}</span>}
+                          {role.icon && (
+                            <span className="co-operator-icon">
+                              {(() => {
+                                const Icon = getEmojiIcon(role.icon);
+                                return <Icon size={16} strokeWidth={2} />;
+                              })()}
+                            </span>
+                          )}
                           <strong>{role.displayName || role.name}</strong>
                           {role.autonomyLevel && (
                             <span className="settings-badge settings-badge--outline">

@@ -4,6 +4,19 @@ import { runBirdCommand } from "../utils/x-cli";
 const DEFAULT_MENTION_TIMEOUT_MS = 45_000;
 const RETRY_MENTION_TIMEOUT_MS = 90_000;
 const RETRY_FETCH_COUNT_MAX = 10;
+const X_MENTION_TIMEOUT_ERROR_RE = /timeout|timed out|ETIMEDOUT/i;
+const X_MENTION_UNSUPPORTED_JSON_ERROR_RE = /requires JSON support|unknown option.*--json/i;
+const X_MENTION_AUTH_ERROR_RE =
+  /missing auth_token|missing .*ct0|cookie|profile|not logged in|login required|permission denied|access denied/i;
+const X_MENTION_CLI_ERROR_RE =
+  /Command failed: bird|spawn (EBADF|EACCES|ENOENT)|bird CLI not found/i;
+
+export type XMentionFailureCode = "timeout" | "unsupported_json" | "auth" | "cli" | "unknown";
+
+export interface XMentionFailure {
+  code: XMentionFailureCode;
+  message: string;
+}
 
 function normalizeFetchCount(value: number): number {
   if (!Number.isFinite(value)) return 25;
@@ -20,7 +33,26 @@ function resolveMentionsTimeoutMs(settings: XSettingsData): number {
 
 function isTimeoutError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return /timeout/i.test(error.message);
+  return X_MENTION_TIMEOUT_ERROR_RE.test(error.message);
+}
+
+export function classifyXMentionFailure(error: unknown): XMentionFailure {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
+
+  if (X_MENTION_TIMEOUT_ERROR_RE.test(message)) {
+    return { code: "timeout", message };
+  }
+  if (X_MENTION_UNSUPPORTED_JSON_ERROR_RE.test(message)) {
+    return { code: "unsupported_json", message };
+  }
+  if (X_MENTION_AUTH_ERROR_RE.test(message)) {
+    return { code: "auth", message };
+  }
+  if (X_MENTION_CLI_ERROR_RE.test(message)) {
+    return { code: "cli", message };
+  }
+  return { code: "unknown", message };
 }
 
 export async function fetchMentionsWithRetry(

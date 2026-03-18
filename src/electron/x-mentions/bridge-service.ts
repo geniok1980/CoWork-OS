@@ -2,7 +2,7 @@ import { AgentDaemon } from "../agent/daemon";
 import { initializeHookAgentIngress, HookAgentIngress } from "../hooks/agent-ingress";
 import { XSettingsManager } from "../settings/x-manager";
 import { checkBirdInstalled } from "../utils/x-cli";
-import { fetchMentionsWithRetry } from "./fetch";
+import { classifyXMentionFailure, fetchMentionsWithRetry, type XMentionFailureCode } from "./fetch";
 import {
   buildMentionTaskPrompt,
   parseBirdMentions,
@@ -19,9 +19,14 @@ export class XMentionBridgeService {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private pollInFlight = false;
+  private consecutiveFailures = 0;
   private readonly ingress: HookAgentIngress;
   private readonly statusStore = getXMentionTriggerStatusStore();
   private readonly isNativeXChannelEnabled: () => boolean;
+  private readonly FAILURE_BACKOFF_MIN_MS = 2 * 60 * 1000;
+  private readonly FAILURE_BACKOFF_MAX_MS = 30 * 60 * 1000;
+  private readonly CLI_FAILURE_BACKOFF_MS = 10 * 60 * 1000;
+  private readonly CONFIG_FAILURE_BACKOFF_MS = 30 * 60 * 1000;
 
   constructor(
     agentDaemon: AgentDaemon,
@@ -74,6 +79,24 @@ export class XMentionBridgeService {
     return Math.max(30, intervalSec) * 1000;
   }
 
+  private getFailureBackoffMs(code: XMentionFailureCode, baseIntervalMs: number): number {
+    if (code === "unsupported_json" || code === "auth") {
+      return Math.max(baseIntervalMs, this.CONFIG_FAILURE_BACKOFF_MS);
+    }
+
+    if (code === "cli") {
+      return Math.max(baseIntervalMs * 2, this.CLI_FAILURE_BACKOFF_MS);
+    }
+
+    const multiplier = Math.pow(2, Math.max(0, Math.min(this.consecutiveFailures - 1, 4)));
+    const exponentialDelay = Math.round(baseIntervalMs * multiplier);
+
+    return Math.min(
+      Math.max(exponentialDelay, this.FAILURE_BACKOFF_MIN_MS),
+      this.FAILURE_BACKOFF_MAX_MS,
+    );
+  }
+
   private async pollOnce(): Promise<void> {
     if (!this.running) return;
     if (this.pollInFlight) {
@@ -81,6 +104,7 @@ export class XMentionBridgeService {
       return;
     }
     this.pollInFlight = true;
+    let nextDelayMs = this.getCurrentPollIntervalMs();
 
     try {
       const settings = XSettingsManager.loadSettings();
@@ -100,6 +124,7 @@ export class XMentionBridgeService {
       if (!installStatus.installed) {
         this.statusStore.setMode("bridge", false);
         this.statusStore.markError("bird CLI is not installed");
+        nextDelayMs = Math.max(nextDelayMs, this.CLI_FAILURE_BACKOFF_MS);
         return;
       }
 
@@ -132,15 +157,18 @@ export class XMentionBridgeService {
       }
 
       this.statusStore.markSuccess();
+      this.consecutiveFailures = 0;
     } catch (error) {
+      const failure = classifyXMentionFailure(error);
+      this.consecutiveFailures += 1;
+      nextDelayMs = this.getFailureBackoffMs(failure.code, nextDelayMs);
       console.warn(
-        "[X Mentions] Bridge poll failed:",
-        error instanceof Error ? error.message : String(error),
+        `[X Mentions] Bridge poll failed (${failure.code}). Next poll in ${Math.round(nextDelayMs / 1000)}s: ${failure.message}`,
       );
-      this.statusStore.markError(error instanceof Error ? error.message : String(error));
+      this.statusStore.markError(failure.message);
     } finally {
       this.pollInFlight = false;
-      this.schedulePoll(this.getCurrentPollIntervalMs());
+      this.schedulePoll(nextDelayMs);
     }
   }
 }

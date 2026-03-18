@@ -171,6 +171,16 @@ const TRANSIENT_MAIN_PROCESS_ERROR_RE =
   /(ECONNRESET|ETIMEDOUT|EPIPE|ENOTFOUND|ENETUNREACH|EHOSTUNREACH|socket hang up|Timed Out|Connection Closed)/i;
 let processErrorGuardsInstalled = false;
 
+function getDevServerUrl(): string {
+  const configured = String(process.env.COWORK_DEV_SERVER_URL || "").trim();
+  if (configured.length > 0) {
+    return configured;
+  }
+
+  const port = String(process.env.COWORK_DEV_SERVER_PORT || "5173").trim() || "5173";
+  return `http://127.0.0.1:${port}`;
+}
+
 function toErrorMessage(reason: unknown): string {
   if (reason instanceof Error) {
     return `${reason.name}: ${reason.message}`;
@@ -290,7 +300,7 @@ if (!gotTheLock) {
 
     // Load the app
     if (process.env.NODE_ENV === "development") {
-      mainWindow.loadURL("http://localhost:5173");
+      mainWindow.loadURL(getDevServerUrl());
       mainWindow.webContents.openDevTools();
     } else {
       const rendererDir = path.join(__dirname, "../../renderer");
@@ -345,7 +355,7 @@ if (!gotTheLock) {
       // Allow navigation to the app itself (dev server or file://), block external URLs
       const appUrl =
         process.env.NODE_ENV === "development"
-          ? "http://localhost:5173"
+          ? getDevServerUrl()
           : `file://${path.join(__dirname, "../../renderer")}`;
 
       if (!url.startsWith(appUrl)) {

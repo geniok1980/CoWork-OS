@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ThemeIcon } from "./ThemeIcon";
 import { BotIcon, CalendarIcon, ClockIcon, ColumnsIcon, FlagIcon, TagIcon } from "./LineIcons";
+import { getEmojiIcon } from "../utils/emoji-icon-map";
 import { TaskBoardColumn, TaskLabelData, AgentRoleData } from "../../electron/preload";
 
 interface Task {
@@ -242,7 +243,10 @@ export function TaskQuickActions({
                 }}
               >
                 <span className="agent-avatar" style={{ backgroundColor: agent.color }}>
-                  {agent.icon}
+                  {(() => {
+                    const Icon = getEmojiIcon(agent.icon || "🤖");
+                    return <Icon size={16} strokeWidth={2} />;
+                  })()}
                 </span>
                 {agent.displayName}
               </button>

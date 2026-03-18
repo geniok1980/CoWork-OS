@@ -248,6 +248,7 @@ import {
   buildInvalidInputToolResult as buildInvalidInputToolResultUtil,
   buildNormalizedToolResult as buildNormalizedToolResultUtil,
   buildRedundantFileOperationToolResult as buildRedundantFileOperationToolResultUtil,
+  type ToolInputValidationResult as ToolInputValidationResultUtil,
   buildUnavailableToolResult as buildUnavailableToolResultUtil,
   buildWatchSkipBlockedArtifactToolResult as buildWatchSkipBlockedArtifactToolResultUtil,
   formatToolInputForLog as formatToolInputForLogUtil,
@@ -1094,6 +1095,209 @@ export class TaskExecutor {
     );
   }
 
+  private emitNormalizedToolExecutionResult(params: {
+    toolName: string;
+    toolUseId: string;
+    result: Any;
+    rawResult: string;
+    correlation: ToolBatchCorrelationMeta;
+  }): LLMToolResult {
+    this.emitEvent(
+      "tool_result",
+      this.attachToolCorrelationMetadata(
+        {
+          tool: params.toolName,
+          result: params.result,
+        },
+        params.correlation,
+      ),
+    );
+
+    const normalizedToolResult = buildNormalizedToolResultUtil({
+      toolName: params.toolName,
+      toolUseId: params.toolUseId,
+      result: params.result,
+      rawResult: params.rawResult,
+      sanitizeToolResult: (toolName, resultText) =>
+        OutputFilter.sanitizeToolResult(toolName, resultText),
+      getToolFailureReason: (toolResult, fallback) =>
+        this.getToolFailureReason(toolResult, fallback),
+      includeRunCommandTerminationContext: true,
+    });
+
+    this.emitToolLaneFinished(
+      params.toolName,
+      params.correlation,
+      normalizedToolResult.toolResult.is_error ? "failed" : "completed",
+    );
+
+    return normalizedToolResult.toolResult;
+  }
+
+  private async preflightToolInvocation(params: {
+    content: Any;
+    contextText: string;
+    stepMode: StepContractMode | "analysis_only";
+    assistantText?: string;
+    stepId?: string;
+    rewriteReason: "tool_pre_execution" | "tool_pre_execution_follow_up";
+    followUp?: boolean;
+  }): Promise<
+    | {
+        status: "ok";
+        canonicalToolName: string;
+        inputValidation: ToolInputValidationResultUtil;
+        forcedToolAction?: { originalToolName: string; forcedToolName: string };
+      }
+    | {
+        status: "blocked";
+        canonicalToolName: string;
+        inputValidation: ToolInputValidationResultUtil;
+        blockedReason: "agent_policy_hook" | "invalid_input" | "task_root_strict_fail";
+        blockedMessage: string;
+        blockedToolResult: LLMToolResult;
+        forcedToolAction?: { originalToolName: string; forcedToolName: string };
+      }
+  > {
+    params.content.name = normalizeToolUseNameUtil({
+      toolName: params.content.name,
+      normalizeToolName: (toolName) => this.normalizeToolName(toolName),
+      emitParameterInference: (tool, inference) =>
+        this.emitEvent("parameter_inference", { tool, inference }),
+    });
+
+    let canonicalToolName = canonicalizeToolNameUtil(params.content.name);
+    let forcedToolAction: { originalToolName: string; forcedToolName: string } | undefined;
+    const preToolHookResult = this.applyPreToolUsePolicyHook({
+      toolName: params.content.name,
+      input: params.content.input,
+      stepMode: params.stepMode,
+    });
+    if (preToolHookResult.blockedResult) {
+      return {
+        status: "blocked",
+        canonicalToolName,
+        inputValidation: {
+          input: params.content.input,
+          error: null,
+          repairable: false,
+          repaired: false,
+        },
+        blockedReason: "agent_policy_hook",
+        blockedMessage: preToolHookResult.blockedResult.error,
+        blockedToolResult: {
+          type: "tool_result",
+          tool_use_id: params.content.id,
+          content: JSON.stringify({
+            error: preToolHookResult.blockedResult.error,
+            blocked: true,
+            reason: "agent_policy_hook",
+          }),
+          is_error: true,
+        },
+      };
+    }
+    if (preToolHookResult.forcedToolName) {
+      const originalToolName = params.content.name;
+      params.content.name = normalizeToolUseNameUtil({
+        toolName: preToolHookResult.forcedToolName,
+        normalizeToolName: (toolName) => this.normalizeToolName(toolName),
+        emitParameterInference: (tool, inference) =>
+          this.emitEvent("parameter_inference", { tool, inference }),
+      });
+      params.content.input = preToolHookResult.forcedInput ?? params.content.input;
+      canonicalToolName = canonicalizeToolNameUtil(params.content.name);
+      forcedToolAction = {
+        originalToolName,
+        forcedToolName: params.content.name,
+      };
+    }
+
+    params.content.input = inferAndNormalizeToolInputUtil({
+      toolName: params.content.name,
+      input: params.content.input,
+      inferMissingParameters: (toolName, input) => this.inferMissingParameters(toolName, input),
+      emitParameterInference: (tool, inference) =>
+        this.emitEvent("parameter_inference", { tool, inference }),
+    });
+
+    await this.handleCanvasPushFallback(params.content, params.assistantText || "");
+
+    const inputValidation = preflightValidateAndRepairToolInputUtil({
+      toolName: params.content.name,
+      input: params.content.input,
+      contextText: params.contextText,
+    });
+    params.content.input = inputValidation.input;
+    if (inputValidation.error) {
+      return {
+        status: "blocked",
+        canonicalToolName,
+        inputValidation,
+        blockedReason: "invalid_input",
+        blockedMessage: inputValidation.error,
+        blockedToolResult: buildInvalidInputToolResultUtil({
+          toolUseId: params.content.id,
+          validationError:
+            `${inputValidation.error}` +
+            (inputValidation.repairable
+              ? " (tool_input_validation_error; repairable=true)"
+              : " (tool_input_validation_error; repairable=false)"),
+        }),
+        ...(forcedToolAction ? { forcedToolAction } : {}),
+      };
+    }
+
+    const strictRootViolation = this.detectStrictTaskRootPathViolationInInput(
+      params.content.name,
+      params.content.input,
+    );
+    if (strictRootViolation) {
+      const strictError =
+        `Task root mismatch for ${params.content.name}.${strictRootViolation.key}: ` +
+        `"${strictRootViolation.from}". Use "${strictRootViolation.expected}" under pinned root "${this.taskPinnedRoot}".`;
+      return {
+        status: "blocked",
+        canonicalToolName,
+        inputValidation,
+        blockedReason: "task_root_strict_fail",
+        blockedMessage: strictError,
+        blockedToolResult: {
+          type: "tool_result",
+          tool_use_id: params.content.id,
+          content: JSON.stringify({
+            error: strictError,
+            blocked: true,
+            reason: "task_root_strict_fail",
+          }),
+          is_error: true,
+        },
+        ...(forcedToolAction ? { forcedToolAction } : {}),
+      };
+    }
+
+    const pinnedRootRewrite = this.rewriteToolInputPathByPinnedRoot(
+      params.content.name,
+      params.content.input,
+      params.stepId,
+      {
+        requireSourceMissing: true,
+        reason: params.rewriteReason,
+        ...(params.followUp ? { followUp: true } : {}),
+      },
+    );
+    if (pinnedRootRewrite.rewritten) {
+      params.content.input = pinnedRootRewrite.input;
+    }
+
+    return {
+      status: "ok",
+      canonicalToolName,
+      inputValidation,
+      ...(forcedToolAction ? { forcedToolAction } : {}),
+    };
+  }
+
   private isParallelToolCallEligible(toolName: string, input: Any): boolean {
     if (!this.toolBatchParallelEnabled || this.toolBatchParallelMax <= 1) return false;
     const canonicalToolName = canonicalizeToolNameUtil(toolName);
@@ -1220,21 +1424,18 @@ export class TaskExecutor {
         groupId,
       });
 
-      content.name = this.normalizeToolName(String(content.name || "")).name;
-      let canonicalContentName = canonicalizeToolNameUtil(content.name);
-      const preToolHookResult = this.applyPreToolUsePolicyHook({
-        toolName: content.name,
-        input: content.input,
+      const preflight = await this.preflightToolInvocation({
+        content,
+        contextText: `${params.stepDescription}\n${this.task.prompt}`,
         stepMode: params.stepMode,
+        stepId: params.stepId,
+        rewriteReason: params.followUp ? "tool_pre_execution_follow_up" : "tool_pre_execution",
+        followUp: params.followUp,
       });
-      if (preToolHookResult.blockedResult) {
+      if (preflight.status === "blocked") {
         return null;
       }
-      if (preToolHookResult.forcedToolName) {
-        content.name = this.normalizeToolName(String(preToolHookResult.forcedToolName || "")).name;
-        content.input = preToolHookResult.forcedInput ?? content.input;
-        canonicalContentName = canonicalizeToolNameUtil(content.name);
-      }
+      const canonicalContentName = preflight.canonicalToolName;
 
       if (params.requiredTools.has(canonicalContentName)) {
         params.requiredToolsAttempted.add(canonicalContentName);
@@ -1243,38 +1444,6 @@ export class TaskExecutor {
       if (policyDecision.decision !== "allow") return null;
       if (this.toolFailureTracker.isDisabled(content.name)) return null;
       if (!params.availableToolNames.has(content.name)) return null;
-
-      content.input = inferAndNormalizeToolInputUtil({
-        toolName: content.name,
-        input: content.input,
-        inferMissingParameters: (toolName, input) => this.inferMissingParameters(toolName, input),
-        emitParameterInference: (tool, inference) => this.emitEvent("parameter_inference", { tool, inference }),
-      });
-
-      const inputValidation = preflightValidateAndRepairToolInputUtil({
-        toolName: content.name,
-        input: content.input,
-        contextText: `${params.stepDescription}\n${this.task.prompt}`,
-      });
-      content.input = inputValidation.input;
-      if (inputValidation.error) return null;
-
-      const strictRootViolation = this.detectStrictTaskRootPathViolationInInput(content.name, content.input);
-      if (strictRootViolation) return null;
-
-      const pinnedRootRewrite = this.rewriteToolInputPathByPinnedRoot(
-        content.name,
-        content.input,
-        params.stepId,
-        {
-          requireSourceMissing: true,
-          reason: params.followUp ? "tool_pre_execution_follow_up" : "tool_pre_execution",
-          ...(params.followUp ? { followUp: true } : {}),
-        },
-      );
-      if (pinnedRootRewrite.rewritten) {
-        content.input = pinnedRootRewrite.input;
-      }
 
       const duplicateCheck = this.toolCallDeduplicator.checkDuplicate(content.name, content.input);
       if (duplicateCheck.isDuplicate) {
@@ -1552,31 +1721,14 @@ export class TaskExecutor {
         );
       }
 
-      this.emitEvent(
-        "tool_result",
-        this.attachToolCorrelationMetadata(
-          {
-            tool: outcome.toolName,
-            result,
-          },
-          outcome.correlation,
-        ),
-      );
-
-      const normalizedToolResult = buildNormalizedToolResultUtil({
-        toolName: outcome.toolName,
-        toolUseId: outcome.correlation.toolUseId,
-        result,
-        rawResult: resultStr,
-        sanitizeToolResult: (toolName, resultText) => OutputFilter.sanitizeToolResult(toolName, resultText),
-        getToolFailureReason: (toolResult, fallback) => this.getToolFailureReason(toolResult, fallback),
-        includeRunCommandTerminationContext: true,
-      });
-      toolResults.push(normalizedToolResult.toolResult);
-      this.emitToolLaneFinished(
-        outcome.toolName,
-        outcome.correlation,
-        normalizedToolResult.toolResult.is_error ? "failed" : "completed",
+      toolResults.push(
+        this.emitNormalizedToolExecutionResult({
+          toolName: outcome.toolName,
+          toolUseId: outcome.correlation.toolUseId,
+          result,
+          rawResult: resultStr,
+          correlation: outcome.correlation,
+        }),
       );
     }
 
@@ -8422,6 +8574,10 @@ ${transcript}
       .slice(0, 16);
 
     return JSON.stringify({
+      toolCatalogVersion:
+        this.toolRegistry && typeof (this.toolRegistry as Any).getToolCatalogVersion === "function"
+          ? (this.toolRegistry as Any).getToolCatalogVersion()
+          : "unknown",
       stepId: this.currentStepId || "",
       stepDescription: currentStep?.description?.slice(0, 220) || "",
       executionMode: this.getEffectiveExecutionMode(),
@@ -18917,51 +19073,29 @@ TASK / CONVERSATION HISTORY:
               });
               continue;
             }
-            // Normalize tool names like "functions.web_fetch" -> "web_fetch"
-            content.name = normalizeToolUseNameUtil({
-              toolName: content.name,
-              normalizeToolName: (toolName) => this.normalizeToolName(toolName),
-              emitParameterInference: (tool, inference) =>
-                this.emitEvent("parameter_inference", { tool, inference }),
-            });
-            let canonicalContentName = canonicalizeToolNameUtil(content.name);
-            const preToolHookResult = this.applyPreToolUsePolicyHook({
-              toolName: content.name,
-              input: content.input,
+            const preflight = await this.preflightToolInvocation({
+              content,
+              contextText: `${step.description}\n${this.task.prompt}`,
               stepMode: stepContract.mode,
+              assistantText,
+              stepId: step.id,
+              rewriteReason: "tool_pre_execution",
             });
-            if (preToolHookResult.blockedResult) {
+            let canonicalContentName = preflight.canonicalToolName;
+            if (preflight.status === "blocked" && preflight.blockedReason === "agent_policy_hook") {
               this.emitEvent("tool_blocked", {
                 tool: content.name,
                 reason: "agent_policy_hook",
-                message: preToolHookResult.blockedResult.error,
+                message: preflight.blockedMessage,
               });
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: content.id,
-                content: JSON.stringify({
-                  error: preToolHookResult.blockedResult.error,
-                  blocked: true,
-                  reason: "agent_policy_hook",
-                }),
-                is_error: true,
-              });
+              toolResults.push(preflight.blockedToolResult);
               continue;
             }
-            if (preToolHookResult.forcedToolName) {
-              const originalToolName = content.name;
-              content.name = normalizeToolUseNameUtil({
-                toolName: preToolHookResult.forcedToolName,
-                normalizeToolName: (toolName) => this.normalizeToolName(toolName),
-                emitParameterInference: (tool, inference) =>
-                  this.emitEvent("parameter_inference", { tool, inference }),
-              });
-              content.input = preToolHookResult.forcedInput ?? content.input;
-              canonicalContentName = canonicalizeToolNameUtil(content.name);
+            if (preflight.forcedToolAction) {
               this.emitEvent("log", {
                 metric: "agent_policy_pre_tool_force_action",
-                originalTool: originalToolName,
-                forcedTool: content.name,
+                originalTool: preflight.forcedToolAction.originalToolName,
+                forcedTool: preflight.forcedToolAction.forcedToolName,
                 stepId: step.id,
               });
             }
@@ -19199,25 +19333,7 @@ TASK / CONVERSATION HISTORY:
               continue;
             }
 
-            // Infer missing parameters for weaker models (normalize inputs before deduplication)
-            content.input = inferAndNormalizeToolInputUtil({
-              toolName: content.name,
-              input: content.input,
-              inferMissingParameters: (toolName, input) =>
-                this.inferMissingParameters(toolName, input),
-              emitParameterInference: (tool, inference) =>
-                this.emitEvent("parameter_inference", { tool, inference }),
-            });
-
-            // If canvas_push is missing content, try extracting HTML from assistant text or auto-generate
-            await this.handleCanvasPushFallback(content, assistantText);
-
-            const inputValidation = preflightValidateAndRepairToolInputUtil({
-              toolName: content.name,
-              input: content.input,
-              contextText: `${step.description}\n${this.task.prompt}`,
-            });
-            content.input = inputValidation.input;
+            const inputValidation = preflight.inputValidation;
             if (inputValidation.repaired) {
               this.emitEvent("log", {
                 metric: "tool_input_repaired_count",
@@ -19234,77 +19350,38 @@ TASK / CONVERSATION HISTORY:
               });
             }
 
-            const validationError = inputValidation.error;
-            if (validationError) {
+            if (preflight.status === "blocked" && preflight.blockedReason === "invalid_input") {
               const diagInputKeys = content.input ? Object.keys(content.input) : [];
               console.log(
-                `${this.logTag}   │ ⚠ Input validation failed for "${content.name}": ${validationError} | ` +
+                `${this.logTag}   │ ⚠ Input validation failed for "${content.name}": ${preflight.blockedMessage} | ` +
                   `inputKeys=[${diagInputKeys.join(",")}] | contentType=${typeof content.input?.content} | ` +
                   `contentLen=${typeof content.input?.content === "string" ? content.input.content.length : "N/A"}`,
               );
               this.emitEvent("tool_warning", {
                 tool: content.name,
-                error: validationError,
+                error: preflight.blockedMessage,
                 input: content.input,
                 errorClass: "tool_input_validation_error",
                 repairable: inputValidation.repairable,
                 input_repair_applied: inputValidation.repaired,
               });
-              toolResults.push(
-                buildInvalidInputToolResultUtil({
-                  toolUseId: content.id,
-                  validationError:
-                    `${validationError}` +
-                    (inputValidation.repairable
-                      ? " (tool_input_validation_error; repairable=true)"
-                      : " (tool_input_validation_error; repairable=false)"),
-                }),
-              );
+              toolResults.push(preflight.blockedToolResult);
               continue;
             }
 
-            const strictRootViolation = this.detectStrictTaskRootPathViolationInInput(
-              content.name,
-              content.input,
-            );
-            if (strictRootViolation) {
-              const strictError =
-                `Task root mismatch for ${content.name}.${strictRootViolation.key}: ` +
-                `"${strictRootViolation.from}". Use "${strictRootViolation.expected}" under pinned root "${this.taskPinnedRoot}".`;
+            if (preflight.status === "blocked" && preflight.blockedReason === "task_root_strict_fail") {
               this.emitEvent("tool_error", {
                 tool: content.name,
-                error: strictError,
+                error: preflight.blockedMessage,
                 blocked: true,
                 reason: "task_root_strict_fail",
               });
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: content.id,
-                content: JSON.stringify({
-                  error: strictError,
-                  blocked: true,
-                  reason: "task_root_strict_fail",
-                }),
-                is_error: true,
-              });
+              toolResults.push(preflight.blockedToolResult);
               hadToolError = true;
               toolErrors.add(content.name);
-              lastToolErrorReason = `Tool ${content.name} failed: ${strictError}`;
+              lastToolErrorReason = `Tool ${content.name} failed: ${preflight.blockedMessage}`;
               allToolErrorsInputDependent = false;
               continue;
-            }
-
-            const pinnedRootRewrite = this.rewriteToolInputPathByPinnedRoot(
-              content.name,
-              content.input,
-              step.id,
-              {
-                requireSourceMissing: true,
-                reason: "tool_pre_execution",
-              },
-            );
-            if (pinnedRootRewrite.rewritten) {
-              content.input = pinnedRootRewrite.input;
             }
 
             if (this.blockedLoopFingerprintForWindow) {
@@ -20050,33 +20127,14 @@ TASK / CONVERSATION HISTORY:
                 }
               }
 
-	              this.emitEvent(
-	                "tool_result",
-	                this.attachToolCorrelationMetadata(
-	                  {
-	                    tool: content.name,
-	                    result: result,
-	                  },
-	                  toolCorrelation,
-	                ),
-	              );
-
-	              const normalizedToolResult = buildNormalizedToolResultUtil({
-                toolName: content.name,
-                toolUseId: content.id,
-                result,
-                rawResult: resultStr,
-                sanitizeToolResult: (toolName, resultText) =>
-                  OutputFilter.sanitizeToolResult(toolName, resultText),
-                getToolFailureReason: (toolResult, fallback) =>
-                  this.getToolFailureReason(toolResult, fallback),
-                includeRunCommandTerminationContext: true,
-	              });
-	              toolResults.push(normalizedToolResult.toolResult);
-	              this.emitToolLaneFinished(
-	                content.name,
-	                toolCorrelation,
-	                normalizedToolResult.toolResult.is_error ? "failed" : "completed",
+	              toolResults.push(
+	                this.emitNormalizedToolExecutionResult({
+	                  toolName: content.name,
+	                  toolUseId: content.id,
+	                  result,
+	                  rawResult: resultStr,
+	                  correlation: toolCorrelation,
+	                }),
 	              );
 	            } catch (error: Any) {
               const toolExecDuration = ((Date.now() - toolExecStart) / 1000).toFixed(1);
@@ -23662,51 +23720,30 @@ TASK / CONVERSATION HISTORY:
               });
               continue;
             }
-            // Normalize tool names like "functions.web_fetch" -> "web_fetch"
-            content.name = normalizeToolUseNameUtil({
-              toolName: content.name,
-              normalizeToolName: (toolName) => this.normalizeToolName(toolName),
-              emitParameterInference: (tool, inference) =>
-                this.emitEvent("parameter_inference", { tool, inference }),
-            });
-            let canonicalContentName = canonicalizeToolNameUtil(content.name);
-            const preToolHookResult = this.applyPreToolUsePolicyHook({
-              toolName: content.name,
-              input: content.input,
+            const preflight = await this.preflightToolInvocation({
+              content,
+              contextText: `${messageWithContext}\n${this.task.prompt}`,
               stepMode: "analysis_only",
+              assistantText,
+              stepId: this.currentStepId || undefined,
+              rewriteReason: "tool_pre_execution_follow_up",
+              followUp: true,
             });
-            if (preToolHookResult.blockedResult) {
+            let canonicalContentName = preflight.canonicalToolName;
+            if (preflight.status === "blocked" && preflight.blockedReason === "agent_policy_hook") {
               this.emitEvent("tool_blocked", {
                 tool: content.name,
                 reason: "agent_policy_hook",
-                message: preToolHookResult.blockedResult.error,
+                message: preflight.blockedMessage,
               });
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: content.id,
-                content: JSON.stringify({
-                  error: preToolHookResult.blockedResult.error,
-                  blocked: true,
-                  reason: "agent_policy_hook",
-                }),
-                is_error: true,
-              });
+              toolResults.push(preflight.blockedToolResult);
               continue;
             }
-            if (preToolHookResult.forcedToolName) {
-              const originalToolName = content.name;
-              content.name = normalizeToolUseNameUtil({
-                toolName: preToolHookResult.forcedToolName,
-                normalizeToolName: (toolName) => this.normalizeToolName(toolName),
-                emitParameterInference: (tool, inference) =>
-                  this.emitEvent("parameter_inference", { tool, inference }),
-              });
-              content.input = preToolHookResult.forcedInput ?? content.input;
-              canonicalContentName = canonicalizeToolNameUtil(content.name);
+            if (preflight.forcedToolAction) {
               this.emitEvent("log", {
                 metric: "agent_policy_pre_tool_force_action",
-                originalTool: originalToolName,
-                forcedTool: content.name,
+                originalTool: preflight.forcedToolAction.originalToolName,
+                forcedTool: preflight.forcedToolAction.forcedToolName,
                 followUp: true,
               });
             }
@@ -23870,25 +23907,7 @@ TASK / CONVERSATION HISTORY:
               continue;
             }
 
-            // Infer missing parameters for weaker models (normalize inputs before deduplication)
-            content.input = inferAndNormalizeToolInputUtil({
-              toolName: content.name,
-              input: content.input,
-              inferMissingParameters: (toolName, input) =>
-                this.inferMissingParameters(toolName, input),
-              emitParameterInference: (tool, inference) =>
-                this.emitEvent("parameter_inference", { tool, inference }),
-            });
-
-            // If canvas_push is missing content, try extracting HTML from assistant text or auto-generate
-            await this.handleCanvasPushFallback(content, assistantText);
-
-            const inputValidation = preflightValidateAndRepairToolInputUtil({
-              toolName: content.name,
-              input: content.input,
-              contextText: `${messageWithContext}\n${this.task.prompt}`,
-            });
-            content.input = inputValidation.input;
+            const inputValidation = preflight.inputValidation;
             if (inputValidation.repaired) {
               this.emitEvent("log", {
                 metric: "tool_input_repaired_count",
@@ -23906,83 +23925,43 @@ TASK / CONVERSATION HISTORY:
               });
             }
 
-            const validationError = inputValidation.error;
-            if (validationError) {
+            if (preflight.status === "blocked" && preflight.blockedReason === "invalid_input") {
               const diagInputKeys = content.input ? Object.keys(content.input) : [];
               console.log(
-                `${this.logTag}   │ ⚠ Input validation failed for "${content.name}": ${validationError} | ` +
+                `${this.logTag}   │ ⚠ Input validation failed for "${content.name}": ${preflight.blockedMessage} | ` +
                   `inputKeys=[${diagInputKeys.join(",")}] | contentType=${typeof content.input?.content} | ` +
                   `contentLen=${typeof content.input?.content === "string" ? content.input.content.length : "N/A"}`,
               );
               this.emitEvent("tool_warning", {
                 tool: content.name,
-                error: validationError,
+                error: preflight.blockedMessage,
                 input: content.input,
                 errorClass: "tool_input_validation_error",
                 repairable: inputValidation.repairable,
                 input_repair_applied: inputValidation.repaired,
                 followUp: true,
               });
-              toolResults.push(
-                buildInvalidInputToolResultUtil({
-                  toolUseId: content.id,
-                  validationError:
-                    `${validationError}` +
-                    (inputValidation.repairable
-                      ? " (tool_input_validation_error; repairable=true)"
-                      : " (tool_input_validation_error; repairable=false)"),
-                }),
-              );
+              toolResults.push(preflight.blockedToolResult);
               continue;
             }
 
-            const followUpStrictRootViolation = this.detectStrictTaskRootPathViolationInInput(
-              content.name,
-              content.input,
-            );
-            if (followUpStrictRootViolation) {
-              const strictError =
-                `Task root mismatch for ${content.name}.${followUpStrictRootViolation.key}: ` +
-                `"${followUpStrictRootViolation.from}". Use "${followUpStrictRootViolation.expected}" under pinned root "${this.taskPinnedRoot}".`;
+            if (preflight.status === "blocked" && preflight.blockedReason === "task_root_strict_fail") {
               this.emitEvent("tool_error", {
                 tool: content.name,
-                error: strictError,
+                error: preflight.blockedMessage,
                 blocked: true,
                 reason: "task_root_strict_fail",
                 followUp: true,
               });
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: content.id,
-                content: JSON.stringify({
-                  error: strictError,
-                  blocked: true,
-                  reason: "task_root_strict_fail",
-                }),
-                is_error: true,
-              });
+              toolResults.push(preflight.blockedToolResult);
               if (isExecutionToolCall) {
-                lastExecutionToolError = strictError;
-                this.executionToolLastError = strictError;
+                lastExecutionToolError = preflight.blockedMessage;
+                this.executionToolLastError = preflight.blockedMessage;
               }
               if (isCanvasWorkflowToolCall) {
-                lastCanvasToolError = strictError;
+                lastCanvasToolError = preflight.blockedMessage;
               }
               continue;
-            }
-
-            const followUpPinnedRootRewrite = this.rewriteToolInputPathByPinnedRoot(
-              content.name,
-              content.input,
-              this.currentStepId || undefined,
-              {
-                requireSourceMissing: true,
-                reason: "tool_pre_execution_follow_up",
-                followUp: true,
-              },
-            );
-            if (followUpPinnedRootRewrite.rewritten) {
-              content.input = followUpPinnedRootRewrite.input;
             }
 
             // Check for duplicate tool calls (prevents stuck loops)
@@ -24250,32 +24229,14 @@ TASK / CONVERSATION HISTORY:
                 }
               }
 
-	              this.emitEvent(
-	                "tool_result",
-	                this.attachToolCorrelationMetadata(
-	                  {
-	                    tool: content.name,
-	                    result: result,
-	                  },
-	                  toolCorrelation,
-	                ),
-	              );
-
-	              const normalizedToolResult = buildNormalizedToolResultUtil({
-                toolName: content.name,
-                toolUseId: content.id,
-                result,
-                rawResult: resultStr,
-                sanitizeToolResult: (toolName, resultText) =>
-                  OutputFilter.sanitizeToolResult(toolName, resultText),
-                getToolFailureReason: (toolResult, fallback) =>
-                  this.getToolFailureReason(toolResult, fallback),
-	              });
-	              toolResults.push(normalizedToolResult.toolResult);
-	              this.emitToolLaneFinished(
-	                content.name,
-	                toolCorrelation,
-	                normalizedToolResult.toolResult.is_error ? "failed" : "completed",
+	              toolResults.push(
+	                this.emitNormalizedToolExecutionResult({
+	                  toolName: content.name,
+	                  toolUseId: content.id,
+	                  result,
+	                  rawResult: resultStr,
+	                  correlation: toolCorrelation,
+	                }),
 	              );
 	            } catch (error: Any) {
               const toolExecDuration = ((Date.now() - toolExecStart) / 1000).toFixed(1);

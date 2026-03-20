@@ -268,8 +268,8 @@ export class TaskStrategyService {
       buildVerifyRenderArtifactRequested ||
       buildRenderArtifactRequested
         ? "execute"
-        : route.intent === "chat"
-          ? "analyze"
+        : route.intent === "chat" || route.intent === "thinking"
+          ? "chat"
           : "plan";
     const existingExecutionMode = existing?.executionMode;
     // Verified mode is always user-selected; preserve it and force planning.
@@ -511,7 +511,9 @@ export class TaskStrategyService {
     if (strategy.executionMode !== "execute") {
       lines.push(
         "mode_contract:",
-        strategy.executionMode === "plan"
+        strategy.executionMode === "chat"
+          ? "- You are in chat mode: answer directly and do not use tools."
+          : strategy.executionMode === "plan"
           ? "- You are in plan mode: provide plans/options and avoid mutating tool calls."
           : "- You are in analyze mode: stay read-only and provide analysis from available evidence.",
       );
@@ -588,14 +590,9 @@ export class TaskStrategyService {
       return new Set(["*"]);
     }
 
-    // Chat: minimal toolset — just file reading and memory
-    if (intent === "chat") {
-      return new Set(CORE_TOOLS);
-    }
-
-    // Thinking: core + web research
-    if (intent === "thinking") {
-      return new Set([...CORE_TOOLS, "web_search", "web_fetch"]);
+    // Chat / thinking: direct-answer mode, no tools.
+    if (intent === "chat" || intent === "thinking") {
+      return new Set();
     }
 
     // Advice and planning: core + web + documents

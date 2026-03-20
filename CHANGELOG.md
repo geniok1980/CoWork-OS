@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Discord live API tools**: `channel_fetch_discord_messages` fetches up to 100 recent messages directly from Discord (not just the local gateway log). `channel_download_discord_attachment` downloads attachments from any message by ID. Both tools require Discord channel configured and connected. See [Channel Integrations](docs/channels.md#discord) and [Channel Comparison](docs/channel-comparison.md).
+- **14 new MCP connectors** (44 total): Tavily (web search), tldraw (diagrams), Amplitude (analytics), Clerk (auth), Mem (notes), Grafana (monitoring), Mailtrap (email), Socket (dependency security), Metabase (analytics), Shadcn UI (components), GrowthBook (feature flags), Drafts (macOS notes), Fantastical (macOS calendar), Tomba (email finder/verifier). All npm-installable from Settings > Connectors.
+
 ## [0.5.1] - 2026-03-18
 
 ### Added

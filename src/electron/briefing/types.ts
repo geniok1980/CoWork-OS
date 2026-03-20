@@ -10,7 +10,7 @@ export type BriefingSectionType =
   | "priority_review"
   | "upcoming_jobs"
   | "open_loops"
-  | "channel_digest"
+  | "awareness_digest"
   | "evolution_metrics";
 
 export interface BriefingItem {
@@ -56,7 +56,7 @@ export const DEFAULT_BRIEFING_CONFIG: BriefingConfig = {
     priority_review: true,
     upcoming_jobs: true,
     open_loops: true,
-    channel_digest: false,
+    awareness_digest: true,
     evolution_metrics: true,
   },
   enabled: false,
@@ -75,6 +75,12 @@ export interface DailyBriefingServiceDeps {
   getUpcomingJobs: (workspaceId: string, limit: number) => Any[] | Promise<Any[]>;
   /** Get open loops from daily log */
   getOpenLoops: (workspaceId: string) => string[];
+  /** Awareness summary for digest generation */
+  getAwarenessSummary?: (workspaceId: string) => Any | Promise<Any | null>;
+  /** Chief-of-staff world model */
+  getAutonomyState?: (workspaceId: string) => Any | Promise<Any | null>;
+  /** Pending chief-of-staff interventions */
+  getAutonomyDecisions?: (workspaceId: string) => Any[] | Promise<Any[]>;
   /** Best-effort suggestion refresh before briefing generation */
   refreshSuggestions?: (workspaceId: string) => Promise<void>;
   /** Deliver to channel */

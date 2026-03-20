@@ -674,6 +674,7 @@ export interface LLMSettings {
     deployment?: string;
     deployments?: string[];
     apiVersion?: string;
+    reasoningEffort?: "low" | "medium" | "high" | "extra_high";
   } & ProviderRoutingSettings;
   groq?: {
     apiKey?: string;
@@ -1320,6 +1321,7 @@ export class LLMProviderFactory {
       azureEndpoint: overrideConfig?.azureEndpoint || settings.azure?.endpoint,
       azureDeployment,
       azureApiVersion: overrideConfig?.azureApiVersion || settings.azure?.apiVersion,
+      azureReasoningEffort: overrideConfig?.azureReasoningEffort || settings.azure?.reasoningEffort,
       // Groq config - from settings only
       groqApiKey: normalizeSecret(overrideConfig?.groqApiKey) || settings.groq?.apiKey,
       groqBaseUrl: overrideConfig?.groqBaseUrl || settings.groq?.baseUrl,

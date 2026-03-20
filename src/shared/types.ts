@@ -48,6 +48,270 @@ export interface MemoryFeaturesSettings {
   heartbeatMaintenanceEnabled: boolean;
 }
 
+export type AwarenessSource =
+  | "conversation"
+  | "feedback"
+  | "files"
+  | "git"
+  | "apps"
+  | "browser"
+  | "calendar"
+  | "notifications"
+  | "clipboard"
+  | "tasks";
+
+export type AwarenessSensitivity = "low" | "medium" | "high";
+
+export type AwarenessBeliefType =
+  | "user_fact"
+  | "user_preference"
+  | "user_goal"
+  | "workflow_habit"
+  | "project_affinity"
+  | "device_context"
+  | "open_loop"
+  | "due_soon";
+
+export type AwarenessPromotionStatus = "observed" | "promoted" | "confirmed";
+
+export interface AwarenessSourcePolicy {
+  enabled: boolean;
+  ttlMinutes: number;
+  allowPromotion: boolean;
+  allowPromptInjection: boolean;
+  allowHeartbeat: boolean;
+}
+
+export interface AwarenessConfig {
+  privateModeEnabled: boolean;
+  defaultTtlMinutes: number;
+  sources: Record<AwarenessSource, AwarenessSourcePolicy>;
+}
+
+export interface AwarenessEvent {
+  id: string;
+  source: AwarenessSource;
+  timestamp: number;
+  workspaceId?: string;
+  title: string;
+  summary: string;
+  sensitivity: AwarenessSensitivity;
+  fingerprint: string;
+  payload?: Record<string, unknown>;
+  tags?: string[];
+}
+
+export interface AwarenessBelief {
+  id: string;
+  beliefType: AwarenessBeliefType;
+  subject: string;
+  value: string;
+  confidence: number;
+  evidenceRefs: string[];
+  workspaceId?: string;
+  source: AwarenessSource;
+  promotionStatus: AwarenessPromotionStatus;
+  createdAt: number;
+  updatedAt: number;
+  lastConfirmedAt?: number;
+}
+
+export interface AwarenessSummaryItem {
+  id: string;
+  title: string;
+  detail: string;
+  source: AwarenessSource;
+  workspaceId?: string;
+  score: number;
+  tags: string[];
+  requiresHeartbeat?: boolean;
+}
+
+export interface AwarenessSummary {
+  generatedAt: number;
+  workspaceId?: string;
+  currentFocus?: string;
+  whatChanged: AwarenessSummaryItem[];
+  whatMattersNow: AwarenessSummaryItem[];
+  dueSoon: AwarenessSummaryItem[];
+  beliefs: AwarenessBelief[];
+  wakeReasons: AwarenessWakeReason[];
+}
+
+export interface AwarenessSnapshot {
+  generatedAt: number;
+  workspaceId?: string;
+  currentFocus?: string;
+  activeApp?: string;
+  activeWindowTitle?: string;
+  browserContext?: string;
+  recentFiles: string[];
+  recentProjects: string[];
+  recentIntents: string[];
+  dueSoon: string[];
+  beliefs: AwarenessBelief[];
+  text: string;
+}
+
+export type AwarenessWakeReason =
+  | "context_shift"
+  | "focus_shift"
+  | "deadline_risk"
+  | "repeated_workflow"
+  | "idle_window"
+  | "due_soon";
+
+export type GoalStateStatus = "observed" | "active" | "blocked" | "completed" | "stale";
+
+export interface GoalState {
+  id: string;
+  workspaceId?: string;
+  title: string;
+  status: GoalStateStatus;
+  confidence: number;
+  source: AwarenessSource | "profile" | "relationship";
+  evidenceRefs: string[];
+  lastSeenAt: number;
+  dueAt?: number;
+}
+
+export interface ProjectState {
+  id: string;
+  workspaceId?: string;
+  name: string;
+  confidence: number;
+  source: AwarenessSource | "belief";
+  evidenceRefs: string[];
+  lastActiveAt: number;
+  recentFiles: string[];
+}
+
+export interface OpenLoopState {
+  id: string;
+  workspaceId?: string;
+  title: string;
+  status: "open" | "in_progress" | "done" | "stale";
+  confidence: number;
+  source: AwarenessSource | "relationship";
+  evidenceRefs: string[];
+  dueAt?: number;
+  lastUpdatedAt: number;
+}
+
+export interface RoutineState {
+  id: string;
+  workspaceId?: string;
+  title: string;
+  description: string;
+  confidence: number;
+  source: AwarenessSource | "belief";
+  evidenceRefs: string[];
+  trigger: string;
+  suggestedActionType: ChiefOfStaffActionType;
+  cooldownMinutes: number;
+  lastObservedAt: number;
+  lastExecutedAt?: number;
+  paused?: boolean;
+}
+
+export interface FocusSessionState {
+  id: string;
+  workspaceId?: string;
+  focusLabel: string;
+  activeApp?: string;
+  activeWindowTitle?: string;
+  activeProject?: string;
+  mode: "deep_work" | "research" | "planning" | "meeting" | "mixed";
+  startedAt: number;
+  lastActiveAt: number;
+}
+
+export type AutonomyPolicyLevel =
+  | "observe_only"
+  | "suggest_only"
+  | "execute_local"
+  | "execute_with_approval"
+  | "never";
+
+export type ChiefOfStaffActionType =
+  | "prepare_briefing"
+  | "create_task"
+  | "schedule_follow_up"
+  | "draft_message"
+  | "draft_agenda"
+  | "organize_work_session"
+  | "nudge_user"
+  | "execute_local_action";
+
+export interface ActionPolicy {
+  actionType: ChiefOfStaffActionType;
+  level: AutonomyPolicyLevel;
+  allowExternalSideEffects: boolean;
+  cooldownMinutes: number;
+}
+
+export interface AutonomyDecision {
+  id: string;
+  workspaceId?: string;
+  title: string;
+  description: string;
+  actionType: ChiefOfStaffActionType;
+  policyLevel: AutonomyPolicyLevel;
+  priority: CompanyPriority;
+  status: "pending" | "suggested" | "executed" | "dismissed" | "done";
+  reason: string;
+  evidenceRefs: string[];
+  fingerprint: string;
+  createdAt: number;
+  updatedAt: number;
+  cooldownUntil?: number;
+  suggestedTaskTitle?: string;
+  suggestedPrompt?: string;
+  /** Set when decision is from a routine; used for cooldown tracking */
+  routineId?: string;
+}
+
+export interface AutonomyAction {
+  id: string;
+  decisionId?: string;
+  workspaceId?: string;
+  actionType: ChiefOfStaffActionType;
+  status: "queued" | "success" | "failed" | "skipped";
+  summary: string;
+  createdAt: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AutonomyOutcome {
+  id: string;
+  actionId: string;
+  decisionId?: string;
+  workspaceId?: string;
+  outcome: "accepted" | "ignored" | "reversed" | "succeeded" | "failed";
+  summary: string;
+  createdAt: number;
+}
+
+export interface ChiefOfStaffWorldModel {
+  generatedAt: number;
+  workspaceId?: string;
+  focusSession?: FocusSessionState;
+  goals: GoalState[];
+  projects: ProjectState[];
+  openLoops: OpenLoopState[];
+  routines: RoutineState[];
+  beliefs: AwarenessBelief[];
+  currentPriorities: string[];
+  continuityNotes: string[];
+}
+
+export interface AutonomyConfig {
+  enabled: boolean;
+  autoEvaluate: boolean;
+  maxPendingDecisions: number;
+  actionPolicies: Record<ChiefOfStaffActionType, ActionPolicy>;
+}
+
 export type UserFactCategory =
   | "identity"
   | "preference"
@@ -445,6 +709,14 @@ export type ToolType =
   | "scratchpad_read"
   // Orchestration tools
   | "orchestrate_agents"
+  // QA tools (Playwright visual QA)
+  | "qa_run"
+  | "qa_navigate"
+  | "qa_interact"
+  | "qa_screenshot"
+  | "qa_check"
+  | "qa_report"
+  | "qa_cleanup"
   // Meta tools
   | "revise_plan"
   | "request_user_input"
@@ -488,6 +760,9 @@ export const TOOL_GROUPS = {
     // Local gateway message history
     "channel_list_chats",
     "channel_history",
+    // Discord live API (fetch messages, download attachments)
+    "channel_fetch_discord_messages",
+    "channel_download_discord_attachment",
     // Session scratchpad (read)
     "scratchpad_read",
   ],
@@ -559,6 +834,14 @@ export const TOOL_GROUPS = {
     "scrape_extract",
     "scrape_session",
     "scraping_status",
+    // QA (Playwright visual QA)
+    "qa_run",
+    "qa_navigate",
+    "qa_interact",
+    "qa_screenshot",
+    "qa_check",
+    "qa_report",
+    "qa_cleanup",
   ],
   // Memory/sensitive tools - restricted in shared contexts
   "group:memory": [
@@ -569,6 +852,8 @@ export const TOOL_GROUPS = {
     // Privacy-sensitive: exposes prior chat logs across chats
     "channel_list_chats",
     "channel_history",
+    "channel_fetch_discord_messages",
+    "channel_download_discord_attachment",
     // Privacy-sensitive: can exfiltrate local files/images to a provider
     "analyze_image",
     // Agent-initiated memory save
@@ -649,6 +934,14 @@ export const TOOL_RISK_LEVELS: Record<ToolType, ToolRiskLevel> = {
   scrape_extract: "network",
   scrape_session: "network",
   scraping_status: "read",
+  // QA (Playwright visual QA)
+  qa_run: "network",
+  qa_navigate: "network",
+  qa_interact: "network",
+  qa_screenshot: "network",
+  qa_check: "network",
+  qa_report: "read",
+  qa_cleanup: "network",
   // Memory
   memory_save: "write",
   // Scratchpad
@@ -716,7 +1009,7 @@ export interface SuccessCriteria {
  */
 export type AgentType = "main" | "sub" | "parallel";
 export type ConversationMode = "task" | "chat" | "hybrid" | "think";
-export type ExecutionMode = "execute" | "plan" | "analyze" | "verified";
+export type ExecutionMode = "execute" | "chat" | "plan" | "analyze" | "verified";
 export type ExecutionModeSource = "user" | "strategy" | "auto_promote";
 export type TurnBudgetPolicy = "hard_window" | "adaptive_unbounded";
 export type VerificationArtifactPathPolicy =
@@ -2735,8 +3028,34 @@ export interface HeartbeatResult {
   reviewReason?: CompanyReviewReason;
   evidenceRefs?: CompanyEvidenceRef[];
   companyPriority?: CompanyPriority;
+  decisionMode?: HeartbeatDecisionMode;
+  signalFamily?: HeartbeatSignalFamily;
+  confidence?: number;
+  interruptionRisk?: number;
+  workspaceScope?: HeartbeatWorkspaceScope;
   error?: string;
 }
+
+export type HeartbeatDecisionMode =
+  | "silent"
+  | "inbox_suggestion"
+  | "task_creation"
+  | "nudge";
+
+export type HeartbeatSignalFamily =
+  | "urgent_interrupt"
+  | "focus_state"
+  | "open_loop_pressure"
+  | "correction_learning"
+  | "memory_drift"
+  | "cross_workspace_patterns"
+  | "suggestion_aging"
+  | "awareness_signal"
+  | "maintenance"
+  | "mentions"
+  | "assigned_tasks";
+
+export type HeartbeatWorkspaceScope = "single" | "all";
 
 /**
  * Heartbeat configuration for an agent
@@ -3131,6 +3450,22 @@ export interface ProactiveSuggestion {
   sourceTaskId?: string;
   sourceEntity?: string;
   confidence: number;
+  suggestionClass?:
+    | "focus_support"
+    | "open_loop"
+    | "correction"
+    | "memory"
+    | "cross_workspace"
+    | "aging"
+    | "urgent"
+    | "general";
+  urgency?: "low" | "medium" | "high";
+  learningSignalIds?: string[];
+  workspaceScope?: HeartbeatWorkspaceScope;
+  workspaceId?: string;
+  sourceSignals?: string[];
+  recommendedDelivery?: "briefing" | "inbox" | "nudge";
+  companionStyle?: "email" | "note";
   createdAt: number;
   expiresAt: number;
   dismissed: boolean;
@@ -3493,6 +3828,21 @@ export const IPC_CHANNELS = {
   SHAREPOINT_TEST_CONNECTION: "sharepoint:testConnection",
   SHAREPOINT_GET_STATUS: "sharepoint:getStatus",
 
+  // Health Platform
+  HEALTH_GET_DASHBOARD: "health:getDashboard",
+  HEALTH_LIST_SOURCES: "health:listSources",
+  HEALTH_UPSERT_SOURCE: "health:upsertSource",
+  HEALTH_REMOVE_SOURCE: "health:removeSource",
+  HEALTH_SYNC_SOURCE: "health:syncSource",
+  HEALTH_IMPORT_FILES: "health:importFiles",
+  HEALTH_GENERATE_WORKFLOW: "health:generateWorkflow",
+  HEALTH_APPLE_STATUS: "health:appleStatus",
+  HEALTH_APPLE_CONNECT: "health:appleConnect",
+  HEALTH_APPLE_DISCONNECT: "health:appleDisconnect",
+  HEALTH_APPLE_RESET: "health:appleReset",
+  HEALTH_APPLE_PREVIEW_WRITEBACK: "health:applePreviewWriteback",
+  HEALTH_APPLE_APPLY_WRITEBACK: "health:appleApplyWriteback",
+
   // App Updates
   APP_CHECK_UPDATES: "app:checkUpdates",
   APP_DOWNLOAD_UPDATE: "app:downloadUpdate",
@@ -3524,6 +3874,12 @@ export const IPC_CHANNELS = {
   PERSONALITY_SET_PERSONA: "personality:setPersona",
   PERSONALITY_RESET: "personality:reset",
   PERSONALITY_SETTINGS_CHANGED: "personality:settingsChanged", // Event sent to UI when settings change
+  PERSONALITY_EXPORT: "personality:export",
+  PERSONALITY_IMPORT: "personality:import",
+  PERSONALITY_PREVIEW: "personality:preview",
+  PERSONALITY_GET_TRAIT_PRESETS: "personality:getTraitPresets",
+  PERSONALITY_GET_CONFIG_V2: "personality:getConfigV2",
+  PERSONALITY_SAVE_CONFIG_V2: "personality:saveConfigV2",
 
   // Task Queue
   QUEUE_GET_STATUS: "queue:getStatus",
@@ -3745,6 +4101,21 @@ export const IPC_CHANNELS = {
   MEMORY_RELATIONSHIP_CLEANUP_RECURRING: "memory:relationshipCleanupRecurring",
   MEMORY_COMMITMENTS_GET: "memory:commitmentsGet",
   MEMORY_COMMITMENTS_DUE_SOON: "memory:commitmentsDueSoon",
+  AWARENESS_GET_CONFIG: "awareness:getConfig",
+  AWARENESS_SAVE_CONFIG: "awareness:saveConfig",
+  AWARENESS_LIST_BELIEFS: "awareness:listBeliefs",
+  AWARENESS_UPDATE_BELIEF: "awareness:updateBelief",
+  AWARENESS_DELETE_BELIEF: "awareness:deleteBelief",
+  AWARENESS_GET_SUMMARY: "awareness:getSummary",
+  AWARENESS_GET_SNAPSHOT: "awareness:getSnapshot",
+  AWARENESS_LIST_EVENTS: "awareness:listEvents",
+  AUTONOMY_GET_CONFIG: "autonomy:getConfig",
+  AUTONOMY_SAVE_CONFIG: "autonomy:saveConfig",
+  AUTONOMY_GET_STATE: "autonomy:getState",
+  AUTONOMY_LIST_DECISIONS: "autonomy:listDecisions",
+  AUTONOMY_LIST_ACTIONS: "autonomy:listActions",
+  AUTONOMY_UPDATE_DECISION: "autonomy:updateDecision",
+  AUTONOMY_TRIGGER_EVALUATION: "autonomy:triggerEvaluation",
 
   // Memory Features (Global Toggles)
   MEMORY_FEATURES_GET_SETTINGS: "memoryFeatures:getSettings",
@@ -3848,6 +4219,13 @@ export const IPC_CHANNELS = {
   WEBACCESS_GET_SETTINGS: "webaccess:getSettings",
   WEBACCESS_SAVE_SETTINGS: "webaccess:saveSettings",
   WEBACCESS_GET_STATUS: "webaccess:getStatus",
+
+  // Playwright QA (Automated Visual Testing)
+  QA_GET_RUNS: "qa:getRuns",
+  QA_GET_RUN: "qa:getRun",
+  QA_START_RUN: "qa:startRun",
+  QA_STOP_RUN: "qa:stopRun",
+  QA_EVENT: "qa:event",
 } as const;
 
 // LLM Provider types
@@ -3942,6 +4320,8 @@ export interface ProviderRoutingSettings {
   preferStrongForVerification?: boolean;
 }
 
+export type AzureReasoningEffort = "low" | "medium" | "high" | "extra_high";
+
 export interface LLMSettingsData {
   providerType: LLMProviderType;
   modelKey: string;
@@ -3986,6 +4366,7 @@ export interface LLMSettingsData {
     deployment?: string;
     deployments?: string[];
     apiVersion?: string;
+    reasoningEffort?: AzureReasoningEffort;
   } & ProviderRoutingSettings;
   groq?: {
     apiKey?: string;
@@ -4999,6 +5380,7 @@ export type NotificationType =
   | "task_failed"
   | "scheduled_task"
   | "input_required"
+  | "companion_suggestion"
   | "info"
   | "warning"
   | "error";
@@ -5016,6 +5398,9 @@ export interface AppNotification {
   cronJobId?: string;
   // Optional: workspace context
   workspaceId?: string;
+  suggestionId?: string;
+  recommendedDelivery?: "briefing" | "inbox" | "nudge";
+  companionStyle?: "email" | "note";
 }
 
 export interface NotificationStoreFile {
@@ -6376,6 +6761,366 @@ export const ANALOGY_DOMAINS: Record<
     description: "Building, architecture, tools",
     examples: '"You need a solid foundation first"',
   },
+};
+
+// ============ Personality Config V2 Types ============
+
+/**
+ * Context modes for context-dependent personality behavior
+ */
+export type ContextMode = "coding" | "chat" | "planning" | "writing" | "research" | "all";
+
+/**
+ * Composable personality trait with intensity slider.
+ * Users mix multiple traits instead of picking a single preset.
+ */
+export interface PersonalityTrait {
+  /** Trait identifier, e.g. "warmth", "directness" */
+  id: string;
+  /** Display label */
+  label: string;
+  /** Intensity 0-100 */
+  intensity: number;
+  /** Short description of what this trait controls */
+  description: string;
+}
+
+/**
+ * Behavioral rule — explicit "do this" / "never do that" instructions.
+ */
+export interface BehavioralRule {
+  id: string;
+  type: "always" | "never" | "prefer" | "avoid";
+  rule: string;
+  enabled: boolean;
+  /** Optional: only apply in these context modes */
+  context?: ContextMode[];
+}
+
+/**
+ * Context-specific personality overrides applied when agent detects activity mode
+ */
+export interface ContextOverride {
+  mode: ContextMode;
+  traitOverrides?: Record<string, number>;
+  additionalRules?: BehavioralRule[];
+  styleOverrides?: Partial<CommunicationStyle>;
+}
+
+/**
+ * Extended communication style preferences
+ */
+export interface CommunicationStyle {
+  /** How much emoji to use */
+  emojiUsage: EmojiUsage;
+  /** Preferred response length */
+  responseLength: ResponseLength;
+  /** Code comment verbosity */
+  codeCommentStyle: CodeCommentStyle;
+  /** How much to explain concepts */
+  explanationDepth: ExplanationDepth;
+  /** Level of formality in language */
+  formality: "casual" | "balanced" | "formal";
+  /** How to structure responses */
+  structurePreference: "freeform" | "bullets" | "structured" | "headers";
+  /** How proactive to be about suggestions */
+  proactivity: "reactive" | "balanced" | "proactive";
+  /** How to communicate errors/problems */
+  errorHandling: "gentle" | "direct" | "detailed";
+}
+
+/**
+ * Knowledge/expertise area the user wants the agent to be strong in
+ */
+export interface ExpertiseArea {
+  id: string;
+  /** Domain name, e.g. "TypeScript", "React", "Marketing" */
+  domain: string;
+  /** Proficiency level */
+  level: "familiar" | "proficient" | "expert";
+  /** User-provided context, e.g. "We use React 18 with Next.js" */
+  notes?: string;
+}
+
+/**
+ * Few-shot conversation example for personality shaping
+ */
+export interface ConversationExample {
+  id: string;
+  userMessage: string;
+  idealResponse: string;
+  /** Optional context label */
+  context?: string;
+}
+
+/**
+ * Custom instructions — OpenAI-style two-field approach
+ */
+export interface CustomInstructions {
+  /** "What should the assistant know about you?" */
+  aboutUser: string;
+  /** "How should the assistant respond?" */
+  responseGuidance: string;
+}
+
+/**
+ * Extended personality quirks (V2)
+ */
+export interface PersonalityQuirksV2 extends PersonalityQuirks {
+  /** Greeting style preference */
+  greetingStyle?: "none" | "brief" | "warm" | "humorous";
+  /** Whether to narrate thinking process ("Let me think about this...") */
+  thinkingNarration?: boolean;
+}
+
+/**
+ * The unified V2 personality configuration
+ */
+export interface PersonalityConfigV2 {
+  version: 2;
+  /** What the assistant calls itself */
+  agentName: string;
+  /** Composable personality traits with intensity sliders */
+  traits: PersonalityTrait[];
+  /** Behavioral rules (always/never/prefer/avoid) */
+  rules: BehavioralRule[];
+  /** Extended communication style */
+  style: CommunicationStyle;
+  /** Knowledge/expertise areas */
+  expertise: ExpertiseArea[];
+  /** Few-shot conversation examples */
+  examples: ConversationExample[];
+  /** Custom instructions (about user + response guidance) */
+  customInstructions: CustomInstructions;
+  /** Context-specific overrides */
+  contextOverrides: ContextOverride[];
+  /** Legacy persona overlay */
+  activePersona?: PersonaId;
+  /** Extended quirks */
+  quirks: PersonalityQuirksV2;
+  /** Relationship and history data */
+  relationship?: RelationshipData;
+  /** Work style preference */
+  workStyle?: "planner" | "flexible";
+  /** Raw SOUL.md override for power users — when set, used INSTEAD of structured fields */
+  soulDocument?: string;
+  /** Metadata for import/export */
+  metadata?: {
+    name: string;
+    description?: string;
+    author?: string;
+    createdAt: number;
+    exportedAt?: number;
+  };
+  /** Legacy: original v1 activePersonality for backward compat */
+  activePersonality?: PersonalityId;
+  /** Legacy: custom prompt text */
+  customPrompt?: string;
+  /** Legacy: custom personality name */
+  customName?: string;
+}
+
+/**
+ * Trait definition for the 8 composable personality dimensions
+ */
+export interface TraitDefinition {
+  id: string;
+  label: string;
+  description: string;
+  lowLabel: string;
+  highLabel: string;
+  defaultIntensity: number;
+}
+
+/**
+ * The 8 composable personality trait definitions
+ */
+export const TRAIT_DEFINITIONS: TraitDefinition[] = [
+  {
+    id: "warmth",
+    label: "Warmth",
+    description: "How warm and encouraging vs cold and matter-of-fact",
+    lowLabel: "Matter-of-fact",
+    highLabel: "Encouraging & supportive",
+    defaultIntensity: 50,
+  },
+  {
+    id: "directness",
+    label: "Directness",
+    description: "How direct and blunt vs diplomatic and hedging",
+    lowLabel: "Diplomatic",
+    highLabel: "Straight to the point",
+    defaultIntensity: 50,
+  },
+  {
+    id: "formality",
+    label: "Formality",
+    description: "How formal and professional vs casual and conversational",
+    lowLabel: "Casual",
+    highLabel: "Professional",
+    defaultIntensity: 50,
+  },
+  {
+    id: "humor",
+    label: "Humor",
+    description: "How serious and no-nonsense vs playful and witty",
+    lowLabel: "Serious",
+    highLabel: "Playful & witty",
+    defaultIntensity: 20,
+  },
+  {
+    id: "curiosity",
+    label: "Curiosity",
+    description: "How task-focused vs exploratory and tangent-suggesting",
+    lowLabel: "Task-focused",
+    highLabel: "Exploratory",
+    defaultIntensity: 40,
+  },
+  {
+    id: "verbosity",
+    label: "Verbosity",
+    description: "How terse and code-only vs elaborate and thorough",
+    lowLabel: "Terse",
+    highLabel: "Elaborate & thorough",
+    defaultIntensity: 50,
+  },
+  {
+    id: "empathy",
+    label: "Empathy",
+    description: "How neutral and objective vs emotionally attuned",
+    lowLabel: "Neutral",
+    highLabel: "Emotionally attuned",
+    defaultIntensity: 40,
+  },
+  {
+    id: "confidence",
+    label: "Confidence",
+    description: "How hedging and option-presenting vs assertive and opinionated",
+    lowLabel: "Presents options",
+    highLabel: "Assertive & opinionated",
+    defaultIntensity: 50,
+  },
+];
+
+/**
+ * Preset trait combinations that map to old personality IDs
+ */
+export const TRAIT_PRESETS: Record<string, { name: string; description: string; icon: string; traits: Record<string, number> }> = {
+  professional: {
+    name: "Professional",
+    description: "Formal, precise, and business-oriented",
+    icon: "briefcase",
+    traits: { warmth: 35, directness: 70, formality: 85, humor: 10, curiosity: 40, verbosity: 55, empathy: 40, confidence: 75 },
+  },
+  friendly: {
+    name: "Friendly",
+    description: "Warm, approachable, and conversational",
+    icon: "smile",
+    traits: { warmth: 85, directness: 45, formality: 30, humor: 50, curiosity: 60, verbosity: 60, empathy: 80, confidence: 55 },
+  },
+  concise: {
+    name: "Concise",
+    description: "Direct, efficient, and to-the-point",
+    icon: "zap",
+    traits: { warmth: 25, directness: 90, formality: 50, humor: 10, curiosity: 20, verbosity: 10, empathy: 20, confidence: 80 },
+  },
+  creative: {
+    name: "Creative",
+    description: "Imaginative, expressive, and innovative",
+    icon: "palette",
+    traits: { warmth: 60, directness: 50, formality: 25, humor: 65, curiosity: 85, verbosity: 70, empathy: 55, confidence: 60 },
+  },
+  technical: {
+    name: "Technical",
+    description: "Detailed, precise, and technically comprehensive",
+    icon: "wrench",
+    traits: { warmth: 30, directness: 75, formality: 60, humor: 10, curiosity: 50, verbosity: 75, empathy: 25, confidence: 85 },
+  },
+  casual: {
+    name: "Casual",
+    description: "Relaxed, informal, and laid-back",
+    icon: "coffee",
+    traits: { warmth: 65, directness: 55, formality: 15, humor: 55, curiosity: 50, verbosity: 45, empathy: 55, confidence: 50 },
+  },
+};
+
+/**
+ * Default communication style (V2)
+ */
+export const DEFAULT_COMMUNICATION_STYLE: CommunicationStyle = {
+  emojiUsage: "minimal",
+  responseLength: "balanced",
+  codeCommentStyle: "moderate",
+  explanationDepth: "balanced",
+  formality: "balanced",
+  structurePreference: "bullets",
+  proactivity: "balanced",
+  errorHandling: "direct",
+};
+
+/**
+ * Default quirks (V2)
+ */
+export const DEFAULT_QUIRKS_V2: PersonalityQuirksV2 = {
+  catchphrase: "",
+  signOff: "",
+  analogyDomain: "none",
+  greetingStyle: "brief",
+  thinkingNarration: false,
+};
+
+/**
+ * Default custom instructions
+ */
+export const DEFAULT_CUSTOM_INSTRUCTIONS: CustomInstructions = {
+  aboutUser: "",
+  responseGuidance: "",
+};
+
+/**
+ * Create default traits from TRAIT_DEFINITIONS
+ */
+export function createDefaultTraits(): PersonalityTrait[] {
+  return TRAIT_DEFINITIONS.map((def) => ({
+    id: def.id,
+    label: def.label,
+    intensity: def.defaultIntensity,
+    description: def.description,
+  }));
+}
+
+/**
+ * Create traits from a preset
+ */
+export function createTraitsFromPreset(presetId: string): PersonalityTrait[] {
+  const preset = TRAIT_PRESETS[presetId];
+  if (!preset) return createDefaultTraits();
+  return TRAIT_DEFINITIONS.map((def) => ({
+    id: def.id,
+    label: def.label,
+    intensity: preset.traits[def.id] ?? def.defaultIntensity,
+    description: def.description,
+  }));
+}
+
+/**
+ * Default V2 personality configuration
+ */
+export const DEFAULT_PERSONALITY_CONFIG_V2: PersonalityConfigV2 = {
+  version: 2,
+  agentName: "CoWork",
+  traits: createDefaultTraits(),
+  rules: [],
+  style: DEFAULT_COMMUNICATION_STYLE,
+  expertise: [],
+  examples: [],
+  customInstructions: DEFAULT_CUSTOM_INSTRUCTIONS,
+  contextOverrides: [],
+  activePersona: "companion",
+  quirks: DEFAULT_QUIRKS_V2,
+  relationship: DEFAULT_RELATIONSHIP,
+  workStyle: undefined,
+  soulDocument: undefined,
 };
 
 // ============ Voice Mode Types ============

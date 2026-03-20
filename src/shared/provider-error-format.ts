@@ -1,22 +1,5 @@
 import type { Task } from "./types";
-
-/**
- * Returns true for tasks created automatically (cron, improvement, heartbeat, etc.)
- * Used to tailor error messages — automated tasks get shorter copy.
- */
-function isAutomatedTask(task: Task | null | undefined): boolean {
-  if (!task) return false;
-  if (task.source === "manual") return false;
-  if (task.source === "cron" || task.source === "improvement") return true;
-  if (task.source === "hook") return false;
-  if (/^heartbeat:/i.test(String(task.title || "").trim())) return true;
-  if (task.source === "api") {
-    return Boolean(
-      task.companyId || task.goalId || task.projectId || task.issueId || task.heartbeatRunId,
-    );
-  }
-  return !!task.heartbeatRunId;
-}
+import { isAutomatedTaskLike } from "./automated-task-detection";
 
 /**
  * Format LLM provider errors for user display.
@@ -29,7 +12,7 @@ export function formatProviderErrorForDisplay(
   const msg = String(errorMessage || "").trim();
   if (!msg) return "Provider error";
   if (/429|rate limit|too many requests|free-models-per-min/i.test(msg)) {
-    const automated = isAutomatedTask(options?.task);
+    const automated = isAutomatedTaskLike(options?.task);
     if (automated) {
       return "Rate limit exceeded. Will retry automatically.";
     }

@@ -60,6 +60,28 @@ describe("TaskExecutor workspace preflight acknowledgement", () => {
     expect(tryAutoSwitch).not.toHaveBeenCalled();
   });
 
+  it("pauses when workspace read failed (permission denied, etc.)", () => {
+    const pauseForUserInput = vi.fn();
+    const fakeThis: Any = {
+      ...buildBase(),
+      workspace: { isTemp: false, id: "ws-read-failed" },
+      getWorkspaceSignals: vi.fn(() => ({
+        hasEntries: false,
+        hasProjectMarkers: false,
+        hasCodeFiles: false,
+        hasAppDirs: false,
+        readFailed: true,
+      })),
+      pauseForUserInput,
+    };
+
+    const shouldPause = (TaskExecutor as Any).prototype.preflightWorkspaceCheck.call(fakeThis);
+    expect(shouldPause).toBe(true);
+    expect(pauseForUserInput).toHaveBeenCalledTimes(1);
+    expect(pauseForUserInput.mock.calls[0][1]).toBe("workspace_read_failed");
+    expect(pauseForUserInput.mock.calls[0][0]).toContain("couldn't read");
+  });
+
   it("does not re-pause once the user acknowledged the preflight warning", () => {
     const pauseForUserInput = vi.fn();
     const fakeThis: Any = {

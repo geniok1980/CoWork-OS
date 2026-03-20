@@ -4,7 +4,6 @@ import {
   Sun,
   User,
   Users,
-  PanelTop,
   Mic,
   Layers,
   Search,
@@ -28,7 +27,6 @@ import {
   Puzzle,
   BarChart3,
   Lightbulb,
-  ShieldCheck,
   RefreshCw,
   MessageSquare,
   Smile,
@@ -49,6 +47,7 @@ import {
   ChevronDown,
   Plus,
   Building2,
+  HeartPulse,
 } from "lucide-react";
 import {
   LLMSettingsData,
@@ -58,6 +57,7 @@ import {
   UiDensity,
   type LLMProviderType,
   type CustomProviderConfig,
+  type AzureReasoningEffort,
 } from "../../shared/types";
 import { CUSTOM_PROVIDER_MAP } from "../../shared/llm-provider-catalog";
 import { TelegramSettings } from "./TelegramSettings";
@@ -93,7 +93,7 @@ import { PersonalitySettings } from "./PersonalitySettings";
 import { NodesSettings } from "./NodesSettings";
 import { ExtensionsSettings } from "./ExtensionsSettings";
 import { VoiceSettings } from "./VoiceSettings";
-import { MissionControlPanel } from "./MissionControlPanel";
+import { MissionControlPanel } from "./mission-control";
 import { MemoryHubSettings } from "./MemoryHubSettings";
 import { WorktreeSettings } from "./WorktreeSettings";
 import { UsageInsightsPanel } from "./UsageInsightsPanel";
@@ -107,14 +107,19 @@ import { InfraSettings } from "./InfraSettings";
 import { DigitalTwinsPanel } from "./DigitalTwinsPanel";
 import { ImprovementSettingsPanel } from "./ImprovementSettingsPanel";
 import { CompaniesPanel } from "./CompaniesPanel";
+import { HealthPanel } from "./HealthPanel";
 
 type SettingsTab =
   | "appearance"
   | "personality"
   | "missioncontrol"
   | "companies"
+  | "system"
   | "tray"
+  | "guardrails"
+  | "policies"
   | "voice"
+  | "aimodels"
   | "llm"
   | "search"
   | "telegram"
@@ -125,7 +130,7 @@ type SettingsTab =
   | "morechannels"
   | "integrations"
   | "updates"
-  | "guardrails"
+  | "automations"
   | "queue"
   | "skills"
   | "skillhub"
@@ -144,14 +149,17 @@ type SettingsTab =
   | "suggestions"
   | "customize"
   | "digitaltwins"
-  | "policies"
   | "triggers"
   | "briefing"
   | "improvement"
+  | "health"
+  | "access"
   | "webaccess";
 
 // Secondary channels shown inside "More Channels" tab
 type SecondaryChannel =
+  | "teams"
+  | "x"
   | "discord"
   | "imessage"
   | "signal"
@@ -204,6 +212,21 @@ interface ProviderRoutingConfig {
   cheapModelKey?: string;
   preferStrongForVerification?: boolean;
 }
+
+const AZURE_REASONING_EFFORT_OPTIONS: Array<{
+  value: AzureReasoningEffort;
+  label: string;
+  description: string;
+}> = [
+  { value: "low", label: "Low", description: "Faster responses with less reasoning." },
+  { value: "medium", label: "Medium", description: "Balanced quality and latency." },
+  { value: "high", label: "High", description: "More thorough reasoning." },
+  {
+    value: "extra_high",
+    label: "Extra High",
+    description: "Maximum effort. Azure maps this to High on the request.",
+  },
+];
 
 // Helper to format bytes to human-readable size
 function formatBytes(bytes: number): string {
@@ -417,65 +440,80 @@ const sidebarItems: Array<{
   macOnly?: boolean;
   group: string;
 }> = [
-  { tab: "customize", label: "Customize", group: "Customize", icon: <Sparkles {...I} /> },
   { tab: "appearance", label: "Appearance", group: "General", icon: <Sun {...I} /> },
   { tab: "personality", label: "Personality", group: "General", icon: <User {...I} /> },
   { tab: "missioncontrol", label: "Mission Control", group: "General", icon: <Users {...I} /> },
   { tab: "companies", label: "Companies", group: "General", icon: <Building2 {...I} /> },
-  { tab: "digitaltwins", label: "Digital Twins", group: "General", icon: <User {...I} /> },
   {
-    tab: "tray",
-    label: "Tray",
+    tab: "system",
+    label: "System & Security",
     group: "General",
-    icon: <PanelTop {...I} />,
+    icon: <Shield {...I} />,
   },
   { tab: "voice", label: "Voice Mode", group: "General", icon: <Mic {...I} /> },
-  { tab: "llm", label: "AI Model", group: "AI & Models", icon: <Layers {...I} /> },
-  { tab: "search", label: "Web Search", group: "AI & Models", icon: <Search {...I} /> },
+  { tab: "digitaltwins", label: "Digital Twins", group: "General", icon: <User {...I} /> },
+  {
+    tab: "aimodels",
+    label: "AI & Models",
+    group: "AI & Models",
+    icon: <Layers {...I} />,
+  },
   { tab: "whatsapp", label: "WhatsApp", group: "Communication", icon: <MessageCircle {...I} /> },
   { tab: "telegram", label: "Telegram", group: "Communication", icon: <Send {...I} /> },
   { tab: "slack", label: "Slack", group: "Communication", icon: <Hash {...I} /> },
-  { tab: "teams", label: "Teams", group: "Communication", icon: <UsersRound {...I} /> },
-  { tab: "x", label: "X (Twitter)", group: "Communication", icon: <AtSign {...I} /> },
   {
     tab: "morechannels",
     label: "More Channels",
     group: "Communication",
     icon: <MoreHorizontal {...I} />,
   },
-  { tab: "guardrails", label: "Safety Limits", group: "AI & Models", icon: <Shield {...I} /> },
   { tab: "memory", label: "Memory", group: "AI & Models", icon: <Brain {...I} /> },
-  { tab: "queue", label: "Task Queue", group: "Automations", icon: <ListOrdered {...I} /> },
-  { tab: "improvement", label: "Self-Improve", group: "Automations", icon: <Sparkles {...I} /> },
-  { tab: "git", label: "Git", group: "Integrations", icon: <GitBranch {...I} /> },
-  { tab: "connectors", label: "Integrations", group: "Integrations", icon: <LayoutGrid {...I} /> },
-  { tab: "infrastructure", label: "Infrastructure", group: "Integrations", icon: <Zap {...I} /> },
-  { tab: "skills", label: "Custom Skills", group: "Skills & Tools", icon: <Wrench {...I} /> },
-  { tab: "skillhub", label: "Skill Store", group: "Skills & Tools", icon: <Store {...I} /> },
-  { tab: "scheduled", label: "Scheduled Tasks", group: "Automations", icon: <Clock {...I} /> },
-  { tab: "mcp", label: "Connected Tools", group: "Skills & Tools", icon: <Monitor {...I} /> },
+  {
+    tab: "automations",
+    label: "Automations",
+    group: "Automations",
+    icon: <Zap {...I} />,
+  },
+  {
+    tab: "integrations",
+    label: "Integrations",
+    group: "Integrations",
+    icon: <LayoutGrid {...I} />,
+  },
+  { tab: "health", label: "Health", group: "Integrations", icon: <HeartPulse {...I} /> },
+  { tab: "customize", label: "Plugin Packs", group: "Skills & Tools", icon: <Sparkles {...I} /> },
+  {
+    tab: "skills",
+    label: "Skills",
+    group: "Skills & Tools",
+    icon: <Wrench {...I} />,
+  },
+  { tab: "mcp", label: "MCP Servers", group: "Skills & Tools", icon: <Monitor {...I} /> },
   {
     tab: "tools",
     label: "Built-in Tools",
     group: "Skills & Tools",
     icon: <MessageSquare {...I} />,
   },
-  { tab: "hooks", label: "Webhooks", group: "Automations", icon: <Link {...I} /> },
-  { tab: "triggers", label: "Event Triggers", group: "Automations", icon: <Zap {...I} /> },
   { tab: "briefing", label: "Daily Briefing", group: "Automations", icon: <Sun {...I} /> },
-  { tab: "controlplane", label: "Remote Access", group: "Advanced", icon: <Monitor {...I} /> },
-  { tab: "webaccess", label: "Web Access", group: "Advanced", icon: <Monitor {...I} /> },
+  {
+    tab: "access",
+    label: "Access",
+    group: "Advanced",
+    icon: <Monitor {...I} />,
+  },
   { tab: "nodes", label: "Mobile Companions", group: "Advanced", icon: <Smartphone {...I} /> },
   { tab: "extensions", label: "Extensions", group: "Advanced", icon: <Puzzle {...I} /> },
   { tab: "insights", label: "Usage Insights", group: "Advanced", icon: <BarChart3 {...I} /> },
   { tab: "suggestions", label: "Suggestions", group: "Advanced", icon: <Lightbulb {...I} /> },
-  { tab: "policies", label: "Admin Policies", group: "Advanced", icon: <ShieldCheck {...I} /> },
   { tab: "updates", label: "Updates", group: "Advanced", icon: <RefreshCw {...I} /> },
 ];
 
 // Secondary channel configuration for "More Channels" tab
 const S = { size: 16, strokeWidth: 1.5 } as const;
 const secondaryChannelItems: Array<{ key: SecondaryChannel; label: string; icon: ReactNode }> = [
+  { key: "teams", label: "Teams", icon: <UsersRound {...S} /> },
+  { key: "x", label: "X (Twitter)", icon: <AtSign {...S} /> },
   { key: "discord", label: "Discord", icon: <MessageSquare {...S} /> },
   { key: "imessage", label: "iMessage", icon: <MessageCircle {...S} /> },
   { key: "signal", label: "Signal", icon: <ShieldCheckIcon {...S} /> },
@@ -539,10 +577,49 @@ export function Settings({
   onCreateTask,
   onOpenTask,
 }: SettingsProps) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+  const normalizedInitialTab: SettingsTab =
+    initialTab === "tray" || initialTab === "guardrails" || initialTab === "policies"
+      ? "system"
+      : initialTab === "skillhub"
+        ? "skills"
+        : initialTab === "llm" || initialTab === "search"
+          ? "aimodels"
+          : ["queue", "improvement", "scheduled", "hooks", "triggers"].includes(
+              initialTab as string,
+            )
+              ? "automations"
+              : ["git", "connectors", "infrastructure"].includes(initialTab as string)
+                ? "integrations"
+                : initialTab === "controlplane" || initialTab === "webaccess"
+                  ? "access"
+                  : (initialTab ?? "appearance");
+  const [activeTab, setActiveTab] = useState<SettingsTab>(normalizedInitialTab);
   const [missionControlCompanyId, setMissionControlCompanyId] = useState<string | null>(null);
   const [digitalTwinsCompanyId, setDigitalTwinsCompanyId] = useState<string | null>(null);
-  const [activeSecondaryChannel, setActiveSecondaryChannel] = useState<SecondaryChannel>("discord");
+  const [activeSecondaryChannel, setActiveSecondaryChannel] = useState<SecondaryChannel>("teams");
+  const [activeSkillsSubTab, setActiveSkillsSubTab] = useState<"custom" | "store">(
+    initialTab === "skillhub" ? "store" : "custom",
+  );
+  const [activeAIModelsSubTab, setActiveAIModelsSubTab] = useState<"llm" | "search">(
+    initialTab === "search" ? "search" : "llm",
+  );
+  const [activeAutomationsSubTab, setActiveAutomationsSubTab] = useState<
+    "queue" | "improvement" | "scheduled" | "hooks" | "triggers"
+  >(
+    ["queue", "improvement", "scheduled", "hooks", "triggers"].includes(initialTab as string)
+      ? (initialTab as "queue" | "improvement" | "scheduled" | "hooks" | "triggers")
+      : "queue",
+  );
+  const [activeIntegrationsSubTab, setActiveIntegrationsSubTab] = useState<
+    "git" | "connectors" | "infrastructure"
+  >(
+    ["git", "connectors", "infrastructure"].includes(initialTab as string)
+      ? (initialTab as "git" | "connectors" | "infrastructure")
+      : "connectors",
+  );
+  const [activeAccessSubTab, setActiveAccessSubTab] = useState<"controlplane" | "webaccess">(
+    initialTab === "webaccess" ? "webaccess" : "controlplane",
+  );
   const [sidebarSearch, setSidebarSearch] = useState("");
   const [settings, setSettings] = useState<LLMSettingsData>({
     providerType: "anthropic",
@@ -567,13 +644,7 @@ export function Settings({
       return "linux";
     })();
   const isMacPlatform = platform === "darwin";
-  const supportsTraySettings = platform === "darwin" || platform === "win32";
-  const getSidebarItemLabel = (item: (typeof sidebarItems)[number]): string => {
-    if (item.tab === "tray") {
-      return platform === "win32" ? "System Tray" : platform === "darwin" ? "Menu Bar" : "Tray";
-    }
-    return item.label;
-  };
+  const getSidebarItemLabel = (item: (typeof sidebarItems)[number]): string => item.label;
 
   // Form state for credentials (not persisted directly)
   const [anthropicApiKey, setAnthropicApiKey] = useState("");
@@ -624,6 +695,8 @@ export function Settings({
   const [azureDeployment, setAzureDeployment] = useState("");
   const [azureDeploymentsText, setAzureDeploymentsText] = useState("");
   const [azureApiVersion, setAzureApiVersion] = useState("2024-02-15-preview");
+  const [azureReasoningEffort, setAzureReasoningEffort] =
+    useState<AzureReasoningEffort>("medium");
 
   // Groq state
   const [groqApiKey, setGroqApiKey] = useState("");
@@ -733,11 +806,6 @@ export function Settings({
     return () => clearInterval(interval);
   }, [settings.providerType]);
 
-  useEffect(() => {
-    if (!supportsTraySettings && activeTab === "tray") {
-      setActiveTab("appearance");
-    }
-  }, [activeTab, supportsTraySettings]);
 
   const resolveCustomProviderId = (providerType: LLMProviderType) =>
     providerType === "kimi-coding" ? "kimi-code" : providerType;
@@ -1152,6 +1220,7 @@ export function Settings({
       if (loadedSettings.azure?.apiVersion) {
         setAzureApiVersion(loadedSettings.azure.apiVersion);
       }
+      setAzureReasoningEffort(loadedSettings.azure?.reasoningEffort || "medium");
 
       // Set Groq form state
       if (loadedSettings.groq?.apiKey) {
@@ -1788,6 +1857,7 @@ export function Settings({
         setAzureDeployment("");
         setAzureDeploymentsText("");
         setAzureApiVersion("2024-02-15-preview");
+        setAzureReasoningEffort("medium");
         break;
       case "groq":
         setGroqApiKey("");
@@ -1949,6 +2019,7 @@ export function Settings({
           deployment: azureSettings.deployment,
           deployments: azureSettings.deployments,
           apiVersion: azureApiVersion || undefined,
+          reasoningEffort: azureReasoningEffort,
           ...routingFor("azure"),
         },
         // Always include Groq settings
@@ -2071,6 +2142,7 @@ export function Settings({
                 deployment: azureSettings.deployment,
                 deployments: azureSettings.deployments,
                 apiVersion: azureApiVersion || undefined,
+                reasoningEffort: azureReasoningEffort,
               }
             : undefined,
         groq:
@@ -2145,262 +2217,8 @@ export function Settings({
     !!cheapRoutingModel &&
     strongRoutingModel === cheapRoutingModel;
 
-  return (
-    <div className="settings-page">
-      <div className="settings-page-layout">
-        <div className="settings-sidebar">
-          <h1 className="settings-sidebar-title">Settings</h1>
-          <button className="settings-back-btn" onClick={onBack}>
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <path d="M19 12H5M12 19l-7-7 7-7" />
-            </svg>
-            Back
-          </button>
-          <div className="settings-sidebar-search">
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="M21 21l-4.35-4.35" />
-            </svg>
-            <input
-              type="text"
-              placeholder="Search settings..."
-              value={sidebarSearch}
-              onChange={(e) => setSidebarSearch(e.target.value)}
-            />
-            {sidebarSearch && (
-              <button
-                className="settings-sidebar-search-clear"
-                onClick={() => setSidebarSearch("")}
-                aria-label="Clear search"
-              >
-                <svg
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
-            )}
-          </div>
-          <div className="settings-nav-items">
-            {
-              sidebarItems
-                .filter((item) => {
-                  if (item.tab === "tray" && !supportsTraySettings) {
-                    return false;
-                  }
-                  // Filter by macOnly if applicable
-                  if (item.macOnly && !isMacPlatform) {
-                    return false;
-                  }
-                  // Filter by search query
-                  if (sidebarSearch) {
-                    return getSidebarItemLabel(item)
-                      .toLowerCase()
-                      .includes(sidebarSearch.toLowerCase());
-                  }
-                  return true;
-                })
-                .reduce<{ seenGroups: Set<string>; elements: ReactNode[] }>(
-                  (acc, item) => {
-                    if (!sidebarSearch && !acc.seenGroups.has(item.group)) {
-                      acc.elements.push(
-                        <div key={`group-${item.group}`} className="settings-nav-group-header">
-                          {item.group}
-                        </div>,
-                      );
-                      acc.seenGroups.add(item.group);
-                    }
-                    acc.elements.push(
-                      <button
-                        key={item.tab}
-                        className={`settings-nav-item ${activeTab === item.tab ? "active" : ""}`}
-                        data-tab={item.tab}
-                        onClick={() => setActiveTab(item.tab)}
-                      >
-                        {item.icon}
-                        {getSidebarItemLabel(item)}
-                      </button>,
-                    );
-                    return acc;
-                  },
-                  { seenGroups: new Set<string>(), elements: [] },
-                ).elements
-            }
-            {sidebarSearch &&
-              sidebarItems.filter((item) => {
-                if (item.tab === "tray" && !supportsTraySettings) return false;
-                if (item.macOnly && !isMacPlatform) return false;
-                return getSidebarItemLabel(item)
-                  .toLowerCase()
-                  .includes(sidebarSearch.toLowerCase());
-              }).length === 0 && (
-                <div className="settings-nav-no-results">No matching settings</div>
-              )}
-          </div>
-        </div>
 
-        <div className="settings-content-card">
-          <div className="settings-content">
-            {activeTab === "appearance" ? (
-              <AppearanceSettings
-                themeMode={themeMode}
-                visualTheme={visualTheme}
-                accentColor={accentColor}
-                transparencyEffectsEnabled={transparencyEffectsEnabled}
-                onThemeChange={onThemeChange}
-                onVisualThemeChange={onVisualThemeChange}
-                onAccentChange={onAccentChange}
-                onTransparencyEffectsEnabledChange={onTransparencyEffectsEnabledChange}
-                uiDensity={uiDensity}
-                onUiDensityChange={onUiDensityChange}
-                devRunLoggingEnabled={devRunLoggingEnabled}
-                onDevRunLoggingEnabledChange={onDevRunLoggingEnabledChange}
-                onShowOnboarding={onShowOnboarding}
-                onboardingCompletedAt={onboardingCompletedAt}
-              />
-            ) : activeTab === "personality" ? (
-              <PersonalitySettings onSettingsChanged={onSettingsChanged} />
-            ) : activeTab === "missioncontrol" ? (
-              <MissionControlPanel initialCompanyId={missionControlCompanyId} />
-            ) : activeTab === "companies" ? (
-              <CompaniesPanel
-                onOpenMissionControl={(companyId) => {
-                  setMissionControlCompanyId(companyId);
-                  setActiveTab("missioncontrol");
-                }}
-                onOpenDigitalTwins={(companyId) => {
-                  setMissionControlCompanyId(companyId);
-                  setDigitalTwinsCompanyId(companyId);
-                  setActiveTab("digitaltwins");
-                }}
-              />
-            ) : activeTab === "digitaltwins" ? (
-              <DigitalTwinsPanel initialCompanyId={digitalTwinsCompanyId} />
-            ) : activeTab === "tray" ? (
-              <TraySettings />
-            ) : activeTab === "voice" ? (
-              <VoiceSettings />
-            ) : activeTab === "telegram" ? (
-              <TelegramSettings />
-            ) : activeTab === "slack" ? (
-              <SlackSettings />
-            ) : activeTab === "whatsapp" ? (
-              <WhatsAppSettings />
-            ) : activeTab === "teams" ? (
-              <TeamsSettings />
-            ) : activeTab === "x" ? (
-              <XSettings />
-            ) : activeTab === "morechannels" ? (
-              <div className="more-channels-panel">
-                <div className="more-channels-header">
-                  <h2>More Channels</h2>
-                  <p className="settings-description">Configure additional messaging platforms</p>
-                </div>
-                <div className="more-channels-tabs">
-                  {secondaryChannelItems.map((item) => (
-                    <button
-                      key={item.key}
-                      className={`more-channels-tab ${activeSecondaryChannel === item.key ? "active" : ""}`}
-                      onClick={() => setActiveSecondaryChannel(item.key)}
-                    >
-                      {item.icon}
-                      <span>{item.label}</span>
-                    </button>
-                  ))}
-                </div>
-                <div className="more-channels-content">
-                  {activeSecondaryChannel === "discord" && <DiscordSettings />}
-                  {activeSecondaryChannel === "imessage" && <ImessageSettings />}
-                  {activeSecondaryChannel === "signal" && <SignalSettings />}
-                  {activeSecondaryChannel === "mattermost" && <MattermostSettings />}
-                  {activeSecondaryChannel === "matrix" && <MatrixSettings />}
-                  {activeSecondaryChannel === "twitch" && <TwitchSettings />}
-                  {activeSecondaryChannel === "line" && <LineSettings />}
-                  {activeSecondaryChannel === "bluebubbles" && <BlueBubblesSettings />}
-                  {activeSecondaryChannel === "email" && <EmailSettings />}
-                  {activeSecondaryChannel === "googlechat" && <GoogleChatSettings />}
-                </div>
-              </div>
-            ) : activeTab === "search" ? (
-              <SearchSettings />
-            ) : activeTab === "updates" ? (
-              <UpdateSettings />
-            ) : activeTab === "guardrails" ? (
-              <GuardrailSettings />
-            ) : activeTab === "queue" ? (
-              <QueueSettings />
-            ) : activeTab === "skills" ? (
-              <SkillsSettings />
-            ) : activeTab === "skillhub" ? (
-              <SkillHubBrowser />
-            ) : activeTab === "scheduled" ? (
-              <ScheduledTasksSettings />
-            ) : activeTab === "connectors" ? (
-              <ConnectorsSettings />
-            ) : activeTab === "infrastructure" ? (
-              <InfraSettings />
-            ) : activeTab === "mcp" ? (
-              <MCPSettings />
-            ) : activeTab === "tools" ? (
-              <BuiltinToolsSettings />
-            ) : activeTab === "hooks" ? (
-              <HooksSettings />
-            ) : activeTab === "controlplane" ? (
-              <ControlPlaneSettings />
-            ) : activeTab === "nodes" ? (
-              <NodesSettings />
-            ) : activeTab === "extensions" ? (
-              <ExtensionsSettings />
-            ) : activeTab === "memory" ? (
-              <MemoryHubSettings
-                initialWorkspaceId={workspaceId}
-                onSettingsChanged={onSettingsChanged}
-              />
-            ) : activeTab === "improvement" ? (
-              <ImprovementSettingsPanel initialWorkspaceId={workspaceId} onOpenTask={onOpenTask} />
-            ) : activeTab === "git" ? (
-              <WorktreeSettings />
-            ) : activeTab === "insights" ? (
-              <UsageInsightsPanel workspaceId={workspaceId} />
-            ) : activeTab === "suggestions" ? (
-              <SuggestionsPanel workspaceId={workspaceId} onCreateTask={onCreateTask} />
-            ) : activeTab === "customize" ? (
-              <CustomizePanel
-                onNavigateToConnectors={() => setActiveTab("connectors")}
-                onNavigateToSkills={() => setActiveTab("skills")}
-                onCreateTask={onCreateTask}
-              />
-            ) : activeTab === "policies" ? (
-              <AdminPoliciesPanel />
-            ) : activeTab === "triggers" ? (
-              <EventTriggersPanel workspaceId={workspaceId} />
-            ) : activeTab === "briefing" ? (
-              <BriefingPanel workspaceId={workspaceId} />
-            ) : activeTab === "webaccess" ? (
-              <WebAccessSettingsPanel />
-            ) : loading ? (
-              <div className="settings-loading">Loading settings...</div>
-            ) : (
+  const renderLLMPanel = () => (
               <div className="llm-provider-panel">
                 <div className="llm-provider-header">
                   <h2>LLM Provider</h2>
@@ -2885,6 +2703,28 @@ export function Settings({
                           value={azureApiVersion}
                           onChange={(e) => setAzureApiVersion(e.target.value)}
                         />
+                      </div>
+
+                      <div className="settings-section">
+                        <h3>Reasoning Effort</h3>
+                        <p className="settings-description">
+                          Controls how much reasoning Azure should spend on supported models.
+                          Azure currently accepts low, medium, and high. Extra High is stored in
+                          settings but sent as High to Azure requests.
+                        </p>
+                        <select
+                          className="settings-input"
+                          value={azureReasoningEffort}
+                          onChange={(e) =>
+                            setAzureReasoningEffort(e.target.value as AzureReasoningEffort)
+                          }
+                        >
+                          {AZURE_REASONING_EFFORT_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     </>
                   )}
@@ -4076,6 +3916,423 @@ export function Settings({
                   </div>
                 </div>
               </div>
+  );
+  return (
+    <div className="settings-page">
+      <div className="settings-page-layout">
+        <div className="settings-sidebar">
+          <h1 className="settings-sidebar-title">Settings</h1>
+          <button className="settings-back-btn" onClick={onBack}>
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <path d="M19 12H5M12 19l-7-7 7-7" />
+            </svg>
+            Back
+          </button>
+          <div className="settings-sidebar-search">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="M21 21l-4.35-4.35" />
+            </svg>
+            <input
+              type="text"
+              placeholder="Search settings..."
+              value={sidebarSearch}
+              onChange={(e) => setSidebarSearch(e.target.value)}
+            />
+            {sidebarSearch && (
+              <button
+                className="settings-sidebar-search-clear"
+                onClick={() => setSidebarSearch("")}
+                aria-label="Clear search"
+              >
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            )}
+          </div>
+          <div className="settings-nav-items">
+            {
+              sidebarItems
+                .filter((item) => {
+                  // Filter by macOnly if applicable
+                  if (item.macOnly && !isMacPlatform) {
+                    return false;
+                  }
+                  // Filter by search query
+                  if (sidebarSearch) {
+                    return getSidebarItemLabel(item)
+                      .toLowerCase()
+                      .includes(sidebarSearch.toLowerCase());
+                  }
+                  return true;
+                })
+                .reduce<{ seenGroups: Set<string>; elements: ReactNode[] }>(
+                  (acc, item) => {
+                    if (!sidebarSearch && !acc.seenGroups.has(item.group)) {
+                      acc.elements.push(
+                        <div key={`group-${item.group}`} className="settings-nav-group-header">
+                          {item.group}
+                        </div>,
+                      );
+                      acc.seenGroups.add(item.group);
+                    }
+                    acc.elements.push(
+                      <button
+                        key={item.tab}
+                        className={`settings-nav-item ${(activeTab === item.tab || (item.tab === "morechannels" && (activeTab === "teams" || activeTab === "x"))) ? "active" : ""}`}
+                        data-tab={item.tab}
+                        onClick={() => setActiveTab(item.tab)}
+                      >
+                        {item.icon}
+                        {getSidebarItemLabel(item)}
+                      </button>,
+                    );
+                    return acc;
+                  },
+                  { seenGroups: new Set<string>(), elements: [] },
+                ).elements
+            }
+            {sidebarSearch &&
+              sidebarItems.filter((item) => {
+                if (item.macOnly && !isMacPlatform) return false;
+                return getSidebarItemLabel(item)
+                  .toLowerCase()
+                  .includes(sidebarSearch.toLowerCase());
+              }).length === 0 && (
+                <div className="settings-nav-no-results">No matching settings</div>
+              )}
+          </div>
+        </div>
+
+        <div className="settings-content-card">
+          <div className="settings-content">
+            {activeTab === "appearance" ? (
+              <AppearanceSettings
+                themeMode={themeMode}
+                visualTheme={visualTheme}
+                accentColor={accentColor}
+                transparencyEffectsEnabled={transparencyEffectsEnabled}
+                onThemeChange={onThemeChange}
+                onVisualThemeChange={onVisualThemeChange}
+                onAccentChange={onAccentChange}
+                onTransparencyEffectsEnabledChange={onTransparencyEffectsEnabledChange}
+                uiDensity={uiDensity}
+                onUiDensityChange={onUiDensityChange}
+                devRunLoggingEnabled={devRunLoggingEnabled}
+                onDevRunLoggingEnabledChange={onDevRunLoggingEnabledChange}
+                onShowOnboarding={onShowOnboarding}
+                onboardingCompletedAt={onboardingCompletedAt}
+              />
+            ) : activeTab === "personality" ? (
+              <PersonalitySettings onSettingsChanged={onSettingsChanged} />
+            ) : activeTab === "missioncontrol" ? (
+              <MissionControlPanel initialCompanyId={missionControlCompanyId} />
+            ) : activeTab === "companies" ? (
+              <CompaniesPanel
+                onOpenMissionControl={(companyId) => {
+                  setMissionControlCompanyId(companyId);
+                  setActiveTab("missioncontrol");
+                }}
+                onOpenDigitalTwins={(companyId) => {
+                  setMissionControlCompanyId(companyId);
+                  setDigitalTwinsCompanyId(companyId);
+                  setActiveTab("digitaltwins");
+                }}
+              />
+            ) : activeTab === "digitaltwins" ? (
+              <DigitalTwinsPanel initialCompanyId={digitalTwinsCompanyId} />
+            ) : activeTab === "health" ? (
+              <HealthPanel compact onCreateTask={onCreateTask} />
+            ) : activeTab === "system" ? (
+              <div className="settings-combined-panel">
+                <section className="settings-combined-section">
+                  <h2 className="settings-combined-heading">
+                    {platform === "win32" ? "System Tray" : platform === "darwin" ? "Menu Bar" : "Tray"}
+                  </h2>
+                  <TraySettings />
+                </section>
+                <section className="settings-combined-section">
+                  <h2 className="settings-combined-heading">Safety Limits</h2>
+                  <GuardrailSettings />
+                </section>
+                <section className="settings-combined-section">
+                  <h2 className="settings-combined-heading">Admin Policies</h2>
+                  <AdminPoliciesPanel />
+                </section>
+              </div>
+            ) : activeTab === "voice" ? (
+              <VoiceSettings />
+            ) : activeTab === "telegram" ? (
+              <TelegramSettings />
+            ) : activeTab === "slack" ? (
+              <SlackSettings />
+            ) : activeTab === "whatsapp" ? (
+              <WhatsAppSettings />
+            ) : activeTab === "morechannels" || activeTab === "teams" || activeTab === "x" ? (
+              (() => {
+                const effectiveSecondary =
+                  activeTab === "teams" || activeTab === "x" ? activeTab : activeSecondaryChannel;
+                return (
+              <div className="more-channels-panel">
+                <div className="more-channels-header">
+                  <h2>More Channels</h2>
+                  <p className="settings-description">Configure additional messaging platforms</p>
+                </div>
+                <div className="more-channels-tabs">
+                  {secondaryChannelItems.map((item) => (
+                    <button
+                      key={item.key}
+                      className={`more-channels-tab ${effectiveSecondary === item.key ? "active" : ""}`}
+                      onClick={() => {
+                        setActiveTab("morechannels");
+                        setActiveSecondaryChannel(item.key);
+                      }}
+                    >
+                      {item.icon}
+                      <span>{item.label}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="more-channels-content">
+                  {effectiveSecondary === "teams" && <TeamsSettings />}
+                  {effectiveSecondary === "x" && <XSettings />}
+                  {effectiveSecondary === "discord" && <DiscordSettings />}
+                  {effectiveSecondary === "imessage" && <ImessageSettings />}
+                  {effectiveSecondary === "signal" && <SignalSettings />}
+                  {effectiveSecondary === "mattermost" && <MattermostSettings />}
+                  {effectiveSecondary === "matrix" && <MatrixSettings />}
+                  {effectiveSecondary === "twitch" && <TwitchSettings />}
+                  {effectiveSecondary === "line" && <LineSettings />}
+                  {effectiveSecondary === "bluebubbles" && <BlueBubblesSettings />}
+                  {effectiveSecondary === "email" && <EmailSettings />}
+                  {effectiveSecondary === "googlechat" && <GoogleChatSettings />}
+                </div>
+              </div>
+                );
+              })()
+            ) : activeTab === "aimodels" ? (
+              <div className="more-channels-panel">
+                <div className="more-channels-header">
+                  <h2>AI & Models</h2>
+                  <p className="settings-description">Configure AI model and web search</p>
+                </div>
+                <div className="more-channels-tabs">
+                  <button
+                    className={`more-channels-tab ${activeAIModelsSubTab === "llm" ? "active" : ""}`}
+                    onClick={() => setActiveAIModelsSubTab("llm")}
+                  >
+                    <Layers {...S} />
+                    <span>AI Model</span>
+                  </button>
+                  <button
+                    className={`more-channels-tab ${activeAIModelsSubTab === "search" ? "active" : ""}`}
+                    onClick={() => setActiveAIModelsSubTab("search")}
+                  >
+                    <Search {...S} />
+                    <span>Web Search</span>
+                  </button>
+                </div>
+                <div className="more-channels-content">
+                  {activeAIModelsSubTab === "llm" && renderLLMPanel()}
+                  {activeAIModelsSubTab === "search" && <SearchSettings />}
+                </div>
+              </div>
+            ) : activeTab === "updates" ? (
+              <UpdateSettings />
+            ) : activeTab === "automations" ? (
+              <div className="more-channels-panel">
+                <div className="more-channels-header">
+                  <h2>Automations</h2>
+                  <p className="settings-description">
+                    Task queue, self-improvement, scheduled tasks, webhooks, and event triggers
+                  </p>
+                </div>
+                <div className="more-channels-tabs">
+                  {(["queue", "improvement", "scheduled", "hooks", "triggers"] as const).map(
+                    (key) => (
+                      <button
+                        key={key}
+                        className={`more-channels-tab ${activeAutomationsSubTab === key ? "active" : ""}`}
+                        onClick={() => setActiveAutomationsSubTab(key)}
+                      >
+                        {key === "queue" && <ListOrdered {...S} />}
+                        {key === "improvement" && <Sparkles {...S} />}
+                        {key === "scheduled" && <Clock {...S} />}
+                        {key === "hooks" && <Link {...S} />}
+                        {key === "triggers" && <Zap {...S} />}
+                        <span>
+                          {key === "queue" && "Task Queue"}
+                          {key === "improvement" && "Self-Improve"}
+                          {key === "scheduled" && "Scheduled Tasks"}
+                          {key === "hooks" && "Webhooks"}
+                          {key === "triggers" && "Event Triggers"}
+                        </span>
+                      </button>
+                    ),
+                  )}
+                </div>
+                <div className="more-channels-content">
+                  {activeAutomationsSubTab === "queue" && <QueueSettings />}
+                  {activeAutomationsSubTab === "improvement" && (
+                    <ImprovementSettingsPanel initialWorkspaceId={workspaceId} onOpenTask={onOpenTask} />
+                  )}
+                  {activeAutomationsSubTab === "scheduled" && <ScheduledTasksSettings />}
+                  {activeAutomationsSubTab === "hooks" && <HooksSettings />}
+                  {activeAutomationsSubTab === "triggers" && (
+                    <EventTriggersPanel workspaceId={workspaceId} />
+                  )}
+                </div>
+              </div>
+            ) : activeTab === "skills" ? (
+              <div className="more-channels-panel">
+                <div className="more-channels-header">
+                  <h2>Skills</h2>
+                  <p className="settings-description">
+                    Manage custom skills and browse the Skill Store
+                  </p>
+                </div>
+                <div className="more-channels-tabs">
+                  <button
+                    className={`more-channels-tab ${activeSkillsSubTab === "custom" ? "active" : ""}`}
+                    onClick={() => setActiveSkillsSubTab("custom")}
+                  >
+                    <Wrench {...S} />
+                    <span>Custom Skills</span>
+                  </button>
+                  <button
+                    className={`more-channels-tab ${activeSkillsSubTab === "store" ? "active" : ""}`}
+                    onClick={() => setActiveSkillsSubTab("store")}
+                  >
+                    <Store {...S} />
+                    <span>Skill Store</span>
+                  </button>
+                </div>
+                <div className="more-channels-content">
+                  {activeSkillsSubTab === "custom" && <SkillsSettings />}
+                  {activeSkillsSubTab === "store" && <SkillHubBrowser />}
+                </div>
+              </div>
+            ) : activeTab === "integrations" ? (
+              <div className="more-channels-panel">
+                <div className="more-channels-header">
+                  <h2>Integrations</h2>
+                  <p className="settings-description">
+                    Git, connectors, and infrastructure
+                  </p>
+                </div>
+                <div className="more-channels-tabs">
+                  <button
+                    className={`more-channels-tab ${activeIntegrationsSubTab === "git" ? "active" : ""}`}
+                    onClick={() => setActiveIntegrationsSubTab("git")}
+                  >
+                    <GitBranch {...S} />
+                    <span>Git</span>
+                  </button>
+                  <button
+                    className={`more-channels-tab ${activeIntegrationsSubTab === "connectors" ? "active" : ""}`}
+                    onClick={() => setActiveIntegrationsSubTab("connectors")}
+                  >
+                    <LayoutGrid {...S} />
+                    <span>Connectors</span>
+                  </button>
+                  <button
+                    className={`more-channels-tab ${activeIntegrationsSubTab === "infrastructure" ? "active" : ""}`}
+                    onClick={() => setActiveIntegrationsSubTab("infrastructure")}
+                  >
+                    <Zap {...S} />
+                    <span>Infrastructure</span>
+                  </button>
+                </div>
+                <div className="more-channels-content">
+                  {activeIntegrationsSubTab === "git" && <WorktreeSettings />}
+                  {activeIntegrationsSubTab === "connectors" && <ConnectorsSettings />}
+                  {activeIntegrationsSubTab === "infrastructure" && <InfraSettings />}
+                </div>
+              </div>
+            ) : activeTab === "mcp" ? (
+              <MCPSettings />
+            ) : activeTab === "tools" ? (
+              <BuiltinToolsSettings />
+            ) : activeTab === "access" ? (
+              <div className="more-channels-panel">
+                <div className="more-channels-header">
+                  <h2>Access</h2>
+                  <p className="settings-description">
+                    Remote access and web access
+                  </p>
+                </div>
+                <div className="more-channels-tabs">
+                  <button
+                    className={`more-channels-tab ${activeAccessSubTab === "controlplane" ? "active" : ""}`}
+                    onClick={() => setActiveAccessSubTab("controlplane")}
+                  >
+                    <Monitor {...S} />
+                    <span>Remote Access</span>
+                  </button>
+                  <button
+                    className={`more-channels-tab ${activeAccessSubTab === "webaccess" ? "active" : ""}`}
+                    onClick={() => setActiveAccessSubTab("webaccess")}
+                  >
+                    <Monitor {...S} />
+                    <span>Web Access</span>
+                  </button>
+                </div>
+                <div className="more-channels-content">
+                  {activeAccessSubTab === "controlplane" && <ControlPlaneSettings />}
+                  {activeAccessSubTab === "webaccess" && <WebAccessSettingsPanel />}
+                </div>
+              </div>
+            ) : activeTab === "nodes" ? (
+              <NodesSettings />
+            ) : activeTab === "extensions" ? (
+              <ExtensionsSettings />
+            ) : activeTab === "memory" ? (
+              <MemoryHubSettings
+                initialWorkspaceId={workspaceId}
+                onSettingsChanged={onSettingsChanged}
+              />
+            ) : activeTab === "insights" ? (
+              <UsageInsightsPanel workspaceId={workspaceId} />
+            ) : activeTab === "suggestions" ? (
+              <SuggestionsPanel workspaceId={workspaceId} onCreateTask={onCreateTask} />
+            ) : activeTab === "customize" ? (
+              <CustomizePanel
+                onNavigateToConnectors={() => {
+                  setActiveTab("integrations");
+                  setActiveIntegrationsSubTab("connectors");
+                }}
+                onNavigateToSkills={() => setActiveTab("skills")}
+                onCreateTask={onCreateTask}
+              />
+            ) : activeTab === "briefing" ? (
+              <BriefingPanel workspaceId={workspaceId} />
+            ) : loading ? (
+              <div className="settings-loading">Loading settings...</div>
+            ) : (
+              renderLLMPanel()
             )}
           </div>
         </div>

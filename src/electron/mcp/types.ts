@@ -348,6 +348,20 @@ export interface MCPRegistryEntry {
   // Timestamps
   createdAt?: string;
   updatedAt?: string;
+
+  // Connector profile (Claude-style detail view)
+  tagline?: string;
+  longDescription?: string;
+  keyFeatures?: Array<{
+    title: string;
+    description: string;
+  }>;
+  examples?: Array<{
+    prompt: string;
+    resultImageUrl?: string;
+    resultLabel?: string;
+  }>;
+  iconUrl?: string;
 }
 
 // Full registry response

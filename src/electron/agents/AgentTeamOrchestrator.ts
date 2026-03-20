@@ -17,6 +17,7 @@ import {
   resolveModelPreferenceToModelKey,
   resolvePersonalityPreference,
 } from "../../shared/agent-preferences";
+import { LLMProviderFactory } from "../agent/llm/provider-factory";
 import { AgentTeamRepository } from "./AgentTeamRepository";
 import { AgentTeamRunRepository } from "./AgentTeamRunRepository";
 import { AgentTeamItemRepository } from "./AgentTeamItemRepository";
@@ -156,6 +157,17 @@ export class AgentTeamOrchestrator {
     return this.thoughtRepo;
   }
 
+  private shouldUseProfileRouting(rootTask: Task): boolean {
+    try {
+      const settings = LLMProviderFactory.loadSettings();
+      const providerType = rootTask.agentConfig?.providerType || settings.providerType;
+      return LLMProviderFactory.getProviderRoutingSettings(settings, providerType)
+        .profileRoutingEnabled;
+    } catch {
+      return false;
+    }
+  }
+
   async tickRun(runId: string, reason: string = "tick"): Promise<void> {
     if (this.runLocks.get(runId)) return;
     this.runLocks.set(runId, true);
@@ -270,6 +282,7 @@ export class AgentTeamOrchestrator {
           : undefined;
 
       const toSpawn = candidates.slice(0, slots);
+      const useProfileRouting = this.shouldUseProfileRouting(rootTask);
       for (let spawnIdx = 0; spawnIdx < toSpawn.length; spawnIdx++) {
         const item = toSpawn[spawnIdx];
         const depth = (typeof rootTask.depth === "number" ? rootTask.depth : 0) + 1;
@@ -330,8 +343,10 @@ export class AgentTeamOrchestrator {
           bypassQueue: false,
           llmProfile: deriveTeamItemProfile(item.title, item.description),
         };
-        const modelKey = resolveModelPreferenceToModelKey(team.defaultModelPreference);
-        if (modelKey) agentConfig.modelKey = modelKey;
+        if (!useProfileRouting) {
+          const modelKey = resolveModelPreferenceToModelKey(team.defaultModelPreference);
+          if (modelKey) agentConfig.modelKey = modelKey;
+        }
         const personalityId = resolvePersonalityPreference(team.defaultPersonality);
         if (personalityId) agentConfig.personalityId = personalityId;
 
@@ -622,6 +637,7 @@ export class AgentTeamOrchestrator {
 
     // Collect all thoughts from the run
     const thoughts = this.thoughtRepo.listByRun(run.id);
+    const useProfileRouting = this.shouldUseProfileRouting(rootTask);
 
     // Build synthesis prompt with all member thoughts
     const synthesisPrompt = run.multiLlmMode
@@ -644,8 +660,10 @@ export class AgentTeamOrchestrator {
       agentConfig.modelKey = rootTask.agentConfig.multiLlmConfig.judgeModelKey;
       agentConfig.llmProfile = "strong";
     } else {
-      const modelKey = resolveModelPreferenceToModelKey(team.defaultModelPreference);
-      if (modelKey) agentConfig.modelKey = modelKey;
+      if (!useProfileRouting) {
+        const modelKey = resolveModelPreferenceToModelKey(team.defaultModelPreference);
+        if (modelKey) agentConfig.modelKey = modelKey;
+      }
       const personalityId = resolvePersonalityPreference(team.defaultPersonality);
       if (personalityId) agentConfig.personalityId = personalityId;
     }

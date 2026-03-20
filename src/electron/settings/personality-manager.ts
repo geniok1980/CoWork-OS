@@ -31,6 +31,18 @@ import {
   DEFAULT_RELATIONSHIP,
   getPersonalityById,
   getPersonaById,
+  type PersonalityConfigV2,
+  type ContextMode,
+  type CommunicationStyle,
+  type BehavioralRule,
+  DEFAULT_PERSONALITY_CONFIG_V2,
+  DEFAULT_COMMUNICATION_STYLE,
+  DEFAULT_QUIRKS_V2,
+  DEFAULT_CUSTOM_INSTRUCTIONS,
+  TRAIT_DEFINITIONS,
+  TRAIT_PRESETS,
+  createTraitsFromPreset,
+  createDefaultTraits,
 } from "../../shared/types";
 import { SecureSettingsRepository } from "../database/SecureSettingsRepository";
 import { sanitizeStoredPreferredName } from "../utils/preferred-name";
@@ -57,15 +69,61 @@ const MILESTONES = [1, 10, 25, 50, 100, 250, 500, 1000];
 // Event emitter for personality settings changes
 const personalityEvents = new EventEmitter();
 
+function isV2Config(stored: unknown): stored is PersonalityConfigV2 {
+  return (
+    stored !== null &&
+    typeof stored === "object" &&
+    "version" in stored &&
+    (stored as { version?: number }).version === 2
+  );
+}
+
+function migrateV1ToV2(v1: PersonalitySettings): PersonalityConfigV2 {
+  const presetId = v1.activePersonality === "custom" ? "professional" : v1.activePersonality;
+  const traits = createTraitsFromPreset(presetId);
+  const style: CommunicationStyle = {
+    ...DEFAULT_COMMUNICATION_STYLE,
+    ...(v1.responseStyle && {
+      ...(v1.responseStyle.emojiUsage && { emojiUsage: v1.responseStyle.emojiUsage }),
+      ...(v1.responseStyle.responseLength && { responseLength: v1.responseStyle.responseLength }),
+      ...(v1.responseStyle.codeCommentStyle && { codeCommentStyle: v1.responseStyle.codeCommentStyle }),
+      ...(v1.responseStyle.explanationDepth && { explanationDepth: v1.responseStyle.explanationDepth }),
+    }),
+  };
+  return {
+    version: 2,
+    agentName: v1.agentName ?? DEFAULT_AGENT_NAME,
+    traits,
+    rules: [],
+    style,
+    expertise: [],
+    examples: [],
+    customInstructions: {
+      ...DEFAULT_CUSTOM_INSTRUCTIONS,
+      responseGuidance: v1.customPrompt ?? "",
+    },
+    contextOverrides: [],
+    activePersona: v1.activePersona ?? "companion",
+    quirks: { ...DEFAULT_QUIRKS_V2, ...v1.quirks },
+    relationship: v1.relationship,
+    workStyle: v1.workStyle,
+    soulDocument: v1.activePersonality === "custom" && v1.customPrompt ? v1.customPrompt : undefined,
+    activePersonality: v1.activePersonality,
+    customPrompt: v1.customPrompt,
+    customName: v1.customName,
+  };
+}
+
 export class PersonalityManager {
   private static legacySettingsPath: string;
   private static cachedSettings: PersonalitySettings | null = null;
+  private static cachedConfigV2: PersonalityConfigV2 | null = null;
   private static initialized = false;
   private static migrationCompleted = false;
 
   /**
    * Subscribe to settings changed events.
-   * The callback receives the updated settings.
+   * The callback receives the updated settings (V1 format for backward compat).
    */
   static onSettingsChanged(callback: (settings: PersonalitySettings) => void): () => void {
     personalityEvents.on("settingsChanged", callback);
@@ -83,9 +141,38 @@ export class PersonalityManager {
    * Emit a settings changed event
    */
   private static emitSettingsChanged(): void {
-    if (this.cachedSettings) {
-      personalityEvents.emit("settingsChanged", this.cachedSettings);
+    const settings = this.configV2ToSettings(this.cachedConfigV2 ?? this.getDefaultConfigV2());
+    if (settings) {
+      personalityEvents.emit("settingsChanged", settings);
     }
+  }
+
+  private static getDefaultConfigV2(): PersonalityConfigV2 {
+    return {
+      ...DEFAULT_PERSONALITY_CONFIG_V2,
+      traits: createDefaultTraits(),
+    };
+  }
+
+  private static configV2ToSettings(config: PersonalityConfigV2 | null): PersonalitySettings | null {
+    if (!config) return null;
+    const presetId = config.activePersonality ?? "professional";
+    return {
+      activePersonality: presetId,
+      customPrompt: config.soulDocument ?? config.customInstructions?.responseGuidance ?? "",
+      customName: config.customName ?? "Custom Assistant",
+      agentName: config.agentName,
+      activePersona: config.activePersona ?? "companion",
+      responseStyle: {
+        emojiUsage: config.style.emojiUsage,
+        responseLength: config.style.responseLength,
+        codeCommentStyle: config.style.codeCommentStyle,
+        explanationDepth: config.style.explanationDepth,
+      },
+      quirks: config.quirks,
+      relationship: config.relationship ?? DEFAULT_RELATIONSHIP,
+      workStyle: config.workStyle,
+    };
   }
 
   /**
@@ -146,7 +233,7 @@ export class PersonalityManager {
         // Read legacy settings
         const data = fs.readFileSync(this.legacySettingsPath, "utf-8");
         const parsed = JSON.parse(data);
-        const legacySettings = {
+        const legacySettings: PersonalitySettings = {
           ...DEFAULT_SETTINGS,
           ...parsed,
           responseStyle: { ...DEFAULT_RESPONSE_STYLE, ...parsed.responseStyle },
@@ -154,8 +241,9 @@ export class PersonalityManager {
           relationship: { ...DEFAULT_RELATIONSHIP, ...parsed.relationship },
         };
 
-        // Save to encrypted database
-        repository.save("personality", legacySettings);
+        // Migrate to V2 and save
+        const configV2 = migrateV1ToV2(legacySettings);
+        repository.save("personality", configV2);
         console.log("[PersonalityManager] Settings migrated to encrypted database");
 
         // Migration successful - delete backup and original
@@ -185,163 +273,170 @@ export class PersonalityManager {
   }
 
   /**
-   * Load settings from encrypted database (with caching)
+   * Load V2 config from storage (with migration from V1)
    */
-  static loadSettings(): PersonalitySettings {
+  static loadConfigV2(): PersonalityConfigV2 {
     this.ensureInitialized();
 
-    if (this.cachedSettings) {
-      this.cachedSettings.relationship = this.sanitizeRelationshipData(this.cachedSettings.relationship);
-      return this.cachedSettings;
+    if (this.cachedConfigV2) {
+      return this.cachedConfigV2;
     }
 
-    // Deep copy DEFAULT_SETTINGS to avoid mutating the original constants
-    let settings: PersonalitySettings = {
-      ...DEFAULT_SETTINGS,
-      responseStyle: { ...DEFAULT_RESPONSE_STYLE },
-      quirks: { ...DEFAULT_QUIRKS },
-      relationship: { ...DEFAULT_RELATIONSHIP },
-    };
+    let config: PersonalityConfigV2 = this.getDefaultConfigV2();
 
     try {
-      // Try to load from encrypted database
       if (SecureSettingsRepository.isInitialized()) {
         const repository = SecureSettingsRepository.getInstance();
-        const stored = repository.load<PersonalitySettings>("personality");
+        const stored = repository.load<PersonalityConfigV2 | PersonalitySettings>("personality");
         if (stored) {
-          settings = {
-            ...DEFAULT_SETTINGS,
-            ...stored,
-            responseStyle: { ...DEFAULT_RESPONSE_STYLE, ...stored.responseStyle },
-            quirks: { ...DEFAULT_QUIRKS, ...stored.quirks },
-            relationship: { ...DEFAULT_RELATIONSHIP, ...stored.relationship },
-          };
+          if (isV2Config(stored)) {
+            config = this.mergeConfigWithDefaults(stored);
+          } else {
+            config = migrateV1ToV2(stored as PersonalitySettings);
+            repository.save("personality", config);
+            console.log("[PersonalityManager] Migrated V1 settings to V2");
+          }
         }
       }
 
-      // Validate values
-      if (!isValidPersonalityId(settings.activePersonality)) {
-        settings.activePersonality = DEFAULT_SETTINGS.activePersonality;
+      config.relationship = this.sanitizeRelationshipData(config.relationship) as RelationshipData;
+      if (config.activePersona && !isValidPersonaId(config.activePersona)) {
+        config.activePersona = "companion";
       }
-      if (!isValidPersonaId(settings.activePersona)) {
-        settings.activePersona = DEFAULT_SETTINGS.activePersona;
+      if (config.activePersonality && !isValidPersonalityId(config.activePersonality)) {
+        config.activePersonality = "professional";
       }
-      settings.relationship = this.sanitizeRelationshipData(settings.relationship);
     } catch (error) {
-      console.error("[PersonalityManager] Failed to load settings:", error);
-      // Deep copy DEFAULT_SETTINGS to avoid mutating the original constants
-      settings = {
-        ...DEFAULT_SETTINGS,
-        responseStyle: { ...DEFAULT_RESPONSE_STYLE },
-        quirks: { ...DEFAULT_QUIRKS },
-        relationship: { ...DEFAULT_RELATIONSHIP },
-      };
+      console.error("[PersonalityManager] Failed to load config:", error);
+      config = this.getDefaultConfigV2();
     }
 
+    this.cachedConfigV2 = config;
+    return config;
+  }
+
+  private static mergeConfigWithDefaults(stored: PersonalityConfigV2): PersonalityConfigV2 {
+    const defaults = this.getDefaultConfigV2();
+    const traits =
+      stored.traits?.length > 0
+        ? stored.traits.map((t) => {
+            const def = TRAIT_DEFINITIONS.find((d) => d.id === t.id);
+            return def ? { ...def, ...t, label: def.label, description: def.description } : t;
+          })
+        : defaults.traits;
+    return {
+      ...defaults,
+      ...stored,
+      traits,
+      style: { ...DEFAULT_COMMUNICATION_STYLE, ...stored.style },
+      quirks: { ...DEFAULT_QUIRKS_V2, ...stored.quirks },
+      customInstructions: { ...DEFAULT_CUSTOM_INSTRUCTIONS, ...stored.customInstructions },
+    };
+  }
+
+  /**
+   * Load settings from encrypted database (V1 format for backward compat)
+   */
+  static loadSettings(): PersonalitySettings {
+    const config = this.loadConfigV2();
+    const settings = this.configV2ToSettings(config)!;
+    settings.relationship = this.sanitizeRelationshipData(settings.relationship);
     this.cachedSettings = settings;
     return settings;
   }
 
   /**
-   * Save settings to encrypted database
+   * Save V2 config to encrypted database
    */
-  static saveSettings(settings: PersonalitySettings): void {
+  static saveConfigV2(config: PersonalityConfigV2): void {
     try {
       if (!SecureSettingsRepository.isInitialized()) {
         throw new Error("SecureSettingsRepository not initialized");
       }
-
-      // Load existing settings to preserve fields not being updated
-      const existingSettings = this.loadSettings();
-
-      // Validate and merge with existing settings
-      const validatedSettings: PersonalitySettings = {
-        activePersonality: isValidPersonalityId(settings.activePersonality)
-          ? settings.activePersonality
-          : existingSettings.activePersonality,
-        customPrompt: settings.customPrompt ?? existingSettings.customPrompt,
-        customName: settings.customName ?? existingSettings.customName,
-        agentName: settings.agentName ?? existingSettings.agentName,
-        activePersona: isValidPersonaId(settings.activePersona)
-          ? settings.activePersona
-          : existingSettings.activePersona,
-        responseStyle: settings.responseStyle
-          ? { ...existingSettings.responseStyle, ...settings.responseStyle }
-          : existingSettings.responseStyle,
-        quirks: settings.quirks
-          ? { ...existingSettings.quirks, ...settings.quirks }
-          : existingSettings.quirks,
-        relationship: this.sanitizeRelationshipData(
-          settings.relationship
-            ? { ...existingSettings.relationship, ...settings.relationship }
-            : existingSettings.relationship,
-        ),
-      };
-
       const repository = SecureSettingsRepository.getInstance();
-      repository.save("personality", validatedSettings);
-      this.cachedSettings = validatedSettings;
-      console.log("[PersonalityManager] Settings saved to encrypted database");
+      const sanitized = {
+        ...config,
+        relationship: this.sanitizeRelationshipData(config.relationship) as RelationshipData,
+      };
+      repository.save("personality", sanitized);
+      this.cachedConfigV2 = sanitized;
+      this.cachedSettings = this.configV2ToSettings(sanitized);
+      console.log("[PersonalityManager] Config V2 saved to encrypted database");
       this.emitSettingsChanged();
     } catch (error) {
-      console.error("[PersonalityManager] Failed to save settings:", error);
+      console.error("[PersonalityManager] Failed to save config:", error);
       throw error;
     }
   }
 
   /**
-   * Set the active personality
+   * Save settings to encrypted database (V1 format, converts to V2)
+   */
+  static saveSettings(settings: PersonalitySettings): void {
+    const config = migrateV1ToV2(settings);
+    const existing = this.loadConfigV2();
+    config.rules = existing.rules;
+    config.expertise = existing.expertise;
+    config.examples = existing.examples;
+    config.contextOverrides = existing.contextOverrides;
+    if (settings.activePersonality === "custom" && settings.customPrompt) {
+      config.soulDocument = settings.customPrompt;
+    } else if (existing.soulDocument) {
+      config.soulDocument = existing.soulDocument;
+    }
+    this.saveConfigV2(config);
+  }
+
+  /**
+   * Set the active personality (applies preset traits)
    */
   static setActivePersonality(personalityId: PersonalityId): void {
-    const settings = this.loadSettings();
-    settings.activePersonality = personalityId;
-    this.saveSettings(settings);
+    const config = this.loadConfigV2();
+    if (personalityId !== "custom") {
+      config.traits = createTraitsFromPreset(personalityId);
+      config.soulDocument = undefined;
+    }
+    config.activePersonality = personalityId;
+    this.saveConfigV2(config);
   }
 
   /**
    * Set the active persona
    */
   static setActivePersona(personaId: PersonaId): void {
-    const settings = this.loadSettings();
-    settings.activePersona = personaId;
+    const config = this.loadConfigV2();
+    config.activePersona = personaId;
 
-    // Optionally apply persona's suggested name and quirks
     const persona = getPersonaById(personaId);
     if (persona && personaId !== "none") {
-      if (persona.suggestedName && !settings.agentName) {
-        settings.agentName = persona.suggestedName;
+      if (persona.suggestedName && !config.agentName) {
+        config.agentName = persona.suggestedName;
       }
-      if (persona.sampleCatchphrase && !settings.quirks?.catchphrase) {
-        settings.quirks = {
-          ...settings.quirks,
-          catchphrase: persona.sampleCatchphrase,
-        } as PersonalityQuirks;
+      if (persona.sampleCatchphrase && !config.quirks?.catchphrase) {
+        config.quirks = { ...config.quirks, catchphrase: persona.sampleCatchphrase };
       }
-      if (persona.sampleSignOff && !settings.quirks?.signOff) {
-        settings.quirks = {
-          ...settings.quirks,
-          signOff: persona.sampleSignOff,
-        } as PersonalityQuirks;
+      if (persona.sampleSignOff && !config.quirks?.signOff) {
+        config.quirks = { ...config.quirks, signOff: persona.sampleSignOff };
       }
     }
 
-    this.saveSettings(settings);
+    this.saveConfigV2(config);
   }
 
   /**
    * Get the currently active personality definition
    */
   static getActivePersonality(): PersonalityDefinition | undefined {
-    const settings = this.loadSettings();
-    return getPersonalityById(settings.activePersonality);
+    const config = this.loadConfigV2();
+    return getPersonalityById((config.activePersonality ?? "professional") as PersonalityId);
   }
 
   /**
    * Get the currently active persona definition
    */
   static getActivePersona(): PersonaDefinition | undefined {
-    const settings = this.loadSettings();
-    return getPersonaById(settings.activePersona || "none");
+    const config = this.loadConfigV2();
+    return getPersonaById(config.activePersona || "none");
   }
 
   /**
@@ -366,49 +461,144 @@ export class PersonalityManager {
   }
 
   /**
-   * Get the full personality prompt combining all elements
+   * Get the full personality prompt combining all elements.
+   * When contextMode is provided, context-specific overrides are applied.
    */
-  static getPersonalityPrompt(): string {
-    const settings = this.loadSettings();
-    const parts: string[] = [];
+  static getPersonalityPrompt(contextMode?: ContextMode): string {
+    const config = this.loadConfigV2();
+    return this.buildPromptFromConfig(config, contextMode);
+  }
 
-    // 1. Base personality prompt
-    if (settings.activePersonality === "custom") {
-      if (settings.customPrompt) {
-        parts.push(settings.customPrompt);
-      }
-    } else {
-      const personality = getPersonalityById(settings.activePersonality);
-      if (personality?.promptTemplate) {
-        parts.push(personality.promptTemplate);
-      }
+  private static renderBehavioralRules(rules: BehavioralRule[], contextMode?: ContextMode): string {
+    const enabled = rules.filter(
+      (r) =>
+        r.enabled &&
+        (!r.context?.length || !contextMode || r.context.includes(contextMode) || r.context.includes("all")),
+    );
+    if (enabled.length === 0) return "";
+    const lines = enabled.map((r) => `- ${r.type.toUpperCase()}: ${r.rule}`);
+    return "BEHAVIORAL RULES:\n" + lines.join("\n");
+  }
+
+  private static renderCustomInstructions(ci: { aboutUser?: string; responseGuidance?: string }): string {
+    if (!ci?.aboutUser?.trim() && !ci?.responseGuidance?.trim()) return "";
+    const lines: string[] = ["CUSTOM INSTRUCTIONS:"];
+    if (ci.aboutUser?.trim()) lines.push(`About the user: "${ci.aboutUser.trim()}"`);
+    if (ci.responseGuidance?.trim()) lines.push(`Response guidance: "${ci.responseGuidance.trim()}"`);
+    return lines.join("\n");
+  }
+
+  private static renderTraitsPrompt(traits: { id: string; label: string; intensity: number }[]): string {
+    const high: string[] = [];
+    const low: string[] = [];
+    for (const t of traits) {
+      const def = TRAIT_DEFINITIONS.find((d) => d.id === t.id);
+      if (!def) continue;
+      if (t.intensity >= 70) high.push(def.highLabel.toLowerCase());
+      else if (t.intensity <= 30) low.push(def.lowLabel.toLowerCase());
+    }
+    if (high.length === 0 && low.length === 0) return "";
+    const parts: string[] = ["PERSONALITY & BEHAVIOR:"];
+    if (high.length > 0) parts.push(`You communicate with ${high.join(", ")}.`);
+    if (low.length > 0) parts.push(`You are ${low.join(", ")}.`);
+    return parts.join("\n");
+  }
+
+  private static getCommunicationStylePrompt(style: CommunicationStyle): string {
+    const lines: string[] = ["RESPONSE STYLE PREFERENCES:"];
+
+    switch (style.emojiUsage) {
+      case "none":
+        lines.push("- Do NOT use emojis in responses");
+        break;
+      case "minimal":
+        lines.push("- Use emojis sparingly, only when they add clear value");
+        break;
+      case "moderate":
+        lines.push("- Feel free to use emojis to enhance communication");
+        break;
+      case "expressive":
+        lines.push("- Use emojis liberally to make responses engaging and expressive");
+        break;
     }
 
-    // 2. Persona overlay (if not 'none')
-    if (settings.activePersona && settings.activePersona !== "none") {
-      const persona = getPersonaById(settings.activePersona);
-      if (persona?.promptTemplate) {
-        parts.push(persona.promptTemplate);
-      }
+    switch (style.responseLength) {
+      case "terse":
+        lines.push("- Keep responses very brief and to the point");
+        lines.push("- Omit explanations unless explicitly requested");
+        break;
+      case "balanced":
+        lines.push("- Provide balanced responses with appropriate detail");
+        break;
+      case "detailed":
+        lines.push("- Provide comprehensive, detailed responses");
+        lines.push("- Include context, explanations, and related information");
+        break;
     }
 
-    // 3. Response style preferences
-    const stylePrompt = this.getResponseStylePrompt(settings.responseStyle);
-    if (stylePrompt) {
-      parts.push(stylePrompt);
+    switch (style.codeCommentStyle) {
+      case "minimal":
+        lines.push("- When writing code, use minimal comments (only for complex logic)");
+        break;
+      case "moderate":
+        lines.push("- When writing code, include helpful comments for key sections");
+        break;
+      case "verbose":
+        lines.push("- When writing code, include detailed comments explaining the approach");
+        break;
     }
 
-    // 4. Quirks
-    const quirksPrompt = this.getQuirksPrompt(settings.quirks, settings.activePersona);
-    if (quirksPrompt) {
-      parts.push(quirksPrompt);
+    switch (style.explanationDepth) {
+      case "expert":
+        lines.push("- Assume the user is an expert - skip basic explanations");
+        lines.push("- Focus on advanced considerations and edge cases");
+        break;
+      case "balanced":
+        lines.push("- Balance explanations for a competent but curious user");
+        break;
+      case "teaching":
+        lines.push("- Explain concepts thoroughly as you would to a student");
+        lines.push('- Include "why" explanations and learning opportunities');
+        break;
     }
 
-    return parts.join("\n\n");
+    return lines.length > 1 ? lines.join("\n") : "";
+  }
+
+  private static renderExpertisePrompt(expertise: { domain: string; level: string; notes?: string }[]): string {
+    if (!expertise?.length) return "";
+    const lines = expertise.map(
+      (e) => `- ${e.level} in ${e.domain}${e.notes ? ` (${e.notes})` : ""}`,
+    );
+    return "EXPERTISE:\n" + lines.join("\n");
+  }
+
+  private static renderContextOverride(
+    overrides: { mode: ContextMode; styleOverrides?: Partial<CommunicationStyle> }[],
+    mode: ContextMode,
+  ): string {
+    const o = overrides.find((x) => x.mode === mode);
+    if (!o?.styleOverrides) return "";
+    const s = o.styleOverrides;
+    const parts: string[] = [`[CONTEXT: ${mode.toUpperCase()} MODE]`];
+    if (s.responseLength) parts.push(`- Response length: ${s.responseLength}`);
+    if (s.explanationDepth) parts.push(`- Explanation depth: ${s.explanationDepth}`);
+    return parts.join("\n");
+  }
+
+  private static renderExamplesPrompt(
+    examples: { userMessage: string; idealResponse: string }[],
+  ): string {
+    if (!examples?.length) return "";
+    const blocks = examples.map(
+      (ex, i) =>
+        `### Example ${i + 1}\n**User:** ${ex.userMessage}\n**Assistant:** ${ex.idealResponse}`,
+    );
+    return "EXAMPLES:\n" + blocks.join("\n\n");
   }
 
   /**
-   * Generate prompt section for response style preferences
+   * Generate prompt section for response style preferences (legacy)
    */
   private static getResponseStylePrompt(style?: ResponseStylePreferences): string {
     if (!style) return "";
@@ -527,9 +717,9 @@ export class PersonalityManager {
    * Get the identity prompt that tells the agent who it is
    */
   static getIdentityPrompt(): string {
-    const settings = this.loadSettings();
-    const agentName = settings.agentName || DEFAULT_AGENT_NAME;
-    const relationship = settings.relationship;
+    const config = this.loadConfigV2();
+    const agentName = config.agentName || DEFAULT_AGENT_NAME;
+    const relationship = config.relationship;
     const userName = relationship?.userName;
     const tasksCompleted = relationship?.tasksCompleted || 0;
     const projectsWorkedOn = relationship?.projectsWorkedOn || [];
@@ -592,10 +782,10 @@ COMPANION MINDSET:
    * Get a personalized greeting based on relationship data
    */
   static getGreeting(): string {
-    const settings = this.loadSettings();
-    const userName = settings.relationship?.userName;
-    const tasksCompleted = settings.relationship?.tasksCompleted || 0;
-    const lastInteraction = settings.relationship?.lastInteraction;
+    const config = this.loadConfigV2();
+    const userName = config.relationship?.userName;
+    const tasksCompleted = config.relationship?.tasksCompleted || 0;
+    const lastInteraction = config.relationship?.lastInteraction;
 
     // Determine if the user interacted recently (within last 10 minutes)
     const RECENT_THRESHOLD_MS = 10 * 60 * 1000;
@@ -640,8 +830,8 @@ COMPANION MINDSET:
    * Check if a milestone was reached
    */
   private static checkMilestone(tasksCompleted: number): number | null {
-    const settings = this.loadSettings();
-    const lastCelebrated = settings.relationship?.lastMilestoneCelebrated || 0;
+    const config = this.loadConfigV2();
+    const lastCelebrated = config.relationship?.lastMilestoneCelebrated || 0;
 
     for (const milestone of MILESTONES) {
       if (tasksCompleted >= milestone && milestone > lastCelebrated) {
@@ -655,8 +845,8 @@ COMPANION MINDSET:
    * Record a completed task and update relationship data
    */
   static recordTaskCompleted(workspaceName?: string): void {
-    const settings = this.loadSettings();
-    const relationship = settings.relationship || { ...DEFAULT_RELATIONSHIP };
+    const config = this.loadConfigV2();
+    const relationship = config.relationship || { ...DEFAULT_RELATIONSHIP };
 
     relationship.tasksCompleted = (relationship.tasksCompleted || 0) + 1;
     relationship.lastInteraction = Date.now();
@@ -676,28 +866,28 @@ COMPANION MINDSET:
       console.log(`[PersonalityManager] Milestone reached: ${milestone} tasks completed!`);
     }
 
-    settings.relationship = relationship;
-    this.saveSettings(settings);
+    config.relationship = relationship;
+    this.saveConfigV2(config);
   }
 
   /**
    * Set the user's name
    */
   static setUserName(name: string): void {
-    const settings = this.loadSettings();
+    const config = this.loadConfigV2();
     const sanitizedName = sanitizeStoredPreferredName(name);
-    settings.relationship = {
-      ...settings.relationship,
+    config.relationship = {
+      ...config.relationship,
       userName: sanitizedName || undefined,
     } as RelationshipData;
-    this.saveSettings(settings);
+    this.saveConfigV2(config);
   }
 
   /**
    * Get the user's name
    */
   static getUserName(): string | undefined {
-    return this.loadSettings().relationship?.userName;
+    return this.loadConfigV2().relationship?.userName;
   }
 
   /**
@@ -739,43 +929,40 @@ COMPANION MINDSET:
    * Get the agent's name
    */
   static getAgentName(): string {
-    const settings = this.loadSettings();
-    return settings.agentName || DEFAULT_AGENT_NAME;
+    return this.loadConfigV2().agentName || DEFAULT_AGENT_NAME;
   }
 
   /**
    * Set the agent's name
    */
   static setAgentName(name: string): void {
-    const settings = this.loadSettings();
-    settings.agentName = name.trim() || DEFAULT_AGENT_NAME;
-    this.saveSettings(settings);
+    const config = this.loadConfigV2();
+    config.agentName = name.trim() || DEFAULT_AGENT_NAME;
+    this.saveConfigV2(config);
   }
 
   /**
    * Update response style preferences
    */
   static setResponseStyle(style: Partial<ResponseStylePreferences>): void {
-    const settings = this.loadSettings();
-    settings.responseStyle = {
-      ...DEFAULT_RESPONSE_STYLE,
-      ...settings.responseStyle,
+    const config = this.loadConfigV2();
+    config.style = {
+      ...config.style,
       ...style,
     };
-    this.saveSettings(settings);
+    this.saveConfigV2(config);
   }
 
   /**
    * Update personality quirks
    */
   static setQuirks(quirks: Partial<PersonalityQuirks>): void {
-    const settings = this.loadSettings();
-    settings.quirks = {
-      ...DEFAULT_QUIRKS,
-      ...settings.quirks,
+    const config = this.loadConfigV2();
+    config.quirks = {
+      ...config.quirks,
       ...quirks,
     };
-    this.saveSettings(settings);
+    this.saveConfigV2(config);
   }
 
   /**
@@ -787,8 +974,8 @@ COMPANION MINDSET:
     daysTogether: number;
     nextMilestone: number | null;
   } {
-    const settings = this.loadSettings();
-    const relationship = settings.relationship || DEFAULT_RELATIONSHIP;
+    const config = this.loadConfigV2();
+    const relationship = config.relationship || DEFAULT_RELATIONSHIP;
 
     const tasksCompleted = relationship.tasksCompleted || 0;
     const projectsCount = relationship.projectsWorkedOn?.length || 0;
@@ -813,10 +1000,292 @@ COMPANION MINDSET:
    */
   static clearCache(): void {
     this.cachedSettings = null;
+    this.cachedConfigV2 = null;
   }
 
   /**
-   * Get default settings
+   * Render SOUL.md markdown from structured config (for export and preview)
+   */
+  static renderSoulDocument(config: PersonalityConfigV2): string {
+    const lines: string[] = ["# SOUL", "## Personality"];
+    const traitStr = config.traits
+      .map((t) => `${t.label}: ${t.intensity}`)
+      .join(", ");
+    if (traitStr) lines.push(traitStr);
+    lines.push("");
+
+    if (config.rules?.length) {
+      lines.push("## Rules");
+      config.rules.filter((r) => r.enabled).forEach((r) => lines.push(`- ${r.type.toUpperCase()}: ${r.rule}`));
+      lines.push("");
+    }
+
+    if (config.expertise?.length) {
+      lines.push("## Expertise");
+      config.expertise.forEach((e) =>
+        lines.push(`- ${e.domain} (${e.level})${e.notes ? `: ${e.notes}` : ""}`),
+      );
+      lines.push("");
+    }
+
+    if (config.customInstructions?.aboutUser || config.customInstructions?.responseGuidance) {
+      lines.push("## Instructions");
+      if (config.customInstructions.aboutUser)
+        lines.push("### About the User", config.customInstructions.aboutUser, "");
+      if (config.customInstructions.responseGuidance)
+        lines.push("### Response Guidance", config.customInstructions.responseGuidance, "");
+    }
+
+    lines.push("## Style");
+    const s = config.style;
+    lines.push(
+      `Emoji: ${s.emojiUsage}, Length: ${s.responseLength}, Formality: ${s.formality}, Structure: ${s.structurePreference}`,
+    );
+    lines.push("");
+
+    if (config.examples?.length) {
+      lines.push("## Examples");
+      config.examples.forEach((ex, i) => {
+        lines.push(`### Example ${i + 1}`, `**User:** ${ex.userMessage}`, `**Assistant:** ${ex.idealResponse}`, "");
+      });
+    }
+
+    if (config.contextOverrides?.length) {
+      lines.push("## Context Overrides");
+      config.contextOverrides.forEach((o) => {
+        lines.push(`### ${o.mode}`);
+        if (o.styleOverrides) {
+          const so = o.styleOverrides;
+          if (so.responseLength) lines.push(`Length: ${so.responseLength}`);
+          if (so.explanationDepth) lines.push(`Depth: ${so.explanationDepth}`);
+        }
+        lines.push("");
+      });
+    }
+
+    return lines.join("\n").trim();
+  }
+
+  /**
+   * Parse SOUL.md back into structured fields (best-effort)
+   */
+  static parseSoulDocument(md: string): Partial<PersonalityConfigV2> {
+    const result: Partial<PersonalityConfigV2> = {};
+    const sections = md.split(/(?=^## )/m);
+    for (const sec of sections) {
+      const [head, ...body] = sec.split("\n");
+      const content = body.join("\n").trim();
+      if (head?.includes("Personality") && content) {
+        const traitMatches = content.matchAll(/(\w+):\s*(\d+)/g);
+        const traits = [...traitMatches].map((m) => ({
+          id: m[1].toLowerCase(),
+          label: m[1],
+          intensity: Math.min(100, Math.max(0, parseInt(m[2], 10))),
+          description: "",
+        }));
+        if (traits.length) result.traits = traits;
+      } else if (head?.includes("Rules") && content) {
+        const rules: BehavioralRule[] = [];
+        const ruleRe = /-\s*(ALWAYS|NEVER|PREFER|AVOID):\s*(.+)/gi;
+        let m;
+        while ((m = ruleRe.exec(content))) {
+          rules.push({
+            id: `rule-${rules.length}`,
+            type: m[1].toLowerCase() as BehavioralRule["type"],
+            rule: m[2].trim(),
+            enabled: true,
+          });
+        }
+        if (rules.length) result.rules = rules;
+      } else if (head?.includes("About the User") && content) {
+        if (!result.customInstructions) result.customInstructions = { ...DEFAULT_CUSTOM_INSTRUCTIONS };
+        result.customInstructions.aboutUser = content;
+      } else if (head?.includes("Response Guidance") && content) {
+        if (!result.customInstructions) result.customInstructions = { ...DEFAULT_CUSTOM_INSTRUCTIONS };
+        result.customInstructions.responseGuidance = content;
+      } else if (head?.includes("Expertise") && content) {
+        const expertise: { id: string; domain: string; level: "familiar" | "proficient" | "expert"; notes?: string }[] = [];
+        const exRe = /-\s*(.+?)\s*\((\w+)\)(?:\s*:\s*(.+))?/g;
+        const validLevels = ["familiar", "proficient", "expert"];
+        let em;
+        while ((em = exRe.exec(content))) {
+          const level = validLevels.includes(em[2].toLowerCase())
+            ? em[2].toLowerCase() as "familiar" | "proficient" | "expert"
+            : "proficient";
+          expertise.push({
+            id: `ex-${expertise.length}`,
+            domain: em[1].trim(),
+            level,
+            notes: em[3]?.trim(),
+          });
+        }
+        if (expertise.length) result.expertise = expertise;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Export profile as JSON or SOUL.md
+   */
+  static exportProfile(format: "json" | "md" = "json"): string {
+    const config = this.loadConfigV2();
+    if (format === "md") {
+      return this.renderSoulDocument(config);
+    }
+    return JSON.stringify(
+      {
+        ...config,
+        metadata: {
+          ...config.metadata,
+          exportedAt: Date.now(),
+        },
+      },
+      null,
+      2,
+    );
+  }
+
+  /**
+   * Import profile from JSON or SOUL.md string
+   */
+  static importProfile(data: string): PersonalityConfigV2 {
+    const trimmed = data.trim();
+    let imported: Partial<PersonalityConfigV2>;
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      imported = JSON.parse(trimmed) as Partial<PersonalityConfigV2>;
+    } else {
+      imported = this.parseSoulDocument(trimmed);
+    }
+    const existing = this.loadConfigV2();
+    const merged: PersonalityConfigV2 = {
+      ...existing,
+      ...imported,
+      version: 2,
+      traits: imported.traits ?? existing.traits,
+      rules: imported.rules ?? existing.rules,
+      style: { ...existing.style, ...imported.style },
+      quirks: { ...existing.quirks, ...imported.quirks },
+      customInstructions: { ...existing.customInstructions, ...imported.customInstructions },
+      expertise: imported.expertise ?? existing.expertise,
+      examples: imported.examples ?? existing.examples,
+      contextOverrides: imported.contextOverrides ?? existing.contextOverrides,
+    };
+    this.saveConfigV2(merged);
+    return merged;
+  }
+
+  /**
+   * Get preview prompt from draft config without saving
+   */
+  static getPreviewPrompt(draft: Partial<PersonalityConfigV2>, contextMode?: ContextMode): string {
+    const existing = this.loadConfigV2();
+    const merged: PersonalityConfigV2 = {
+      ...existing,
+      ...draft,
+      traits: draft.traits ?? existing.traits,
+      rules: draft.rules ?? existing.rules,
+      style: { ...existing.style, ...draft.style },
+      quirks: { ...existing.quirks, ...draft.quirks },
+      customInstructions: { ...existing.customInstructions, ...draft.customInstructions },
+      expertise: draft.expertise ?? existing.expertise,
+      examples: draft.examples ?? existing.examples,
+      contextOverrides: draft.contextOverrides ?? existing.contextOverrides,
+    };
+    return this.buildPromptFromConfig(merged, contextMode);
+  }
+
+  private static buildPromptFromConfig(config: PersonalityConfigV2, contextMode?: ContextMode): string {
+    if (config.soulDocument?.trim()) {
+      const base = config.soulDocument.trim();
+      const persona =
+        config.activePersona && config.activePersona !== "none"
+          ? getPersonaById(config.activePersona)?.promptTemplate
+          : "";
+      const style = this.getCommunicationStylePrompt(config.style);
+      const quirks = this.getQuirksPrompt(config.quirks, config.activePersona);
+      return [base, persona, style, quirks].filter(Boolean).join("\n\n");
+    }
+    const parts: string[] = [];
+    const rulesPart = this.renderBehavioralRules(config.rules, contextMode);
+    if (rulesPart) parts.push(rulesPart);
+    const instructionsPart = this.renderCustomInstructions(config.customInstructions);
+    if (instructionsPart) parts.push(instructionsPart);
+    const traitsPart = this.renderTraitsPrompt(config.traits);
+    if (traitsPart) parts.push(traitsPart);
+    const stylePart = this.getCommunicationStylePrompt(config.style);
+    if (stylePart) parts.push(stylePart);
+    const expertisePart = this.renderExpertisePrompt(config.expertise);
+    if (expertisePart) parts.push(expertisePart);
+    if (contextMode && contextMode !== "all") {
+      const overridePart = this.renderContextOverride(config.contextOverrides, contextMode);
+      if (overridePart) parts.push(overridePart);
+    }
+    const examplesPart = this.renderExamplesPrompt(config.examples);
+    if (examplesPart) parts.push(examplesPart);
+    const quirksPart = this.getQuirksPrompt(config.quirks, config.activePersona);
+    if (quirksPart) parts.push(quirksPart);
+    if (config.activePersona && config.activePersona !== "none") {
+      const persona = getPersonaById(config.activePersona);
+      if (persona?.promptTemplate) parts.push(persona.promptTemplate);
+    }
+    return parts.join("\n\n");
+  }
+
+  /**
+   * Get trait presets for quick-start templates
+   */
+  static getTraitPresets(): Record<string, { name: string; description: string; icon: string; traits: Record<string, number> }> {
+    return { ...TRAIT_PRESETS };
+  }
+
+  /**
+   * Apply trait adjustments (e.g. { warmth: 80 })
+   */
+  static adjustTraits(adjustments: Record<string, number>): void {
+    const config = this.loadConfigV2();
+    for (const [id, value] of Object.entries(adjustments)) {
+      const t = config.traits.find((x) => x.id === id);
+      if (t) {
+        t.intensity = Math.min(100, Math.max(0, value));
+      }
+    }
+    this.saveConfigV2(config);
+  }
+
+  /**
+   * Add a behavioral rule
+   */
+  static addBehavioralRule(rule: { type: BehavioralRule["type"]; rule: string }): void {
+    const config = this.loadConfigV2();
+    config.rules = config.rules ?? [];
+    config.rules.push({
+      id: `rule-${Date.now()}`,
+      type: rule.type,
+      rule: rule.rule,
+      enabled: true,
+    });
+    this.saveConfigV2(config);
+  }
+
+  /**
+   * Set expertise for a domain
+   */
+  static setExpertise(domain: string, level: "familiar" | "proficient" | "expert", notes?: string): void {
+    const config = this.loadConfigV2();
+    config.expertise = config.expertise ?? [];
+    const existing = config.expertise.find((e) => e.domain.toLowerCase() === domain.toLowerCase());
+    const entry = { id: existing?.id ?? `ex-${Date.now()}`, domain, level, notes };
+    if (existing) {
+      Object.assign(existing, entry);
+    } else {
+      config.expertise.push(entry);
+    }
+    this.saveConfigV2(config);
+  }
+
+  /**
+   * Get default settings (V1 format)
    */
   static getDefaults(): PersonalitySettings {
     return { ...DEFAULT_SETTINGS };
@@ -829,29 +1298,24 @@ COMPANION MINDSET:
   static resetToDefaults(preserveRelationship = true): void {
     this.ensureInitialized();
 
-    // Deep copy DEFAULT_SETTINGS to avoid mutating the original constants
-    let newSettings: PersonalitySettings = {
-      ...DEFAULT_SETTINGS,
-      responseStyle: { ...DEFAULT_RESPONSE_STYLE },
-      quirks: { ...DEFAULT_QUIRKS },
-      relationship: { ...DEFAULT_RELATIONSHIP },
+    let newConfig: PersonalityConfigV2 = {
+      ...this.getDefaultConfigV2(),
+      activePersonality: "professional",
     };
 
     if (preserveRelationship) {
-      // Load current settings to get relationship data (even if cache is cleared)
-      const currentSettings = this.loadSettings();
-      if (currentSettings.relationship) {
-        // Preserve the relationship data (task count, user name, etc.)
-        newSettings.relationship = { ...currentSettings.relationship };
+      const current = this.loadConfigV2();
+      if (current.relationship) {
+        newConfig = { ...newConfig, relationship: { ...current.relationship } };
       }
     }
 
-    // Save to encrypted database
     if (SecureSettingsRepository.isInitialized()) {
       const repository = SecureSettingsRepository.getInstance();
-      repository.save("personality", newSettings);
+      repository.save("personality", newConfig);
     }
-    this.cachedSettings = newSettings;
+    this.cachedConfigV2 = newConfig;
+    this.cachedSettings = this.configV2ToSettings(newConfig);
     console.log(
       "[PersonalityManager] Settings reset to defaults",
       preserveRelationship ? "(preserved relationship)" : "",

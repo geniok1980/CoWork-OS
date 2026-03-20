@@ -43,6 +43,12 @@ The summary LLM call is allocated up to **4,096 output tokens** (~16 KB of struc
 | 200K+ (Claude, GPT-4o) | 4,096 | ~16 KB / 9 detailed sections |
 | 16K (GPT-3.5) | ~640 | ~2.5 KB / condensed sections |
 
+### Chat Mode History Strategy
+
+Explicit chat sessions use a different history strategy from task execution. Instead of letting the task pipeline grow with every follow-up, CoWork OS compacts long chat sessions into a cached summary plus a recent-message window, then reuses that summary on later turns.
+
+This keeps follow-up questions in the same conversation thread while still preserving enough older context for ChatGPT-style back-and-forth.
+
 ## Summary Structure
 
 The compaction summary follows a 9-section structured format, designed to capture everything an agent needs to continue work:

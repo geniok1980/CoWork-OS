@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { AgentRoleData, AgentCapability } from "../../electron/preload";
+import { TWIN_ICON_KEYS, resolveTwinIcon } from "../utils/twin-icons";
 
 // Alias for UI usage
 type AgentRole = AgentRoleData;
@@ -52,25 +53,6 @@ const PRESET_COLORS = [
   "#ec4899", // Pink
   "#06b6d4", // Cyan
   "#6366f1", // Indigo
-];
-
-const PRESET_ICONS = [
-  "🤖",
-  "💻",
-  "🔍",
-  "📚",
-  "🧪",
-  "📝",
-  "📋",
-  "🎨",
-  "📊",
-  "🛠️",
-  "⚡",
-  "🚀",
-  "🔧",
-  "💡",
-  "🎯",
-  "🧠",
 ];
 
 const AUTONOMY_LEVELS = [
@@ -193,24 +175,30 @@ export function AgentRoleEditor({
                     style={{ backgroundColor: editedRole.color }}
                     onClick={() => setShowIconPicker(!showIconPicker)}
                   >
-                    {editedRole.icon}
+                    {(() => {
+                      const Icon = resolveTwinIcon(editedRole.icon);
+                      return <Icon size={20} strokeWidth={2} />;
+                    })()}
                   </button>
                   {showIconPicker && (
                     <div className="picker-dropdown">
                       <div className="picker-grid">
-                        {PRESET_ICONS.map((icon) => (
-                          <button
-                            key={icon}
-                            type="button"
-                            className={`picker-item ${editedRole.icon === icon ? "selected" : ""}`}
-                            onClick={() => {
-                              handleChange("icon", icon);
-                              setShowIconPicker(false);
-                            }}
-                          >
-                            {icon}
-                          </button>
-                        ))}
+                        {TWIN_ICON_KEYS.map((iconKey) => {
+                          const Icon = resolveTwinIcon(iconKey);
+                          return (
+                            <button
+                              key={iconKey}
+                              type="button"
+                              className={`picker-item ${editedRole.icon === iconKey ? "selected" : ""}`}
+                              onClick={() => {
+                                handleChange("icon", iconKey);
+                                setShowIconPicker(false);
+                              }}
+                            >
+                              <Icon size={18} strokeWidth={2} />
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   )}

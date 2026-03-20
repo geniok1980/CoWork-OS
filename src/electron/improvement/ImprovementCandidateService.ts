@@ -11,6 +11,7 @@ import type {
   ImprovementEvidence,
   ImprovementFailureClass,
 } from "../../shared/types";
+import { isAutomatedTaskLike } from "../../shared/automated-task-detection";
 import { getImprovementResetBaselineAt } from "./ImprovementHistoryState";
 import { ImprovementCandidateRepository } from "./ImprovementRepositories";
 import { ImprovementRunRepository } from "./ImprovementRepositories";
@@ -308,6 +309,7 @@ export class ImprovementCandidateService {
   private async ingestTaskFailureCandidate(taskId: string): Promise<void> {
     const task = this.taskRepo.findById(taskId);
     if (!task || task.source === "improvement") return;
+    if (isAutomatedTaskLike(task)) return;
 
     const failureClass = String(task.failureClass || "unknown");
     const summary =
@@ -360,6 +362,7 @@ export class ImprovementCandidateService {
   ): Promise<void> {
     const task = this.taskRepo.findById(taskId);
     if (!task || task.source === "improvement") return;
+    if (isAutomatedTaskLike(task)) return;
 
     const summary =
       typeof payload?.message === "string" && payload.message.trim()
@@ -411,6 +414,7 @@ export class ImprovementCandidateService {
   private async ingestFeedbackCandidate(taskId: string, payload: Any): Promise<void> {
     const task = this.taskRepo.findById(taskId);
     if (!task || task.source === "improvement") return;
+    if (isAutomatedTaskLike(task)) return;
 
     const decision = typeof payload?.decision === "string" ? payload.decision.trim() : "";
     const reason = typeof payload?.reason === "string" ? payload.reason.trim() : "";

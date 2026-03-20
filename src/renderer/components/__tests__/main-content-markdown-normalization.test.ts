@@ -3,6 +3,7 @@ import {
   autolinkBareDomains,
   autolinkUrlsInBrackets,
   normalizeSourcesSection,
+  shouldCreateFreshTaskForSend,
 } from "../MainContent";
 
 describe("MainContent markdown normalization helpers", () => {
@@ -34,5 +35,35 @@ describe("MainContent markdown normalization helpers", () => {
     expect(autolinkUrlsInBrackets("Citations like [1] stay unchanged.")).toBe(
       "Citations like [1] stay unchanged.",
     );
+  });
+
+  it("reuses the current chat task for follow-up messages", () => {
+    expect(
+      shouldCreateFreshTaskForSend({
+        executionMode: "chat",
+        selectedTaskId: "task-1",
+        selectedTaskExecutionMode: "chat",
+      }),
+    ).toBe(false);
+    expect(
+      shouldCreateFreshTaskForSend({
+        executionMode: "chat",
+        selectedTaskId: "task-1",
+        selectedTaskExecutionMode: "execute",
+      }),
+    ).toBe(false);
+    expect(
+      shouldCreateFreshTaskForSend({
+        executionMode: "chat",
+        selectedTaskId: null,
+      }),
+    ).toBe(true);
+    expect(
+      shouldCreateFreshTaskForSend({
+        executionMode: "execute",
+        selectedTaskId: "task-1",
+        selectedTaskExecutionMode: "execute",
+      }),
+    ).toBe(false);
   });
 });

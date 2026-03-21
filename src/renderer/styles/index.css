@@ -1400,7 +1400,7 @@ a,
 }
 
 .sidebar-header {
-  padding: 12px;
+  padding: 12px 12px 6px 12px;
 }
 
 .sidebar-header-top {
@@ -1410,7 +1410,7 @@ a,
 
 .new-task-btn {
   width: 100%;
-  padding: 10px 14px;
+  padding: 8px 12px;
   background: var(--color-bg-glass);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -1466,6 +1466,66 @@ a,
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+/* Ideas tab — above Sessions in sidebar */
+.sidebar-ideas-tab {
+  flex-shrink: 0;
+}
+
+.sidebar-ideas-btn {
+  width: 100%;
+}
+
+/* Ideas panel — uses devices-panel theme (dp-*) */
+.dp-ideas-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(200px, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 900px) {
+  .dp-ideas-grid {
+    grid-template-columns: repeat(2, minmax(200px, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .dp-ideas-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dp-idea-card {
+  min-height: 100px;
+}
+
+.dp-idea-title {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.dp-idea-meta {
+  margin-top: auto;
+  flex-wrap: wrap;
+}
+
+.dp-idea-icons {
+  display: flex;
+  gap: 4px;
+}
+
+.dp-idea-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-bg-tertiary);
+  border-radius: 4px;
 }
 
 .task-item {
@@ -3129,6 +3189,7 @@ a,
   overflow: hidden;
   position: relative;
   cursor: pointer;
+  padding: 8px 14px;
 }
 
 .chat-bubble.user-bubble.expanded {
@@ -3202,7 +3263,7 @@ a,
   color: var(--color-text);
   line-height: 1.6;
   font-size: 14px;
-  margin: 8px 0;
+  margin: 4px 0;
 }
 
 /* Message copy button for user messages */
@@ -5133,7 +5194,7 @@ a,
   background: var(--color-accent);
   color: #fff;
   border-radius: 16px 16px 4px 16px;
-  padding: 10px 14px;
+  padding: 6px 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
@@ -7429,6 +7490,34 @@ a,
 
 .input-status-domain-option.active {
   color: var(--color-accent);
+}
+
+.input-status-skills {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.input-status-skills:hover {
+  color: var(--color-text);
+}
+
+.input-status-skills.active {
+  color: var(--color-accent);
+}
+
+/* Welcome input toolbar - below message box */
+.welcome-input-status {
+  margin-top: 8px;
+  padding-top: 0;
 }
 
 .input-field {
@@ -12001,6 +12090,48 @@ button {
   padding-left: 24px;
 }
 
+/* Profile-Based Routing section: spacing, alignment, contrast */
+.profile-routing-section .settings-description {
+  margin-bottom: 16px;
+  color: var(--color-text-secondary);
+}
+
+.profile-routing-section .profile-routing-enable {
+  margin-bottom: 20px;
+}
+
+.profile-routing-section .profile-routing-content {
+  margin-top: 4px;
+}
+
+.profile-routing-section .profile-routing-models {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.profile-routing-section .profile-routing-models .settings-subsection {
+  padding-left: 0;
+  gap: 8px;
+}
+
+.profile-routing-section .profile-routing-sync {
+  padding-left: 0;
+  margin-bottom: 20px;
+}
+
+.profile-routing-section .profile-routing-sync .button-small {
+  margin-top: 0;
+}
+
+.profile-routing-section .profile-routing-prefer {
+  margin-bottom: 12px;
+}
+
+.profile-routing-section .settings-hint {
+  margin-top: 12px;
+}
 
 .test-result {
   display: flex;
@@ -13422,7 +13553,7 @@ button {
 .cli-header-actions {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .cli-action-btn {
@@ -13449,8 +13580,9 @@ button {
 
 .cli-new-task-btn {
   justify-content: flex-start;
-  padding: 10px 14px !important;
-  height: 40px;
+  padding: 8px 12px !important;
+  height: 34px;
+  min-height: 34px;
   box-sizing: border-box;
   background: var(--color-bg-glass) !important;
   border: 1px solid var(--color-border) !important;
@@ -13582,8 +13714,9 @@ button {
 
 .cli-sessions-header {
   margin: 0;
-  padding: 10px 14px;
-  height: 40px;
+  padding: 8px 12px;
+  height: 34px;
+  min-height: 34px;
   box-sizing: border-box;
   background: var(--color-bg-glass);
   border: 1px solid var(--color-border);
@@ -13758,8 +13891,8 @@ button {
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 8px 12px;
   border-radius: 16px;
   cursor: pointer;
   text-align: left;
@@ -13806,7 +13939,7 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 12px;
   border-radius: 14px;
   cursor: pointer;
   text-align: left;
@@ -31127,6 +31260,13 @@ button {
   font-family: var(--font-ui);
 }
 
+.density-focused .cli-new-task-btn,
+.density-focused .cli-sessions-header {
+  padding: 8px 12px !important;
+  height: 34px;
+  min-height: 34px;
+}
+
 .density-focused .chat-bubble.assistant-bubble {
   max-width: 100%;
   align-self: stretch;
@@ -31136,6 +31276,7 @@ button {
 
 .density-focused .chat-bubble.user-bubble {
   border-radius: 16px 16px 4px 16px;
+  padding: 8px 14px;
 }
 
 .density-focused .chat-bubble-content {

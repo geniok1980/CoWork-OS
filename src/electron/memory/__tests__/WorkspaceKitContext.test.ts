@@ -163,7 +163,7 @@ describe("WorkspaceKitContext", () => {
     expect(soulIdx).toBeLessThan(vibesIdx);
   });
 
-  it("includes LORE.md with bullet sections", () => {
+  it("filters auto-generated LORE milestones while keeping user-authored lore", () => {
     writeFile(
       path.join(tmpDir, ".cowork", "LORE.md"),
       [
@@ -182,8 +182,8 @@ describe("WorkspaceKitContext", () => {
     );
     const out = buildWorkspaceKitContext(tmpDir, "any");
     expect(out).toContain("Durable Context (.cowork/LORE.md)");
-    expect(out).toContain("First task in this workspace");
-    expect(out).toContain("Debugged the auth race condition");
+    expect(out).not.toContain("First task in this workspace");
+    expect(out).not.toContain("Debugged the auth race condition");
     expect(out).toContain("spaghetti module");
   });
 

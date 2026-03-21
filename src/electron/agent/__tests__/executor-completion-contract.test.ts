@@ -228,6 +228,28 @@ describe("TaskExecutor completion contract integration", () => {
     );
   });
 
+  it("does not enforce Playwright QA when no web-app artifacts were materialized", async () => {
+    const executor = createExecuteHarness({
+      title: "Build a simple todo app in React",
+      prompt: "Build a simple todo app in React, test it to catch any bugs before shipping.",
+      lastOutput: "Wrote planning notes and documentation only.",
+      createdFiles: ["README.md", "docs/brief.md"],
+      planStepDescription: "Write the implementation brief",
+    });
+    executor.requiresVisualQARun = true;
+
+    await (executor as Any).execute();
+
+    expect(executor.daemon.completeTask).toHaveBeenCalledTimes(1);
+    expect(executor.daemon.updateTask).not.toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("Playwright visual QA"),
+      }),
+    );
+  });
+
   it("completes website tasks even when strategy context mentions docx artifacts", async () => {
     const executor = createExecuteHarness({
       title: "Windows 95 website",

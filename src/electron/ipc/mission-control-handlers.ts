@@ -220,6 +220,15 @@ export function setupMissionControlHandlers(deps: MissionControlDeps): void {
     if (event.type === "no_work" && event.result?.silent) {
       return;
     }
+    if (
+      (event.type === "wake_queued" ||
+        event.type === "wake_coalesced" ||
+        event.type === "wake_queue_saturated" ||
+        event.type === "wake_immediate_deferred") &&
+      event.wake?.source !== "manual"
+    ) {
+      return;
+    }
     getMainWindow()?.webContents.send(IPC_CHANNELS.HEARTBEAT_EVENT, event);
   });
 

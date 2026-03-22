@@ -44,6 +44,11 @@ import type {
   InputRequestResponse,
   Workspace,
   GuardrailSettings,
+  CouncilConfig,
+  CouncilMemo,
+  CouncilRun,
+  CreateCouncilConfigRequest,
+  UpdateCouncilConfigRequest,
 } from "../shared/types";
 import type {
   HealthDashboard,
@@ -519,6 +524,16 @@ const IPC_CHANNELS = {
   CRON_REMOVE_JOB: "cron:removeJob",
   CRON_RUN_JOB: "cron:runJob",
   CRON_EVENT: "cron:event",
+  // R&D Council
+  COUNCIL_LIST: "council:list",
+  COUNCIL_GET: "council:get",
+  COUNCIL_CREATE: "council:create",
+  COUNCIL_UPDATE: "council:update",
+  COUNCIL_DELETE: "council:delete",
+  COUNCIL_RUN_NOW: "council:runNow",
+  COUNCIL_LIST_RUNS: "council:listRuns",
+  COUNCIL_GET_MEMO: "council:getMemo",
+  COUNCIL_SET_ENABLED: "council:setEnabled",
   // Notifications
   NOTIFICATION_LIST: "notification:list",
   NOTIFICATION_ADD: "notification:add",
@@ -1211,6 +1226,7 @@ interface BuiltinToolsSettings {
   toolTimeouts: Record<string, number>;
   toolAutoApprove: Record<string, boolean>;
   runCommandApprovalMode: "per_command" | "single_bundle";
+  codexRuntimeMode: "native" | "acpx";
   version: string;
 }
 
@@ -2932,6 +2948,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getCronRunHistory: (id: string) => ipcRenderer.invoke("cron:getRunHistory", id),
   clearCronRunHistory: (id: string) => ipcRenderer.invoke("cron:clearRunHistory", id),
   getCronWebhookStatus: () => ipcRenderer.invoke("cron:getWebhookStatus"),
+  listCouncils: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_LIST, { workspaceId }) as Promise<CouncilConfig[]>,
+  getCouncil: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_GET, id) as Promise<CouncilConfig | null>,
+  createCouncil: (data: CreateCouncilConfigRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_CREATE, data) as Promise<CouncilConfig>,
+  updateCouncil: (data: UpdateCouncilConfigRequest) =>
+    ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_UPDATE, data) as Promise<CouncilConfig | null>,
+  deleteCouncil: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_DELETE, id) as Promise<boolean>,
+  runCouncilNow: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_RUN_NOW, id) as Promise<CouncilRun | null>,
+  listCouncilRuns: (payload: { councilConfigId: string; limit?: number }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_LIST_RUNS, payload) as Promise<CouncilRun[]>,
+  getCouncilMemo: (query: string | { id?: string; councilConfigId?: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_GET_MEMO, query) as Promise<CouncilMemo | null>,
+  setCouncilEnabled: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.COUNCIL_SET_ENABLED, { id, enabled }) as Promise<CouncilConfig | null>,
 
   // Notification APIs
   listNotifications: () => ipcRenderer.invoke(IPC_CHANNELS.NOTIFICATION_LIST),
@@ -4593,6 +4624,12 @@ export interface ElectronAPI {
   setActivePersonality: (personalityId: string) => Promise<{ success: boolean }>;
   setActivePersona: (personaId: string) => Promise<{ success: boolean }>;
   resetPersonalitySettings: (preserveRelationship?: boolean) => Promise<{ success: boolean }>;
+  getPersonalityConfigV2: () => Promise<Any>;
+  savePersonalityConfigV2: (config: Any) => Promise<{ success: boolean }>;
+  exportPersonalityProfile: (format?: "json" | "md") => Promise<string>;
+  importPersonalityProfile: (data: string) => Promise<{ success: boolean }>;
+  getPersonalityPreview: (draft: Any, contextMode?: string) => Promise<Any>;
+  getPersonalityTraitPresets: () => Promise<Any>;
   onPersonalitySettingsChanged: (callback: (settings: Any) => void) => () => void;
   // Queue APIs
   getQueueStatus: () => Promise<{
@@ -4790,6 +4827,15 @@ export interface ElectronAPI {
   getCronRunHistory: (id: string) => Promise<CronRunHistoryResult | null>;
   clearCronRunHistory: (id: string) => Promise<boolean>;
   getCronWebhookStatus: () => Promise<CronWebhookStatus>;
+  listCouncils: (workspaceId: string) => Promise<CouncilConfig[]>;
+  getCouncil: (id: string) => Promise<CouncilConfig | null>;
+  createCouncil: (data: CreateCouncilConfigRequest) => Promise<CouncilConfig>;
+  updateCouncil: (data: UpdateCouncilConfigRequest) => Promise<CouncilConfig | null>;
+  deleteCouncil: (id: string) => Promise<boolean>;
+  runCouncilNow: (id: string) => Promise<CouncilRun | null>;
+  listCouncilRuns: (payload: { councilConfigId: string; limit?: number }) => Promise<CouncilRun[]>;
+  getCouncilMemo: (query: string | { id?: string; councilConfigId?: string }) => Promise<CouncilMemo | null>;
+  setCouncilEnabled: (id: string, enabled: boolean) => Promise<CouncilConfig | null>;
   // Notifications
   listNotifications: () => Promise<AppNotification[]>;
   addNotification: (data: {

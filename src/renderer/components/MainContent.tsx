@@ -87,6 +87,8 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { InlineVideoPreview } from "./InlineVideoPreview";
+import { ReplayControlsBar } from "./ReplayControls";
+import type { ReplayControls } from "../hooks/useReplayMode";
 
 const CODE_PREVIEWS_EXPANDED_KEY = "cowork:codePreviewsExpanded";
 const TASK_TITLE_MAX_LENGTH = 50;
@@ -2619,6 +2621,7 @@ interface MainContentProps {
   availableProviders?: Array<{ type: string; name: string; configured: boolean }>;
   uiDensity?: "focused" | "full" | "power";
   remoteSession?: { deviceId: string; deviceName: string } | null;
+  replayControls?: ReplayControls;
 }
 
 // Track command execution sessions for timeline rendering
@@ -2653,6 +2656,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
   const handleStepFeedback = props.handleStepFeedback as (...args: any[]) => void;
   const isChatTask = props.isChatTask as boolean;
   const isTaskWorking = props.isTaskWorking as boolean;
+  const isReplayMode = props.isReplayMode as boolean;
   const lastAssistantMessage = props.lastAssistantMessage as TaskEvent | null;
   const initialPromptEventId = props.initialPromptEventId as string | null;
   const markdownComponents = props.markdownComponents as any;
@@ -2866,7 +2870,8 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                     }
                     return -1;
                   })();
-                  const isActive = timelineIndex === lastActionBlockIndex && isTaskWorking;
+                  const isActive =
+                    timelineIndex === lastActionBlockIndex && (isTaskWorking || isReplayMode);
                   const { summary, toolCallCount, durationMs, outputTokens } = buildActionBlockSummary(
                     item.events,
                     events,
@@ -3556,6 +3561,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
       handleStepFeedback,
       isChatTask,
       isTaskWorking,
+      isReplayMode,
       markdownComponents,
       messageFeedbackMap,
       onOpenBrowserView,
@@ -3627,6 +3633,7 @@ export function MainContent({
   availableProviders = [],
   uiDensity = "focused",
   remoteSession = null,
+  replayControls,
 }: MainContentProps) {
   const events = useMemo(() => normalizeEventsForTimelineUi(rawEvents), [rawEvents]);
   const childEvents = useMemo(() => normalizeEventsForTimelineUi(rawChildEvents), [rawChildEvents]);
@@ -4518,8 +4525,18 @@ export function MainContent({
     // CLI agent child tasks get their own per-agent CliAgentFrame; others use DispatchedAgentsPanel.
     // Show for both collaborative and non-collaborative runs so main area shows sub-agent steps.
     if (childTasks.length > 0) {
-      const cliChildTasks = childTasks.filter((t) => isCliAgentChildTask(t));
-      const nonCliChildTasks = childTasks.filter((t) => !isCliAgentChildTask(t));
+      const childEventsByTaskId = new Map<string, TaskEvent[]>();
+      for (const event of childEvents) {
+        const existing = childEventsByTaskId.get(event.taskId) || [];
+        existing.push(event);
+        childEventsByTaskId.set(event.taskId, existing);
+      }
+      const cliChildTasks = childTasks.filter((t) =>
+        isCliAgentChildTask(t, childEventsByTaskId.get(t.id) || []),
+      );
+      const nonCliChildTasks = childTasks.filter(
+        (t) => !isCliAgentChildTask(t, childEventsByTaskId.get(t.id) || []),
+      );
 
       if (cliChildTasks.length > 0) {
         // Each CLI agent gets its own frame in the timeline
@@ -4528,7 +4545,7 @@ export function MainContent({
             kind: "cli-agent-frame" as const,
             timestamp: ct.createdAt,
             childTask: ct,
-            childTaskEvents: childEvents.filter((e) => e.taskId === ct.id),
+            childTaskEvents: childEventsByTaskId.get(ct.id) || [],
           });
         }
       }
@@ -7753,6 +7770,7 @@ export function MainContent({
       handleStepFeedback={handleStepFeedback}
       isChatTask={isChatTask}
       isTaskWorking={isTaskWorking}
+      isReplayMode={replayControls?.isReplayMode ?? false}
       markdownComponents={markdownComponents}
       messageFeedbackMap={messageFeedbackMap}
       onOpenBrowserView={onOpenBrowserView}
@@ -7957,7 +7975,28 @@ export function MainContent({
                   </button>
                 </>
               )}
+              {replayControls &&
+                !replayControls.isReplayMode &&
+                (task?.status === "completed" ||
+                  task?.status === "failed" ||
+                  task?.status === "cancelled") && (
+                <button
+                  className="replay-entry-btn"
+                  onClick={replayControls.startReplay}
+                  title="Replay this session step by step"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                  </svg>
+                  Replay
+                </button>
+              )}
             </div>
+          )}
+
+          {/* Replay controls bar — shown when replay mode is active */}
+          {replayControls?.isReplayMode && (
+            <ReplayControlsBar controls={replayControls} />
           )}
 
           {conversationFlow}

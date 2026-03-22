@@ -8,7 +8,7 @@
 
 import type { Task, TaskEvent } from "./types";
 
-export type CliAgentType = "codex-cli";
+export type CliAgentType = "codex-cli" | "codex-acpx";
 
 // Title patterns (case-insensitive)
 const CODEX_TITLE_PATTERNS = [
@@ -31,23 +31,34 @@ export function detectCliAgentFromTitle(title: string): CliAgentType | null {
   return null;
 }
 
+export function detectCliAgentFromTask(task: Task): CliAgentType | null {
+  const externalRuntime = task.agentConfig?.externalRuntime;
+  if (externalRuntime?.kind === "acpx" && externalRuntime.agent === "codex") {
+    return "codex-acpx";
+  }
+  return detectCliAgentFromTitle(task.title);
+}
+
 /**
  * Detect CLI agent type from a task's events by scanning for CLI command patterns.
  * Looks at step_started and tool_call events with bash/run_command commands.
  */
 export function detectCliAgentFromEvents(events: TaskEvent[]): CliAgentType | null {
   for (const event of events) {
+    const payload = event.payload as Record<string, unknown> | undefined;
+    const runtime = String(payload?.runtime || "");
+    const runtimeAgent = String(payload?.runtimeAgent || "");
+    if (runtime === "acpx" && runtimeAgent === "codex") return "codex-acpx";
+
     const eventType = event.type;
     // Check step_started events
     if (eventType === "step_started" || eventType === "timeline_step_started" || eventType === "timeline_group_started") {
-      const payload = event.payload as Record<string, unknown> | undefined;
       const step = payload?.step as Record<string, unknown> | undefined;
       const command = String(step?.command || step?.tool || "");
       if (CODEX_COMMAND_PATTERN.test(command)) return "codex-cli";
     }
     // Check tool_call events (run_command with codex)
     if (eventType === "tool_call") {
-      const payload = event.payload as Record<string, unknown> | undefined;
       const tool = String(payload?.tool || payload?.toolName || "");
       if (tool === "run_command" || tool === "bash") {
         const cmd = String(payload?.command || (payload?.input as Record<string, unknown>)?.command || "");
@@ -70,7 +81,7 @@ export function detectCliAgentFromEvents(events: TaskEvent[]): CliAgentType | nu
  */
 export function isCliAgentChildTask(task: Task, events?: TaskEvent[]): boolean {
   // Signal 1: Title match
-  if (detectCliAgentFromTitle(task.title)) return true;
+  if (detectCliAgentFromTask(task)) return true;
 
   // Signal 2: Event content match (if events provided)
   if (events && events.length > 0 && detectCliAgentFromEvents(events)) return true;
@@ -83,7 +94,7 @@ export function isCliAgentChildTask(task: Task, events?: TaskEvent[]): boolean {
  * Uses title first, then events as fallback.
  */
 export function resolveCliAgentType(task: Task, events?: TaskEvent[]): CliAgentType | null {
-  return detectCliAgentFromTitle(task.title) ?? (events ? detectCliAgentFromEvents(events) : null);
+  return detectCliAgentFromTask(task) ?? (events ? detectCliAgentFromEvents(events) : null);
 }
 
 /**
@@ -98,5 +109,7 @@ export function getCliAgentDisplayInfo(agentType: CliAgentType): {
   switch (agentType) {
     case "codex-cli":
       return { icon: "⚡", name: "Codex", badge: "Codex CLI", color: "#10b981" };
+    case "codex-acpx":
+      return { icon: "⚡", name: "Codex", badge: "Codex via ACP", color: "#0ea5e9" };
   }
 }

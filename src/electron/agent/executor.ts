@@ -1,4 +1,5 @@
 import {
+  AgentConfig,
   Task,
   Workspace,
   Plan,
@@ -86,6 +87,7 @@ import { describeSchedule, parseIntervalToMs } from "../cron/types";
 import { InfraManager } from "../infra/infra-manager";
 import { InfraSettingsManager } from "../infra/infra-settings";
 import { buildBestKnownOutcome, mergeBestKnownOutcome } from "./outcome-policy";
+import { AcpxRuntimeRunner, AcpxRuntimeUnavailableError } from "./AcpxRuntimeRunner";
 
 import {
   AwaitingUserInputError,
@@ -1811,6 +1813,14 @@ export class TaskExecutor {
       };
     }
 
+    const runtimeMetadata = this.getExternalRuntimeEventMetadata();
+    if (runtimeMetadata && payloadObj.runtime === undefined) {
+      payloadObj = {
+        ...payloadObj,
+        ...runtimeMetadata,
+      };
+    }
+
     if (type === "awaiting_user_input" && typeof payload?.reasonCode === "string") {
       this.lastAwaitingUserInputReasonCode = payload.reasonCode;
     } else if (type === "retry_started" && typeof payload?.retryReason === "string") {
@@ -1918,10 +1928,116 @@ export class TaskExecutor {
     }
 
     if (this.eventEmitter) {
-      this.eventEmitter.emit(type, payload);
+      this.eventEmitter.emit(type, payloadObj);
       return;
     }
-    this.daemon.logEvent(this.task.id, type, payload);
+    this.daemon.logEvent(this.task.id, type, payloadObj);
+  }
+
+  private getExternalRuntimeEventMetadata(): Record<string, unknown> | null {
+    const externalRuntime = this.task.agentConfig?.externalRuntime;
+    if (!externalRuntime) return null;
+    return {
+      runtime: externalRuntime.kind,
+      runtimeAgent: externalRuntime.agent,
+    };
+  }
+
+  private isAcpxExternalRuntimeTask(): boolean {
+    const runtime = this.task?.agentConfig?.externalRuntime;
+    return runtime?.kind === "acpx" && runtime.agent === "codex";
+  }
+
+  private getAcpxRuntimeRunner(): AcpxRuntimeRunner {
+    if (!this.acpxRuntimeRunner) {
+      this.acpxRuntimeRunner = new AcpxRuntimeRunner({
+        taskId: this.task.id,
+        cwd: this.workspace.path,
+        runtimeConfig: this.task.agentConfig!.externalRuntime!,
+        emitEvent: (type, payload) => this.emitEvent(type, payload),
+      });
+    }
+    return this.acpxRuntimeRunner;
+  }
+
+  private disableExternalRuntimeForFallback(reason: string): void {
+    const existingConfig = this.task.agentConfig || {};
+    if (!existingConfig.externalRuntime) return;
+    const nextConfig: AgentConfig = {
+      ...existingConfig,
+    };
+    delete nextConfig.externalRuntime;
+    this.task = {
+      ...this.task,
+      agentConfig: nextConfig,
+    };
+    this.emitEvent("log", {
+      message: reason,
+    });
+  }
+
+  private async executeWithAcpxRuntime(initialPrompt: string): Promise<void> {
+    const runner = this.getAcpxRuntimeRunner();
+    this.daemon.updateTaskStatus(this.task.id, "executing");
+    this.emitEvent("executing", { message: "Delegating task to Codex via ACP" });
+
+    try {
+      await runner.createSession();
+    } catch (error) {
+      const message = String((error as Any)?.message || error);
+      if (/already exists|exists/i.test(message)) {
+        await runner.ensureSession();
+      } else {
+        throw error;
+      }
+    }
+
+    const result = await runner.prompt(initialPrompt || this.task.prompt || "");
+    const assistantText = result.assistantText.trim();
+    if (assistantText) {
+      this.lastAssistantOutput = assistantText;
+      this.lastAssistantText = assistantText;
+      this.lastNonVerificationOutput = assistantText;
+    }
+    if (result.stopReason && result.stopReason !== "end_turn") {
+      this.emitEvent("log", {
+        message: `acpx runtime completed with stop reason: ${result.stopReason}`,
+      });
+    }
+    this.finalizeTaskBestEffort(
+      assistantText || "Codex via ACP completed without a final assistant message.",
+      "acpx runtime completed",
+    );
+  }
+
+  private async sendMessageWithAcpxRuntime(
+    message: string,
+    _images?: ImageAttachment[],
+  ): Promise<void> {
+    const runner = this.getAcpxRuntimeRunner();
+    this.daemon.updateTaskStatus(this.task.id, "executing");
+    this.emitEvent("executing", { message: "Processing follow-up via Codex ACP runtime" });
+    this.emitEvent("user_message", { message });
+    await runner.ensureSession();
+    const result = await runner.prompt(message);
+    const assistantText = result.assistantText.trim();
+    if (assistantText) {
+      this.lastAssistantOutput = assistantText;
+      this.lastAssistantText = assistantText;
+      this.lastNonVerificationOutput = assistantText;
+    }
+    this.finalizeTaskBestEffort(
+      assistantText || "Codex via ACP follow-up completed without a final assistant message.",
+      "acpx follow-up completed",
+    );
+  }
+
+  private async closeAcpxRuntimeSession(reason: string): Promise<void> {
+    if (!this.isAcpxExternalRuntimeTask() || !this.acpxRuntimeRunner) return;
+    this.emitEvent("log", {
+      message: `Closing acpx session after ${reason}.`,
+    });
+    await this.acpxRuntimeRunner.closeSession();
   }
 
   private extractCapabilityGapSignalCount(toolResults: LLMToolResult[]): number {
@@ -3840,6 +3956,7 @@ ${transcript}
   private readonly logTag: string;
   private agentPolicyConfig: AgentPolicyConfig | null = null;
   private agentPolicyFilePath: string | null = null;
+  private acpxRuntimeRunner: AcpxRuntimeRunner | null = null;
 
   /** Expose workspace ID for daemon to refresh executors when permissions change. */
   getWorkspaceId(): string {
@@ -8680,6 +8797,7 @@ ${transcript}
     this.autoGenerateReport().catch(() => {
       /* best-effort */
     });
+    void this.closeAcpxRuntimeSession("completion");
   }
 
   private finalizeTaskBestEffort(
@@ -8783,6 +8901,7 @@ ${transcript}
     this.emitRunSummary(reason || "best_effort_finalized", this.task.terminalStatus || "ok");
     // Best-effort finalization — don't record as "success" in the playbook
     // since the task may have been partially completed or timed out.
+    void this.closeAcpxRuntimeSession("best-effort completion");
   }
 
   private finalizeChatTurn(reason?: string): void {
@@ -8802,6 +8921,7 @@ ${transcript}
     this.task.lifetimeTurnsUsed = this.lifetimeTurnCount;
 
     this.daemon.completeTask(this.task.id, reason || "Chat turn completed");
+    void this.closeAcpxRuntimeSession("chat completion");
   }
 
   /**
@@ -16711,6 +16831,21 @@ You are continuing a previous conversation. The context from the previous conver
         return;
       }
 
+      if (this.isAcpxExternalRuntimeTask()) {
+        try {
+          await this.executeWithAcpxRuntime(initialPrompt || this.task.prompt || "");
+          return;
+        } catch (error) {
+          if (error instanceof AcpxRuntimeUnavailableError) {
+            this.disableExternalRuntimeForFallback(
+              "acpx runtime unavailable. Falling back to CoWork native execution path.",
+            );
+          } else {
+            throw error;
+          }
+        }
+      }
+
       // Handle local slash-commands (e.g. /schedule ...) deterministically without relying on the LLM.
       // This prevents "plan-only" runs that never create the underlying cron job.
       if (await this.maybeHandleScheduleSlashCommand()) {
@@ -23009,15 +23144,15 @@ TASK / CONVERSATION HISTORY:
     contextLabel: string;
     userIntent: string;
     draft: string;
-  }): Promise<string> {
+  }): Promise<{ text: string; accepted: boolean }> {
     const draft = String(opts.draft || "").trim();
-    if (!draft) return opts.draft;
+    if (!draft) return { text: opts.draft, accepted: false };
 
     const intent = String(opts.userIntent || "")
       .trim()
       .slice(0, 5000);
 
-    const refineOnce = async (): Promise<string> => {
+    const refineOnce = async (): Promise<{ text: string; accepted: boolean }> => {
       try {
         this.checkBudgets();
         const response = await this.callLLMWithRetry(
@@ -23055,13 +23190,18 @@ TASK / CONVERSATION HISTORY:
         }
 
         const text = this.extractTextFromLLMContent(response.content).trim();
-        if (!text) return draft;
+        if (!text) return { text: draft, accepted: false };
+        if (response.stopReason !== "end_turn") {
+          return { text: draft, accepted: false };
+        }
         // If the model attempted tool calls (shouldn't happen without tools), fall back to draft.
-        if ((response.content || []).some((c: Any) => c && c.type === "tool_use")) return draft;
-        return text;
+        if ((response.content || []).some((c: Any) => c && c.type === "tool_use")) {
+          return { text: draft, accepted: false };
+        }
+        return { text, accepted: true };
       } catch (error) {
         console.warn(`${this.logTag} Quality refine failed, using draft:`, error);
-        return draft;
+        return { text: draft, accepted: false };
       }
     };
 
@@ -23114,7 +23254,10 @@ TASK / CONVERSATION HISTORY:
       }
 
       critique = this.extractTextFromLLMContent(critiqueResp.content).trim();
-      if ((critiqueResp.content || []).some((c: Any) => c && c.type === "tool_use")) {
+      if (
+        critiqueResp.stopReason !== "end_turn" ||
+        (critiqueResp.content || []).some((c: Any) => c && c.type === "tool_use")
+      ) {
         critique = "";
       }
     } catch (error) {
@@ -23170,12 +23313,17 @@ TASK / CONVERSATION HISTORY:
       }
 
       const text = this.extractTextFromLLMContent(refineResp.content).trim();
-      if (!text) return draft;
-      if ((refineResp.content || []).some((c: Any) => c && c.type === "tool_use")) return draft;
-      return text;
+      if (!text) return { text: draft, accepted: false };
+      if (
+        refineResp.stopReason !== "end_turn" ||
+        (refineResp.content || []).some((c: Any) => c && c.type === "tool_use")
+      ) {
+        return { text: draft, accepted: false };
+      }
+      return { text, accepted: true };
     } catch (error) {
       console.warn(`${this.logTag} Quality refine failed, using draft:`, error);
-      return draft;
+      return { text: draft, accepted: false };
     }
   }
 
@@ -23597,6 +23745,21 @@ TASK / CONVERSATION HISTORY:
   }
 
   private async sendMessageUnlocked(message: string, images?: ImageAttachment[]): Promise<void> {
+    if (this.isAcpxExternalRuntimeTask()) {
+      try {
+        await this.sendMessageWithAcpxRuntime(message, images);
+        return;
+      } catch (error) {
+        if (error instanceof AcpxRuntimeUnavailableError) {
+          this.disableExternalRuntimeForFallback(
+            "acpx runtime unavailable for follow-up. Falling back to CoWork native execution path.",
+          );
+        } else {
+          throw error;
+        }
+      }
+    }
+
     if (this.useUnifiedTurnLoop) {
       await this.sendMessageUnified(message, images);
       return;
@@ -25946,6 +26109,18 @@ TASK / CONVERSATION HISTORY:
     // Create a new controller for any future requests (in case of resume)
     this.abortController = new AbortController();
 
+    if (this.isAcpxExternalRuntimeTask()) {
+      try {
+        await this.getAcpxRuntimeRunner().cancel();
+      } catch (error) {
+        this.emitEvent("log", {
+          message: "Failed to cancel acpx runtime cleanly.",
+          error: String((error as Any)?.message || error),
+        });
+      }
+      await this.closeAcpxRuntimeSession(`cancel (${reason})`);
+    }
+
     this.sandboxRunner.cleanup();
   }
 
@@ -25966,6 +26141,17 @@ TASK / CONVERSATION HISTORY:
       state: "active",
       heartbeat: true,
     });
+
+    if (this.isAcpxExternalRuntimeTask()) {
+      try {
+        await this.getAcpxRuntimeRunner().cancel();
+      } catch (error) {
+        this.emitEvent("log", {
+          message: "Failed to request acpx wrap-up cleanly.",
+          error: String((error as Any)?.message || error),
+        });
+      }
+    }
 
     // Abort current in-flight LLM request so the loop picks up the flag
     this.abortController.abort();

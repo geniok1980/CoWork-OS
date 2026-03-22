@@ -207,6 +207,8 @@ export interface LLMResponse {
   usage?: {
     inputTokens: number;
     outputTokens: number;
+    /** Tokens served from the provider's prompt cache (subset of inputTokens). */
+    cachedTokens?: number;
   };
 }
 

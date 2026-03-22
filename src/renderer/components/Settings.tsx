@@ -109,6 +109,7 @@ import { DigitalTwinsPanel } from "./DigitalTwinsPanel";
 import { ImprovementSettingsPanel } from "./ImprovementSettingsPanel";
 import { CompaniesPanel } from "./CompaniesPanel";
 import { HealthPanel } from "./HealthPanel";
+import { CouncilSettings } from "./CouncilSettings";
 
 type SettingsTab =
   | "appearance"
@@ -587,7 +588,7 @@ export function Settings({
         ? "skills"
         : initialTab === "llm" || initialTab === "search"
           ? "aimodels"
-          : ["queue", "improvement", "scheduled", "hooks", "triggers"].includes(
+          : ["queue", "improvement", "scheduled", "hooks", "triggers", "council"].includes(
               initialTab as string,
             )
               ? "automations"
@@ -607,10 +608,10 @@ export function Settings({
     initialTab === "search" ? "search" : "llm",
   );
   const [activeAutomationsSubTab, setActiveAutomationsSubTab] = useState<
-    "queue" | "improvement" | "scheduled" | "hooks" | "triggers"
+    "queue" | "improvement" | "scheduled" | "hooks" | "triggers" | "council"
   >(
-    ["queue", "improvement", "scheduled", "hooks", "triggers"].includes(initialTab as string)
-      ? (initialTab as "queue" | "improvement" | "scheduled" | "hooks" | "triggers")
+    ["queue", "improvement", "scheduled", "hooks", "triggers", "council"].includes(initialTab as string)
+      ? (initialTab as "queue" | "improvement" | "scheduled" | "hooks" | "triggers" | "council")
       : "queue",
   );
   const [activeIntegrationsSubTab, setActiveIntegrationsSubTab] = useState<
@@ -4919,11 +4920,11 @@ export function Settings({
                 <div className="more-channels-header">
                   <h2>Automations</h2>
                   <p className="settings-description">
-                    Task queue, self-improvement, scheduled tasks, webhooks, and event triggers
+                    Task queue, R&D councils, self-improvement, scheduled tasks, webhooks, and event triggers
                   </p>
                 </div>
                 <div className="more-channels-tabs">
-                  {(["queue", "improvement", "scheduled", "hooks", "triggers"] as const).map(
+                  {(["queue", "council", "improvement", "scheduled", "hooks", "triggers"] as const).map(
                     (key) => (
                       <button
                         key={key}
@@ -4931,12 +4932,14 @@ export function Settings({
                         onClick={() => setActiveAutomationsSubTab(key)}
                       >
                         {key === "queue" && <ListOrdered {...S} />}
+                        {key === "council" && <Users {...S} />}
                         {key === "improvement" && <Sparkles {...S} />}
                         {key === "scheduled" && <Clock {...S} />}
                         {key === "hooks" && <Link {...S} />}
                         {key === "triggers" && <Zap {...S} />}
                         <span>
                           {key === "queue" && "Task Queue"}
+                          {key === "council" && "R&D Council"}
                           {key === "improvement" && "Self-Improve"}
                           {key === "scheduled" && "Scheduled Tasks"}
                           {key === "hooks" && "Webhooks"}
@@ -4948,6 +4951,9 @@ export function Settings({
                 </div>
                 <div className="more-channels-content">
                   {activeAutomationsSubTab === "queue" && <QueueSettings />}
+                  {activeAutomationsSubTab === "council" && (
+                    <CouncilSettings workspaceId={workspaceId} onOpenTask={onOpenTask} />
+                  )}
                   {activeAutomationsSubTab === "improvement" && (
                     <ImprovementSettingsPanel initialWorkspaceId={workspaceId} onOpenTask={onOpenTask} />
                   )}

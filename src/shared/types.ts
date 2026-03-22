@@ -1011,6 +1011,17 @@ export type AgentType = "main" | "sub" | "parallel";
 export type ConversationMode = "task" | "chat" | "hybrid" | "think";
 export type ExecutionMode = "execute" | "chat" | "plan" | "analyze" | "verified";
 export type ExecutionModeSource = "user" | "strategy" | "auto_promote";
+
+export type ExternalRuntimePermissionMode = "approve-reads" | "approve-all" | "deny-all";
+
+export interface ExternalRuntimeConfig {
+  kind: "acpx";
+  agent: "codex";
+  sessionMode: "persistent";
+  outputMode: "json";
+  permissionMode: ExternalRuntimePermissionMode;
+  ttlSeconds?: number;
+}
 export type TurnBudgetPolicy = "hard_window" | "adaptive_unbounded";
 export type VerificationArtifactPathPolicy =
   | "require_existing"
@@ -1156,6 +1167,10 @@ export interface AgentConfig {
   multiLlmMode?: boolean;
   /** Configuration for multi-LLM mode: which providers/models to use and which is the judge */
   multiLlmConfig?: MultiLlmConfig;
+  /** Mark this task as a council-triggered multi-LLM run with fixed memo synthesis requirements */
+  councilMode?: boolean;
+  /** Council run id for council-triggered collaborative tasks */
+  councilRunId?: string;
   /** Spawn an independent verification agent after task completion to audit deliverables */
   verificationAgent?: boolean;
   /**
@@ -1202,6 +1217,8 @@ export interface AgentConfig {
    * When set (and modelKey is absent), selects a model suited for the given capability.
    */
   capabilityHint?: ModelCapability;
+  /** Optional external runtime for delegated coding-agent tasks. */
+  externalRuntime?: ExternalRuntimeConfig;
   /**
    * When true, the task is a video generation task (taskDomain should also be "media").
    * Video tools are strongly preferred; unrelated workflows are suppressed.
@@ -1227,6 +1244,9 @@ export interface MultiLlmParticipant {
   modelKey: string;
   displayName: string;
   isJudge: boolean;
+  seatLabel?: string;
+  roleInstruction?: string;
+  isIdeaProposer?: boolean;
 }
 
 /** Config for multi-LLM mode: participants and judge designation */
@@ -1234,6 +1254,7 @@ export interface MultiLlmConfig {
   participants: MultiLlmParticipant[];
   judgeProviderType: LLMProviderType;
   judgeModelKey: string;
+  maxParallelParticipants?: number;
 }
 
 export interface Task {
@@ -3116,6 +3137,127 @@ export interface StandupReport {
   createdAt: number;
 }
 
+export type CronSchedule =
+  | { kind: "at"; atMs: number }
+  | { kind: "every"; everyMs: number; anchorMs?: number }
+  | { kind: "cron"; expr: string; tz?: string };
+
+export interface CouncilParticipant {
+  providerType: LLMProviderType;
+  modelKey: string;
+  seatLabel: string;
+  roleInstruction?: string;
+}
+
+export interface CouncilFileSource {
+  path: string;
+  label?: string;
+}
+
+export interface CouncilUrlSource {
+  url: string;
+  label?: string;
+}
+
+export interface CouncilConnectorSource {
+  provider: string;
+  label: string;
+  resourceId?: string;
+  notes?: string;
+}
+
+export interface CouncilSourceBundle {
+  files: CouncilFileSource[];
+  urls: CouncilUrlSource[];
+  connectors: CouncilConnectorSource[];
+}
+
+export interface CouncilDeliveryConfig {
+  enabled: boolean;
+  channelType?: ChannelType;
+  channelDbId?: string;
+  channelId?: string;
+}
+
+export interface CouncilExecutionPolicy {
+  mode: "auto" | "full_parallel" | "capped_local";
+  maxParallelParticipants?: number;
+}
+
+export interface CouncilConfig {
+  id: string;
+  workspaceId: string;
+  name: string;
+  enabled: boolean;
+  schedule: CronSchedule;
+  participants: CouncilParticipant[];
+  judgeSeatIndex: number;
+  rotatingIdeaSeatIndex: number;
+  sourceBundle: CouncilSourceBundle;
+  deliveryConfig: CouncilDeliveryConfig;
+  executionPolicy: CouncilExecutionPolicy;
+  managedCronJobId?: string;
+  nextIdeaSeatIndex: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateCouncilConfigRequest {
+  workspaceId: string;
+  name: string;
+  enabled?: boolean;
+  schedule: CronSchedule;
+  participants: CouncilParticipant[];
+  judgeSeatIndex: number;
+  rotatingIdeaSeatIndex?: number;
+  sourceBundle?: Partial<CouncilSourceBundle>;
+  deliveryConfig?: Partial<CouncilDeliveryConfig>;
+  executionPolicy?: Partial<CouncilExecutionPolicy>;
+}
+
+export interface UpdateCouncilConfigRequest {
+  id: string;
+  name?: string;
+  enabled?: boolean;
+  schedule?: import("../electron/cron/types").CronSchedule;
+  participants?: CouncilParticipant[];
+  judgeSeatIndex?: number;
+  rotatingIdeaSeatIndex?: number;
+  sourceBundle?: CouncilSourceBundle;
+  deliveryConfig?: CouncilDeliveryConfig;
+  executionPolicy?: CouncilExecutionPolicy;
+  managedCronJobId?: string | null;
+  nextIdeaSeatIndex?: number;
+}
+
+export interface CouncilRun {
+  id: string;
+  councilConfigId: string;
+  workspaceId: string;
+  taskId?: string;
+  status: "running" | "completed" | "failed";
+  proposerSeatIndex: number;
+  summary?: string;
+  error?: string;
+  memoId?: string;
+  sourceSnapshot: CouncilSourceBundle;
+  startedAt: number;
+  completedAt?: number;
+}
+
+export interface CouncilMemo {
+  id: string;
+  councilRunId: string;
+  councilConfigId: string;
+  workspaceId: string;
+  taskId?: string;
+  proposerSeatIndex: number;
+  content: string;
+  delivered: boolean;
+  deliveryError?: string;
+  createdAt: number;
+}
+
 /**
  * Result from a heartbeat check
  */
@@ -3715,6 +3857,17 @@ export const IPC_CHANNELS = {
   STANDUP_GET_LATEST: "standup:getLatest",
   STANDUP_LIST: "standup:list",
   STANDUP_DELIVER: "standup:deliver",
+
+  // R&D Council
+  COUNCIL_LIST: "council:list",
+  COUNCIL_GET: "council:get",
+  COUNCIL_CREATE: "council:create",
+  COUNCIL_UPDATE: "council:update",
+  COUNCIL_DELETE: "council:delete",
+  COUNCIL_RUN_NOW: "council:runNow",
+  COUNCIL_LIST_RUNS: "council:listRuns",
+  COUNCIL_GET_MEMO: "council:getMemo",
+  COUNCIL_SET_ENABLED: "council:setEnabled",
 
   // Mission Control - Company Ops / Planner
   MC_COMPANY_LIST: "missionControl:companyList",

@@ -40,6 +40,7 @@ import { BoxTools } from "./box-tools";
 import { OneDriveTools } from "./onedrive-tools";
 import { GoogleDriveTools } from "./google-drive-tools";
 import { GmailTools } from "./gmail-tools";
+import { MailboxTools } from "./mailbox-tools";
 import { GoogleCalendarTools } from "./google-calendar-tools";
 import { AppleCalendarTools } from "./apple-calendar-tools";
 import { AppleRemindersTools } from "./apple-reminders-tools";
@@ -98,6 +99,8 @@ import { InfraSettingsManager } from "../../infra/infra-settings";
 import { KnowledgeGraphTools } from "./knowledge-graph-tools";
 import { ScrapingTools } from "./scraping-tools";
 import { DocumentTools } from "./document-tools";
+import { ComputerUseTools } from "./computer-use-tools";
+import { BatchImageTools } from "./batch-image-tools";
 import { ScratchpadTools } from "./scratchpad-tools";
 import { QATools } from "./qa-tools";
 import { CitationTracker } from "../citation/CitationTracker";
@@ -430,6 +433,8 @@ export class ToolRegistry {
   private videoTools: VideoTools;
   private visionTools: VisionTools;
   private systemTools: SystemTools;
+  private computerUseTools: ComputerUseTools;
+  private batchImageTools: BatchImageTools;
   private cronTools: CronTools;
   private canvasTools: CanvasTools;
   private visualTools: VisualTools;
@@ -440,6 +445,7 @@ export class ToolRegistry {
   private oneDriveTools: OneDriveTools;
   private googleDriveTools: GoogleDriveTools;
   private gmailTools: GmailTools;
+  private mailboxTools?: MailboxTools;
   private googleCalendarTools: GoogleCalendarTools;
   private appleCalendarTools: AppleCalendarTools;
   private appleRemindersTools: AppleRemindersTools;
@@ -491,6 +497,8 @@ export class ToolRegistry {
     this.videoTools = new VideoTools(workspace, daemon, taskId);
     this.visionTools = new VisionTools(workspace, daemon, taskId);
     this.systemTools = new SystemTools(workspace, daemon, taskId);
+    this.computerUseTools = new ComputerUseTools(workspace, daemon, taskId);
+    this.batchImageTools = new BatchImageTools(workspace, daemon, taskId);
     this.cronTools = new CronTools(workspace, daemon, taskId);
     this.canvasTools = new CanvasTools(workspace, daemon, taskId);
     this.visualTools = new VisualTools(workspace, daemon, taskId);
@@ -523,6 +531,7 @@ export class ToolRegistry {
       const db = dbGetter.call(daemon);
       this.channelTools = new ChannelTools(db, daemon, taskId);
       this.emailImapTools = new EmailImapTools(db, daemon, taskId);
+      this.mailboxTools = new MailboxTools(workspace, daemon, taskId, db);
     }
     this.gatewayContext = gatewayContext;
     this.applyToolRestrictions(toolRestrictions);
@@ -916,6 +925,8 @@ export class ToolRegistry {
     this.videoTools.setWorkspace(workspace);
     this.visionTools.setWorkspace(workspace);
     this.systemTools.setWorkspace(workspace);
+    this.computerUseTools.setWorkspace(workspace);
+    this.batchImageTools.setWorkspace(workspace);
     this.cronTools.setWorkspace(workspace);
     this.canvasTools.setWorkspace(workspace);
     this.visualTools.setWorkspace(workspace);
@@ -925,6 +936,7 @@ export class ToolRegistry {
     this.oneDriveTools.setWorkspace(workspace);
     this.googleDriveTools.setWorkspace(workspace);
     this.gmailTools.setWorkspace(workspace);
+    this.mailboxTools?.setWorkspace(workspace);
     this.googleCalendarTools.setWorkspace(workspace);
     this.appleCalendarTools.setWorkspace(workspace);
     this.appleRemindersTools.setWorkspace(workspace);
@@ -1058,6 +1070,9 @@ export class ToolRegistry {
     if (GmailTools.isEnabled()) {
       allTools.push(...this.getGmailToolDefinitions());
     }
+    if (this.mailboxTools?.isAvailable()) {
+      allTools.push(...this.getMailboxToolDefinitions());
+    }
     if (GoogleCalendarTools.isEnabled()) {
       allTools.push(...this.getGoogleCalendarToolDefinitions());
     }
@@ -1103,6 +1118,12 @@ export class ToolRegistry {
 
     // Always add system tools (they enable broader system interaction)
     allTools.push(...SystemTools.getToolDefinitions({ headless }));
+
+    // Computer use tools (native mouse/keyboard/screenshot — macOS only, not headless)
+    allTools.push(...ComputerUseTools.getToolDefinitions({ headless }));
+
+    // Batch image processing tools
+    allTools.push(...BatchImageTools.getToolDefinitions());
 
     // Always add cron/scheduling tools (enables task scheduling)
     allTools.push(...CronTools.getToolDefinitions());
@@ -2198,6 +2219,12 @@ ${skillDescriptions}`;
 
     // Gmail tools
     if (name === "gmail_action") return await this.gmailTools.executeAction(input);
+    if (name === "mailbox_action") {
+      if (!this.mailboxTools) {
+        throw new Error("Mailbox tools unavailable (database not accessible)");
+      }
+      return await this.mailboxTools.executeAction(input);
+    }
 
     // Google Calendar tools
     if (name === "calendar_action") return await this.googleCalendarTools.executeAction(input);
@@ -2255,6 +2282,30 @@ ${skillDescriptions}`;
     if (name === "get_env") return await this.systemTools.getEnvVariable(input.name);
     if (name === "get_app_paths") return this.systemTools.getAppPaths();
     if (name === "run_applescript") return await this.systemTools.runAppleScript(input.script);
+
+    // Computer use tools (CUA)
+    if (name === "computer_screenshot") return await this.computerUseTools.takeScreenshot();
+    if (name === "computer_move_mouse")
+      return await this.computerUseTools.moveMouse(input.x, input.y);
+    if (name === "computer_click") {
+      if (input.action === "drag") {
+        return await this.computerUseTools.drag(input.x, input.y, input.toX, input.toY);
+      }
+      if (input.action === "scroll") {
+        return await this.computerUseTools.scroll(
+          input.x,
+          input.y,
+          input.direction,
+          input.amount,
+        );
+      }
+      return await this.computerUseTools.click(input.x, input.y, input.button, input.clickType);
+    }
+    if (name === "computer_type") return await this.computerUseTools.typeText(input.text);
+    if (name === "computer_key") return await this.computerUseTools.pressKeys(input.keys);
+
+    // Batch image processing
+    if (name === "batch_image_process") return await this.batchImageTools.batchProcess(input);
 
     // Cron/scheduling tools
     if (name === "schedule_task") return await this.cronTools.executeAction(input);
@@ -3056,6 +3107,7 @@ ${skillDescriptions}`;
       this.taskId,
       skill_id,
     );
+    const workspaceArtifactDir = path.join(this.workspace.path, "artifacts");
     try {
       if (!fs.existsSync(artifactDir)) {
         await fsPromises.mkdir(artifactDir, { recursive: true });
@@ -3110,7 +3162,10 @@ ${skillDescriptions}`;
     }
 
     // Expand the skill prompt with provided parameters
-    const expandedPrompt = skillLoader.expandPrompt(skill, parameters, { artifactDir });
+    const expandedPrompt = skillLoader.expandPrompt(skill, parameters, {
+      artifactDir,
+      workspaceArtifactDir,
+    });
 
     // Log the skill invocation
     this.daemon.logEvent(this.taskId, "log", {
@@ -5200,8 +5255,8 @@ ${skillDescriptions}`;
       {
         name: "gmail_action",
         description:
-          "Use the connected Gmail account to search, read, and send messages. " +
-          "Write actions (send/trash) require user approval.",
+          "Use the connected Gmail account to search, read, draft, label, archive, and send messages. " +
+          "Write actions require user approval.",
         input_schema: {
           type: "object",
           properties: {
@@ -5213,7 +5268,12 @@ ${skillDescriptions}`;
                 "get_message",
                 "get_thread",
                 "list_labels",
+                "create_draft",
                 "send_message",
+                "reply_to_thread",
+                "archive_thread",
+                "modify_thread_labels",
+                "batch_modify_messages",
                 "trash_message",
               ],
               description: "Action to perform",
@@ -5245,7 +5305,8 @@ ${skillDescriptions}`;
             },
             thread_id: {
               type: "string",
-              description: "Thread ID (for get_thread/send_message)",
+              description:
+                "Thread ID (for get_thread/send_message/create_draft/reply_to_thread/archive_thread/modify_thread_labels)",
             },
             format: {
               type: "string",
@@ -5280,6 +5341,115 @@ ${skillDescriptions}`;
             raw: {
               type: "string",
               description: "Base64url encoded RFC 2822 message (for send_message)",
+            },
+            label_ids_add: {
+              type: "array",
+              items: { type: "string" },
+              description: "Label IDs to add (for modify_thread_labels/batch_modify_messages)",
+            },
+            label_ids_remove: {
+              type: "array",
+              items: { type: "string" },
+              description: "Label IDs to remove (for modify_thread_labels/batch_modify_messages)",
+            },
+            message_ids: {
+              type: "array",
+              items: { type: "string" },
+              description: "Message IDs for batch_modify_messages",
+            },
+          },
+          required: ["action"],
+        },
+      },
+    ];
+  }
+
+  private getMailboxToolDefinitions(): LLMTool[] {
+    return [
+      {
+        name: "mailbox_action",
+        description:
+          "Unified Inbox Agent workflow over Gmail or IMAP mailboxes: sync, score threads, summarize, draft replies, extract commitments, review bulk cleanup/follow-ups, and apply approved actions.",
+        input_schema: {
+          type: "object",
+          properties: {
+            action: {
+              type: "string",
+              enum: [
+                "sync",
+                "list_threads",
+                "get_thread",
+                "summarize_thread",
+                "generate_draft",
+                "extract_commitments",
+                "propose_cleanup",
+                "propose_followups",
+                "schedule_reply",
+                "research_contact",
+                "apply_action",
+                "review_bulk_action",
+              ],
+              description: "Mailbox workflow action to perform",
+            },
+            thread_id: {
+              type: "string",
+              description: "Mailbox thread ID for thread-scoped actions",
+            },
+            query: {
+              type: "string",
+              description: "Text search against subject/snippet when listing threads",
+            },
+            category: {
+              type: "string",
+              description: "Optional category filter for list_threads",
+            },
+            needs_reply: {
+              type: "boolean",
+              description: "Filter list_threads to reply-needed threads",
+            },
+            cleanup_candidate: {
+              type: "boolean",
+              description: "Filter list_threads to cleanup candidates",
+            },
+            limit: {
+              type: "number",
+              description: "Max results to return",
+            },
+            tone: {
+              type: "string",
+              enum: ["concise", "warm", "direct", "executive"],
+              description: "Draft tone for generate_draft",
+            },
+            include_availability: {
+              type: "boolean",
+              description: "Include availability suggestions in generated drafts",
+            },
+            proposal_id: {
+              type: "string",
+              description: "Proposal ID for apply_action",
+            },
+            draft_id: {
+              type: "string",
+              description: "Draft ID for send_draft mailbox actions",
+            },
+            type: {
+              type: "string",
+              enum: [
+                "cleanup",
+                "follow_up",
+                "archive",
+                "trash",
+                "mark_read",
+                "label",
+                "send_draft",
+                "schedule_event",
+                "dismiss_proposal",
+              ],
+              description: "Subtype for review_bulk_action or apply_action",
+            },
+            label: {
+              type: "string",
+              description: "Label to apply during mailbox label actions",
             },
           },
           required: ["action"],

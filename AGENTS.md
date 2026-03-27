@@ -34,3 +34,9 @@ When a user reports a failure, error, or unexpected behavior:
 - On macOS, `npm run build:healthkit-bridge` attempts an Xcode app build first and falls back to SwiftPM packaging if the app bundle is not produced.
 - For macOS signing/provisioning overrides during `build:healthkit-bridge`, use `COWORK_HEALTHKIT_DEVELOPMENT_TEAM` and `COWORK_HEALTHKIT_PROVISIONING_PROFILE` if needed.
 - `build:healthkit-bridge` also accepts `DEVELOPMENT_TEAM` and `HEALTHKIT_BRIDGE_PROVISIONING_PROFILE` as fallback environment variable names.
+
+## QA and Reliability Commands
+
+- Use `npm run skills:check` before test/merge when touching bundled skills; it runs routing/content/audit/eval quality gates.
+- Use `npm run qa:eval:run` to replay the eval suite, and `npm run qa:reliability` for the combined eval + battery loop.
+- Use `npm run qa:timeline:backfill -- --db /absolute/path/to.db` then `npm run qa:timeline:enforce -- --db /absolute/path/to.db` when validating timeline completion telemetry changes.

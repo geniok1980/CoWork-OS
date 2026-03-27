@@ -99,6 +99,21 @@ function resolveSkillLucideIcon(emoji: string): ComponentType<LucideProps> {
   return getEmojiIcon(emoji) || Zap;
 }
 
+const TOOL_FRIENDLY_LABELS: Record<string, string> = {
+  glob: "Search for files",
+  grep: "Search code",
+  read: "Read file",
+  edit: "Edit file",
+  write: "Write file",
+  bash: "Run command",
+  agent: "Delegate to sub-agent",
+  web_fetch: "Fetch web page",
+  web_search: "Search the web",
+  todo_write: "Update task list",
+  use_skill: "Run skill",
+  request_user_input: "Collect details from you",
+};
+
 /**
  * Strips technical tool-call language from LLM-generated plan step descriptions.
  * Converts e.g. "Use the `use_skill` tool with skill ID `novelist`..." into
@@ -127,6 +142,13 @@ function humanizeStepDescription(description: string): string {
     const rest = description.replace(/use\s+request_user_input\s+(to\s+)?/i, "").trim();
     const clean = rest.replace(/`[^`]+`/g, "").trim();
     return clean.length > 4 ? capitalize(clean) : "Collect details from you";
+  }
+
+  // Detect raw tool-call text leaking into descriptions: "to=glob 】【..." or "assistant to=read ..."
+  const rawToolCallMatch = description.match(/^\s*(?:assistant\s+)?to=([a-z_][\w-]*)\b/i);
+  if (rawToolCallMatch) {
+    const toolName = rawToolCallMatch[1].toLowerCase();
+    return TOOL_FRIENDLY_LABELS[toolName] ?? capitalize(toolName.replace(/_/g, " "));
   }
 
   // Strip any remaining backtick-wrapped tool names from descriptions
@@ -641,7 +663,7 @@ export function RightPanel({
                       {getStatusIndicator(step.status)}
                     </span>
                     <span className="cli-progress-text" title={step.description}>
-                      {humanizeStepDescription(step.description)}
+                      {humanizeStepDescription(step.description) || `Step ${index + 1}`}
                     </span>
                   </div>
                 ))}

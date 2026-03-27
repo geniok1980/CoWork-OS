@@ -4767,7 +4767,7 @@ ${transcript}
   private async callLLMWithRetry(
     requestFn: (attempt: number) => Promise<Any>,
     operation: string,
-    maxRetries = 3,
+    maxRetries = 5,
   ): Promise<Any> {
     const llmCallId = ++this.llmCallSequence;
     console.log(

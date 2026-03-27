@@ -186,7 +186,12 @@ export function normalizeWhatsAppNaturalCommand(text: string): string | undefine
     return "/newtask";
   }
 
-  if (/^(?:start|start the bot|start app|begin|launch|boot)\b/i.test(normalized)) {
+  // Only convert to /start for unambiguous bot-start phrases.
+  // Do NOT match generic task sentences like "Start the dev server..." or "Start the cowork os app...".
+  if (
+    /^start$/i.test(normalized) ||
+    /^(?:start the bot|start the assistant|start cowork|start app)\s*$/i.test(normalized)
+  ) {
     return "/start";
   }
 

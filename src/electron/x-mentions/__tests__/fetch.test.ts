@@ -68,4 +68,16 @@ describe("fetchMentionsWithRetry", () => {
       expect.objectContaining({ code: "cli" }),
     );
   });
+
+  it("does not log a timeout retry warning when the retry exposes an auth failure", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    runBirdCommandMock
+      .mockRejectedValueOnce(new Error("Timeout: Unspecified"))
+      .mockRejectedValueOnce(new Error("Command failed: bird --cookie-source chrome: Missing auth_token"));
+
+    await expect(fetchMentionsWithRetry(settings, 25)).rejects.toThrow(/Missing auth_token/);
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+  });
 });

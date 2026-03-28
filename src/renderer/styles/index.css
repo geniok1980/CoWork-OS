@@ -5911,7 +5911,10 @@ a,
 
 .event-details.event-details-file-preview {
   font-family: var(--font-ui);
-  padding: 10px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 0;
   min-width: 0;
   overflow: hidden;
 }

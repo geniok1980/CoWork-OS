@@ -156,7 +156,10 @@ import { testGoogleWorkspaceConnection } from "../utils/google-workspace-api";
 import { testDropboxConnection } from "../utils/dropbox-api";
 import { testSharePointConnection } from "../utils/sharepoint-api";
 import { startConnectorOAuth } from "../mcp/oauth/connector-oauth";
-import { startGoogleWorkspaceOAuth } from "../utils/google-workspace-oauth";
+import {
+  startGoogleWorkspaceOAuth,
+  startGoogleWorkspaceOAuthGetLink,
+} from "../utils/google-workspace-oauth";
 
 import { XSettingsManager } from "../settings/x-manager";
 import { testXConnection, checkBirdInstalled } from "../utils/x-cli";
@@ -1651,9 +1654,19 @@ export async function setupIpcHandlers(
     return mailboxService.listThreads({
       query: typeof data?.query === "string" ? data.query : undefined,
       category: typeof data?.category === "string" ? data.category : "all",
+      mailboxView:
+        data?.mailboxView === "sent" || data?.mailboxView === "all" || data?.mailboxView === "inbox"
+          ? data.mailboxView
+          : undefined,
+      unreadOnly: typeof data?.unreadOnly === "boolean" ? data.unreadOnly : undefined,
       needsReply: typeof data?.needsReply === "boolean" ? data.needsReply : undefined,
+      hasSuggestedProposal:
+        typeof data?.hasSuggestedProposal === "boolean" ? data.hasSuggestedProposal : undefined,
+      hasOpenCommitment:
+        typeof data?.hasOpenCommitment === "boolean" ? data.hasOpenCommitment : undefined,
       cleanupCandidate:
         typeof data?.cleanupCandidate === "boolean" ? data.cleanupCandidate : undefined,
+      sortBy: data?.sortBy === "recent" ? "recent" : data?.sortBy === "priority" ? "priority" : undefined,
       limit: typeof data?.limit === "number" ? data.limit : undefined,
     });
   });
@@ -1729,6 +1742,30 @@ export async function setupIpcHandlers(
       );
     },
   );
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_RECLASSIFY_THREAD, async (_, data?: Any) => {
+    const threadId = typeof data?.threadId === "string" ? data.threadId : undefined;
+    if (!threadId) {
+      throw new Error("Missing threadId for mailbox thread reclassification");
+    }
+    return mailboxService.reclassifyThread(threadId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_RECLASSIFY_ACCOUNT, async (_, data?: Any) => {
+    const accountId = typeof data?.accountId === "string" ? data.accountId : undefined;
+    const threadId = typeof data?.threadId === "string" ? data.threadId : undefined;
+    const scope =
+      data?.scope === "thread" || data?.scope === "account" || data?.scope === "backfill"
+        ? data.scope
+        : undefined;
+    const limit = typeof data?.limit === "number" ? data.limit : undefined;
+    return mailboxService.reclassifyAccount({
+      accountId,
+      threadId,
+      scope,
+      limit,
+    });
+  });
 
   // Workspace handlers
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_CREATE, async (_, data) => {
@@ -3240,6 +3277,33 @@ export async function setupIpcHandlers(
   ipcMain.handle(IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_START, async (_, payload) => {
     checkRateLimit(IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_START);
     return startGoogleWorkspaceOAuth(payload);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_GET_LINK, async (_, payload) => {
+    checkRateLimit(IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_GET_LINK);
+    const url = await startGoogleWorkspaceOAuthGetLink(
+      payload,
+      async (result) => {
+        // Tokens arrive in the background after the user completes auth in their browser.
+        // Merge into existing settings so other fields (clientId, scopes, etc.) are preserved.
+        const existing = await GoogleWorkspaceSettingsManager.loadSettings();
+        const tokenExpiresAt = result.expiresIn
+          ? Date.now() + result.expiresIn * 1000
+          : existing.tokenExpiresAt;
+        await GoogleWorkspaceSettingsManager.saveSettings({
+          ...existing,
+          enabled: true,
+          accessToken: result.accessToken,
+          refreshToken: result.refreshToken ?? existing.refreshToken,
+          tokenExpiresAt,
+          scopes: result.scopes ?? existing.scopes,
+        });
+      },
+      (err) => {
+        logger.error("Google Workspace OAuth (copy-link) failed:", err.message);
+      },
+    );
+    return { url };
   });
 
   // Dropbox Settings handlers

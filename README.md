@@ -37,6 +37,7 @@
 
 - **30+ LLM providers** — Anthropic, OpenAI, Google, Ollama, AWS Bedrock, OpenRouter, and more. Bring your own keys.
 - **15 messaging channels** — WhatsApp, Telegram, Discord, Slack, Teams, iMessage, Signal, X, and more. Chat with your AI from anywhere.
+- **Inbox Agent** — local-first email triage with AI classification, action-needed / suggested-actions / commitments views, draft handling, follow-up creation, and background sync.
 - **139 built-in skills** — Documents, code review, web search, image generation, cloud integrations, game development, mobile development, financial analysis, infrastructure-as-code, and more.
 - **Digital Twin Personas** — Pre-built AI twins for every role (engineer, manager, PM, director). Heartbeat v3 keeps them cheap by default: deterministic Pulse checks run quietly, and Dispatch escalates only when signals, cadence, or manual intervention justify visible work.
 - **Zero-Human Company Ops** — Configure CoWork OS as a founder-directed autonomous company shell with venture workspace kits, a dedicated Companies tab, persistent operator twins, strategic planner loops, and Mission Control ops monitoring.
@@ -178,6 +179,17 @@ Agent-driven visual workspace for interactive HTML/CSS/JS content, data visualiz
 ### Multichannel Gateway
 
 Unified AI gateway across 15 channels with security modes, rate limiting, ambient mode, scheduled tasks, and chat commands. [Learn more](docs/channels.md)
+
+### Inbox Agent
+
+Local-first inbox workspace that turns email into an action queue. It keeps cached mail visible on restart, syncs in the background, and surfaces the right next step for each thread: triage, draft, cleanup, commitment tracking, and scheduling. [Learn more](docs/inbox-agent.md)
+
+- **Action cards**: Unread, Action Needed, Suggested Actions, Open Commitments
+- **Mailbox views**: Inbox, Sent, All, plus Recent/Priority sorting
+- **Workflow buttons**: Cleanup, Follow-up, Prep thread, Extract todos, Schedule, Refresh intel
+- **Draft handling**: Send or discard generated replies before anything is posted externally
+- **Commitment tracking**: Accept commitments into real follow-up tasks, then mark them done or dismiss them
+- **Background sync**: Load from the local database immediately and refresh in the background without blanking the inbox on restart
 
 ### Infrastructure
 

@@ -2125,12 +2125,16 @@ export interface PdfReviewPageSummary {
   truncated: boolean;
 }
 
+export type PdfReviewExtractionMode = "native" | "ocrmypdf" | "page-ocr" | "fallback";
+
 export interface PdfReviewSummary {
   pageCount: number;
   nativeTextPages: number;
   ocrPages: number;
   scannedPages: number;
   truncatedPages: boolean;
+  extractionMode?: PdfReviewExtractionMode;
+  imageHeavy?: boolean;
   pages: PdfReviewPageSummary[];
 }
 
@@ -3864,6 +3868,8 @@ export const IPC_CHANNELS = {
   MAILBOX_RESEARCH_CONTACT: "mailbox:researchContact",
   MAILBOX_APPLY_ACTION: "mailbox:applyAction",
   MAILBOX_UPDATE_COMMITMENT_STATE: "mailbox:updateCommitmentState",
+  MAILBOX_RECLASSIFY_THREAD: "mailbox:reclassifyThread",
+  MAILBOX_RECLASSIFY_ACCOUNT: "mailbox:reclassifyAccount",
 
   // Sub-Agent / Parallel Agent operations
   AGENT_GET_CHILDREN: "agent:getChildren", // Get child tasks for a parent
@@ -4209,6 +4215,7 @@ export const IPC_CHANNELS = {
   GOOGLE_WORKSPACE_TEST_CONNECTION: "googleWorkspace:testConnection",
   GOOGLE_WORKSPACE_GET_STATUS: "googleWorkspace:getStatus",
   GOOGLE_WORKSPACE_OAUTH_START: "googleWorkspace:oauthStart",
+  GOOGLE_WORKSPACE_OAUTH_GET_LINK: "googleWorkspace:oauthGetLink",
 
   // Dropbox Settings
   DROPBOX_GET_SETTINGS: "dropbox:getSettings",
@@ -5286,6 +5293,8 @@ export interface GoogleWorkspaceSettingsData {
   tokenExpiresAt?: number;
   scopes?: string[];
   timeoutMs?: number;
+  /** Email address hint passed to Google's OAuth screen to pre-select the correct account */
+  loginHint?: string;
 }
 
 export interface GoogleWorkspaceConnectionTestResult {

@@ -70,6 +70,8 @@ import type {
   MailboxDraftOptions,
   MailboxDraftSuggestion,
   MailboxListThreadsInput,
+  MailboxReclassifyInput,
+  MailboxReclassifyResult,
   MailboxResearchResult,
   MailboxSummaryCard,
   MailboxSyncResult,
@@ -302,6 +304,8 @@ const IPC_CHANNELS = {
   MAILBOX_RESEARCH_CONTACT: "mailbox:researchContact",
   MAILBOX_APPLY_ACTION: "mailbox:applyAction",
   MAILBOX_UPDATE_COMMITMENT_STATE: "mailbox:updateCommitmentState",
+  MAILBOX_RECLASSIFY_THREAD: "mailbox:reclassifyThread",
+  MAILBOX_RECLASSIFY_ACCOUNT: "mailbox:reclassifyAccount",
   TASK_EVENT: "task:event",
   TASK_EVENTS: "task:events",
   TASK_SEMANTIC_TIMELINE: "task:semanticTimeline",
@@ -401,6 +405,7 @@ const IPC_CHANNELS = {
   GOOGLE_WORKSPACE_TEST_CONNECTION: "googleWorkspace:testConnection",
   GOOGLE_WORKSPACE_GET_STATUS: "googleWorkspace:getStatus",
   GOOGLE_WORKSPACE_OAUTH_START: "googleWorkspace:oauthStart",
+  GOOGLE_WORKSPACE_OAUTH_GET_LINK: "googleWorkspace:oauthGetLink",
   // Dropbox Settings
   DROPBOX_GET_SETTINGS: "dropbox:getSettings",
   DROPBOX_SAVE_SETTINGS: "dropbox:saveSettings",
@@ -2457,6 +2462,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     commitmentId: string,
     state: MailboxCommitmentState,
   ) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_UPDATE_COMMITMENT_STATE, { commitmentId, state }),
+  reclassifyMailboxThread: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_RECLASSIFY_THREAD, { threadId }) as Promise<MailboxReclassifyResult>,
+  reclassifyMailboxAccount: (input: MailboxReclassifyInput) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_RECLASSIFY_ACCOUNT, input) as Promise<MailboxReclassifyResult>,
 
   // Shell APIs
   openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
@@ -2702,7 +2711,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     clientId: string;
     clientSecret?: string;
     scopes?: string[];
+    loginHint?: string;
   }) => ipcRenderer.invoke(IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_START, payload),
+  getGoogleWorkspaceOAuthLink: (payload: {
+    clientId: string;
+    clientSecret?: string;
+    scopes?: string[];
+    loginHint?: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.GOOGLE_WORKSPACE_OAUTH_GET_LINK, payload),
 
   // Dropbox Settings APIs
   getDropboxSettings: () => ipcRenderer.invoke(IPC_CHANNELS.DROPBOX_GET_SETTINGS),
@@ -4076,6 +4092,8 @@ export interface ElectronAPI {
     commitmentId: string,
     state: MailboxCommitmentState,
   ) => Promise<MailboxCommitment | null>;
+  reclassifyMailboxThread: (threadId: string) => Promise<MailboxReclassifyResult>;
+  reclassifyMailboxAccount: (input: MailboxReclassifyInput) => Promise<MailboxReclassifyResult>;
   openExternal: (url: string) => Promise<void>;
   openSystemSettings: (
     target: "microphone" | "dictation",
@@ -4420,6 +4438,7 @@ export interface ElectronAPI {
     clientId: string;
     clientSecret?: string;
     scopes?: string[];
+    loginHint?: string;
   }) => Promise<{
     accessToken: string;
     refreshToken?: string;
@@ -4427,6 +4446,12 @@ export interface ElectronAPI {
     tokenType?: string;
     scopes?: string[];
   }>;
+  getGoogleWorkspaceOAuthLink: (payload: {
+    clientId: string;
+    clientSecret?: string;
+    scopes?: string[];
+    loginHint?: string;
+  }) => Promise<{ url: string }>;
   // Dropbox Settings
   getDropboxSettings: () => Promise<{
     enabled: boolean;

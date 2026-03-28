@@ -81,15 +81,25 @@ export async function fetchMentionsWithRetry(
     if (retryFetchCount === primaryFetchCount && retryTimeoutMs === primaryTimeoutMs) {
       throw error;
     }
-
-    console.warn(
-      `[X Mentions] Mention fetch timed out (n=${primaryFetchCount}, timeout=${primaryTimeoutMs}ms). ` +
-        `Retrying with n=${retryFetchCount}, timeout=${retryTimeoutMs}ms`,
-    );
-
-    return runBirdCommand(settings, ["mentions", "-n", String(retryFetchCount)], {
-      json: true,
-      timeoutMs: retryTimeoutMs,
-    });
+    try {
+      const retryResult = await runBirdCommand(settings, ["mentions", "-n", String(retryFetchCount)], {
+        json: true,
+        timeoutMs: retryTimeoutMs,
+      });
+      console.warn(
+        `[X Mentions] Mention fetch timed out (n=${primaryFetchCount}, timeout=${primaryTimeoutMs}ms). ` +
+          `Retrying with n=${retryFetchCount}, timeout=${retryTimeoutMs}ms`,
+      );
+      return retryResult;
+    } catch (retryError) {
+      const retryFailure = classifyXMentionFailure(retryError);
+      if (retryFailure.code === "timeout") {
+        console.warn(
+          `[X Mentions] Mention fetch timed out (n=${primaryFetchCount}, timeout=${primaryTimeoutMs}ms). ` +
+            `Retrying with n=${retryFetchCount}, timeout=${retryTimeoutMs}ms`,
+        );
+      }
+      throw retryError;
+    }
   }
 }

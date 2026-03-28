@@ -486,6 +486,16 @@ DOCUMENT CREATION BEST PRACTICES:
         publishDate: "2026-02-26",
         timestamp: Date.now(),
       },
+      {
+        tool: "web_search",
+        url: "https://www.reddit.com/r/AI_Agents/comments/demo",
+        timestamp: Date.now(),
+      },
+      {
+        tool: "web_search",
+        url: "https://x.com/openai/status/123",
+        timestamp: Date.now(),
+      },
     ];
 
     await (executor as Any).execute();
@@ -498,6 +508,76 @@ DOCUMENT CREATION BEST PRACTICES:
         error: expect.stringContaining("missing source validation"),
       }),
     );
+  });
+
+  it("does not complete Daily AI Agent Trends reports when Reddit, X, and tech news coverage is incomplete", async () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt:
+        "Research the latest AI agent trends from the last day and summarize key launches and funding updates.",
+      lastOutput:
+        "Major releases include Gemini 2.0 and Copilot Marketplace. Funding surged to $2.5B this quarter.",
+      planStepDescription: "Summarize latest AI agent releases and funding trends",
+    });
+
+    (executor as Any).webEvidenceMemory = [
+      {
+        tool: "web_fetch",
+        url: "https://example.com/ai-news",
+        publishDate: "2026-02-26",
+        timestamp: Date.now(),
+      },
+      {
+        tool: "web_search",
+        url: "https://www.reddit.com/r/AI_Agents/comments/demo",
+        timestamp: Date.now(),
+      },
+    ];
+
+    await (executor as Any).execute();
+
+    expect(executor.daemon.completeTask).not.toHaveBeenCalled();
+    expect(executor.daemon.updateTask).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("missing source coverage"),
+      }),
+    );
+  });
+
+  it("allows Daily AI Agent Trends reports when Reddit, X, and tech news coverage are all present", async () => {
+    const executor = createExecuteHarness({
+      title: "Daily AI Agent Trends Research",
+      prompt:
+        "Research the latest AI agent trends from the last day and summarize key launches and funding updates.",
+      lastOutput:
+        "Major releases include Gemini 2.0 and Copilot Marketplace. Funding surged to $2.5B this quarter.",
+      planStepDescription: "Summarize latest AI agent releases and funding trends",
+    });
+
+    (executor as Any).webEvidenceMemory = [
+      {
+        tool: "web_fetch",
+        url: "https://example.com/ai-news",
+        publishDate: "2026-02-26",
+        timestamp: Date.now(),
+      },
+      {
+        tool: "web_search",
+        url: "https://www.reddit.com/r/AI_Agents/comments/demo",
+        timestamp: Date.now(),
+      },
+      {
+        tool: "web_search",
+        url: "https://x.com/openai/status/123",
+        timestamp: Date.now(),
+      },
+    ];
+
+    await (executor as Any).execute();
+
+    expect(executor.daemon.completeTask).toHaveBeenCalledTimes(1);
   });
 
   it("downgrades source-validation guard failures to partial success for cron best-effort runs", async () => {

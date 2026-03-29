@@ -1675,6 +1675,60 @@ export async function setupIpcHandlers(
     return mailboxService.getThread(threadId);
   });
 
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_LIST_EVENTS, async (_, data?: Any) => {
+    return mailboxService.listMailboxEvents(
+      typeof data?.limit === "number" ? data.limit : undefined,
+      typeof data?.threadId === "string" ? data.threadId : undefined,
+    );
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_AUTOMATION_LIST, async (_, data?: Any) => {
+    return mailboxService.listMailboxAutomations({
+      workspaceId: typeof data?.workspaceId === "string" ? data.workspaceId : undefined,
+      threadId: typeof data?.threadId === "string" ? data.threadId : undefined,
+    });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_AUTOMATION_LIST_THREAD, async (_, threadId: string) => {
+    return mailboxService.listThreadAutomations(threadId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_AUTOMATION_CREATE_RULE, async (_, data?: Any) => {
+    return mailboxService.createMailboxRule(data?.recipe || data);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_AUTOMATION_UPDATE_RULE, async (_, data?: Any) => {
+    if (typeof data?.id !== "string") {
+      throw new Error("Missing automation id for mailbox rule update");
+    }
+    return mailboxService.updateMailboxRule(data.id, data.patch || {});
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_AUTOMATION_DELETE_RULE, async (_, id: string) => {
+    return mailboxService.deleteMailboxRule(id);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_AUTOMATION_CREATE_SCHEDULE, async (_, data?: Any) => {
+    return mailboxService.createMailboxSchedule(data?.recipe || data);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_AUTOMATION_UPDATE_SCHEDULE, async (_, data?: Any) => {
+    if (typeof data?.id !== "string") {
+      throw new Error("Missing automation id for mailbox schedule update");
+    }
+    return mailboxService.updateMailboxSchedule(data.id, data.patch || {});
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_AUTOMATION_DELETE_SCHEDULE, async (_, id: string) => {
+    return mailboxService.deleteMailboxSchedule(id);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_GET_DIGEST, async (_, data?: Any) => {
+    return mailboxService.getMailboxDigest(
+      typeof data?.workspaceId === "string" ? data.workspaceId : undefined,
+    );
+  });
+
   ipcMain.handle(IPC_CHANNELS.MAILBOX_SUMMARIZE_THREAD, async (_, data?: { threadId?: string }) => {
     if (!data?.threadId) throw new Error("Missing threadId for mailbox summarize");
     return mailboxService.summarizeThread(data.threadId);
@@ -1719,6 +1773,170 @@ export async function setupIpcHandlers(
     return mailboxService.researchContact(data.threadId);
   });
 
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_IDENTITY_RESOLVE, async (_, data?: { threadId?: string }) => {
+    if (!data?.threadId) throw new Error("Missing threadId for mailbox identity resolution");
+    return mailboxService.resolveContactIdentity(data.threadId);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_IDENTITY_GET,
+    async (_, data?: { contactIdentityId?: string }) => {
+      if (!data?.contactIdentityId) throw new Error("Missing contactIdentityId");
+      return mailboxService.getContactIdentity(data.contactIdentityId);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_IDENTITY_LIST, async (_, data?: { workspaceId?: string }) => {
+    return mailboxService.listContactIdentities(data?.workspaceId);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_IDENTITY_SEARCH,
+    async (_, data?: { workspaceId?: string; query?: string; limit?: number }) => {
+      if (!data?.workspaceId) throw new Error("Missing workspaceId");
+      if (!data?.query?.trim()) return [];
+      return mailboxService.searchIdentityLinkTargets(data.workspaceId, data.query, data.limit);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_IDENTITY_LINK,
+    async (
+      _,
+      data?: {
+        workspaceId?: string;
+        contactIdentityId?: string;
+        handleType?: string;
+        normalizedValue?: string;
+        displayValue?: string;
+        source?: string;
+        channelId?: string;
+        channelType?: string;
+        channelUserId?: string;
+      },
+    ) => {
+      if (!data?.workspaceId) throw new Error("Missing workspaceId");
+      if (!data?.contactIdentityId) throw new Error("Missing contactIdentityId");
+      if (!data?.handleType) throw new Error("Missing handleType");
+      if (!data?.normalizedValue && !data?.displayValue) throw new Error("Missing handle value");
+      return mailboxService.linkIdentityHandle({
+        workspaceId: data.workspaceId,
+        contactIdentityId: data.contactIdentityId,
+        handleType: data.handleType as Any,
+        normalizedValue: data.normalizedValue || data.displayValue || "",
+        displayValue: data.displayValue || data.normalizedValue || "",
+        source: (data.source as Any) || "manual",
+        channelId: data.channelId,
+        channelType: data.channelType,
+        channelUserId: data.channelUserId,
+      });
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_IDENTITY_TIMELINE, async (_, data?: Any) => {
+    return mailboxService.getRelationshipTimeline({
+      threadId: typeof data?.threadId === "string" ? data.threadId : undefined,
+      contactIdentityId:
+        typeof data?.contactIdentityId === "string" ? data.contactIdentityId : undefined,
+      companyHint: typeof data?.companyHint === "string" ? data.companyHint : undefined,
+      limit: typeof data?.limit === "number" ? data.limit : undefined,
+      startAt: typeof data?.startAt === "number" ? data.startAt : undefined,
+      endAt: typeof data?.endAt === "number" ? data.endAt : undefined,
+    });
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_IDENTITY_CANDIDATES, async (_, data?: Any) => {
+    return mailboxService.listIdentityCandidates(
+      typeof data?.workspaceId === "string" ? data.workspaceId : undefined,
+      typeof data?.status === "string" ? data.status : undefined,
+    );
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_IDENTITY_CONFIRM, async (_, data?: { candidateId?: string }) => {
+    if (!data?.candidateId) throw new Error("Missing candidateId");
+    return mailboxService.confirmIdentityLink(data.candidateId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_IDENTITY_REJECT, async (_, data?: { candidateId?: string }) => {
+    if (!data?.candidateId) throw new Error("Missing candidateId");
+    return mailboxService.rejectIdentityLink(data.candidateId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_IDENTITY_UNLINK, async (_, data?: { handleId?: string }) => {
+    if (!data?.handleId) throw new Error("Missing handleId");
+    return mailboxService.unlinkIdentityHandle(data.handleId);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_IDENTITY_PREFERENCE,
+    async (_, data?: { contactIdentityId?: string }) => {
+      if (!data?.contactIdentityId) throw new Error("Missing contactIdentityId");
+      return mailboxService.getChannelPreferenceSummary(data.contactIdentityId);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_IDENTITY_COVERAGE, async (_, data?: { workspaceId?: string }) => {
+    return mailboxService.getIdentityCoverageStats(data?.workspaceId);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_REPLY_VIA_CHANNEL,
+    async (
+      _,
+      data?: {
+        threadId?: string;
+        handleId?: string;
+        channelType?: string;
+        message?: string;
+        parseMode?: "text" | "markdown";
+      },
+    ) => {
+      if (!data?.threadId) throw new Error("Missing threadId");
+      if (!data?.handleId) throw new Error("Missing handleId");
+      if (!data?.channelType) throw new Error("Missing channelType");
+      if (!data?.message?.trim()) throw new Error("Missing message");
+      if (!gateway) throw new Error("Gateway not initialized");
+
+      const targets = await mailboxService.getReplyTargets(data.threadId);
+      const target = targets.find((entry) => entry.handleId === data.handleId);
+      if (!target) {
+        throw new Error("The selected reply target is no longer available");
+      }
+      if (target.channelType !== data.channelType) {
+        throw new Error(`Reply target mismatch for ${data.channelType}`);
+      }
+
+      await gateway.sendMessage(target.channelType as Any, target.chatId, data.message, {
+        parseMode: data.parseMode || "text",
+      });
+      return { ok: true, target };
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_MC_HANDOFF_PREVIEW,
+    async (_, data?: { threadId?: string }) => {
+      if (!data?.threadId) throw new Error("Missing threadId for mailbox handoff preview");
+      return mailboxService.previewMissionControlHandoff(data.threadId);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_MC_HANDOFF_CREATE, async (_, data?: Any) => {
+    if (!data?.threadId) throw new Error("Missing threadId for mailbox handoff");
+    if (!data?.companyId) throw new Error("Missing companyId for mailbox handoff");
+    if (!data?.operatorRoleId) throw new Error("Missing operatorRoleId for mailbox handoff");
+    if (!data?.issueTitle) throw new Error("Missing issueTitle for mailbox handoff");
+    return mailboxService.createMissionControlHandoff(data);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.MAILBOX_MC_HANDOFF_LIST,
+    async (_, data?: { threadId?: string }) => {
+      if (!data?.threadId) throw new Error("Missing threadId for mailbox handoff list");
+      return mailboxService.listMissionControlHandoffs(data.threadId);
+    },
+  );
+
   ipcMain.handle(IPC_CHANNELS.MAILBOX_APPLY_ACTION, async (_, data?: Any) => {
     return mailboxService.applyAction({
       proposalId: typeof data?.proposalId === "string" ? data.proposalId : undefined,
@@ -1742,6 +1960,27 @@ export async function setupIpcHandlers(
       );
     },
   );
+
+  ipcMain.handle(IPC_CHANNELS.MAILBOX_UPDATE_COMMITMENT_DETAILS, async (_, data?: Any) => {
+    if (typeof data?.commitmentId !== "string") {
+      throw new Error("Missing commitmentId for mailbox commitment details update");
+    }
+    return mailboxService.updateCommitmentDetails(data.commitmentId, {
+      title: typeof data?.patch?.title === "string" ? data.patch.title : undefined,
+      dueAt: typeof data?.patch?.dueAt === "number" ? data.patch.dueAt : undefined,
+      ownerEmail:
+        typeof data?.patch?.ownerEmail === "string" ? data.patch.ownerEmail : undefined,
+      state:
+        data?.patch?.state === "suggested" ||
+        data?.patch?.state === "accepted" ||
+        data?.patch?.state === "done" ||
+        data?.patch?.state === "dismissed"
+          ? data.patch.state
+          : undefined,
+      sourceExcerpt:
+        typeof data?.patch?.sourceExcerpt === "string" ? data.patch.sourceExcerpt : undefined,
+    });
+  });
 
   ipcMain.handle(IPC_CHANNELS.MAILBOX_RECLASSIFY_THREAD, async (_, data?: Any) => {
     const threadId = typeof data?.threadId === "string" ? data.threadId : undefined;

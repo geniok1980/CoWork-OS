@@ -13,6 +13,7 @@ import {
   MicOff,
   RefreshCcw,
   Reply,
+  Send,
   Sparkles,
   Trash2,
   User,
@@ -20,13 +21,23 @@ import {
 } from "lucide-react";
 import {
   MailboxActionProposal,
+  MailboxAutomationRecord,
   MailboxCommitment,
+  MailboxCompanyCandidate,
+  MailboxDigestSnapshot,
+  MailboxConditionOperator,
+  MailboxMissionControlHandoffPreview,
+  MailboxMissionControlHandoffRecord,
   MailboxPriorityBand,
   MailboxSyncStatus,
   MailboxThreadDetail,
   MailboxThreadListItem,
   MailboxThreadMailboxView,
+  stripMailboxSummaryHtmlArtifacts,
 } from "../../shared/mailbox";
+import type { AgentRoleData } from "../../electron/preload";
+import type { Company } from "../../shared/types";
+import { GOOGLE_SCOPE_GMAIL_MODIFY, hasScope } from "../../shared/google-workspace";
 import { useVoiceInput } from "../hooks/useVoiceInput";
 
 type QueueMode = "cleanup" | "follow_up" | null;
@@ -35,6 +46,12 @@ const MAILBOX_AUTO_SYNC_MAX_AGE_MS = 15 * 60 * 1000;
 const MAILBOX_CLASSIFICATION_WARNING_KEY = "mailboxClassificationWarningAcknowledged";
 type FocusFilter = "unread" | "needsReply" | "queue" | "commitments" | null;
 type ThreadMailboxView = MailboxThreadMailboxView;
+type ThreadGroup = {
+  id: string;
+  label: string;
+  description: string;
+  threads: MailboxThreadListItem[];
+};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -62,6 +79,17 @@ function formatFullTime(timestamp?: number): string {
   });
 }
 
+function formatDateTimeLocalValue(timestamp?: number): string {
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join("-") + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function priorityBadge(band: MailboxPriorityBand): { color: string; bg: string; label: string } {
   switch (band) {
     case "critical":
@@ -83,6 +111,13 @@ function proposalActionLabel(proposal: MailboxActionProposal): string {
     case "follow_up": return "Open follow-up";
     default: return "Review";
   }
+}
+
+function formatChannelLabel(channelType: string): string {
+  if (channelType === "whatsapp") return "WhatsApp";
+  if (channelType === "imessage") return "iMessage";
+  if (channelType === "signal") return "Signal";
+  return channelType.charAt(0).toUpperCase() + channelType.slice(1);
 }
 
 function previewStringList(preview: Record<string, unknown> | undefined, key: string): string[] {
@@ -275,12 +310,14 @@ function ActionBtn({
   label,
   variant = "default",
   disabled,
+  title,
 }: {
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
   variant?: "default" | "primary" | "danger";
   disabled?: boolean;
+  title?: string;
 }) {
   const [hovered, setHovered] = useState(false);
 
@@ -306,6 +343,7 @@ function ActionBtn({
     <button
       onClick={onClick}
       disabled={disabled}
+      title={title}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
@@ -345,59 +383,98 @@ function IconBtn({
 }) {
   const [hovered, setHovered] = useState(false);
   const interactive = !disabled;
-  return (
+  const buttonStyle: CSSProperties = {
+    width: 32,
+    height: 32,
+    borderRadius: "var(--radius-sm, 8px)",
+    display: "grid",
+    placeItems: "center",
+    border: active ? "1px solid var(--color-accent)" : "1px solid var(--color-border)",
+    background: active
+      ? "var(--color-accent-subtle)"
+      : hovered && interactive
+        ? "var(--color-bg-hover)"
+        : "var(--color-bg-secondary)",
+    color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.45 : 1,
+    transition: "all 0.15s ease",
+    flexShrink: 0,
+    ...(disabled && title ? { pointerEvents: "none" as const } : {}),
+  };
+
+  const button = (
     <button
+      type="button"
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
-      title={title}
+      title={disabled ? undefined : title}
+      aria-label={title}
       onMouseEnter={() => {
         if (interactive) setHovered(true);
       }}
       onMouseLeave={() => {
         if (interactive) setHovered(false);
       }}
-      style={{
-        width: 32,
-        height: 32,
-        borderRadius: "var(--radius-sm, 8px)",
-        display: "grid",
-        placeItems: "center",
-        border: active ? "1px solid var(--color-accent)" : "1px solid var(--color-border)",
-        background: active
-          ? "var(--color-accent-subtle)"
-          : hovered && interactive
-          ? "var(--color-bg-hover)"
-          : "var(--color-bg-secondary)",
-        color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
-        cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.45 : 1,
-        transition: "all 0.15s ease",
-        flexShrink: 0,
-      }}
+      style={buttonStyle}
     >
       {icon}
     </button>
   );
+
+  if (disabled && title) {
+    return (
+      <span
+        title={title}
+        style={{ display: "inline-flex", lineHeight: 0, cursor: "not-allowed" }}
+      >
+        {button}
+      </span>
+    );
+  }
+
+  return button;
 }
 
 // ─── main component ───────────────────────────────────────────────────────────
 
 export function InboxAgentPanel() {
   const [status, setStatus] = useState<MailboxSyncStatus | null>(null);
+  const [digest, setDigest] = useState<MailboxDigestSnapshot | null>(null);
   const [threads, setThreads] = useState<MailboxThreadListItem[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [selectedThreadIds, setSelectedThreadIds] = useState<string[]>([]);
   const [selectedThread, setSelectedThread] = useState<MailboxThreadDetail | null>(null);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<"all" | "priority" | "calendar" | "follow_up" | "promotions" | "updates">("all");
   const [focusFilter, setFocusFilter] = useState<FocusFilter>(null);
   const [queueMode, setQueueMode] = useState<QueueMode>(null);
   const [queueProposals, setQueueProposals] = useState<MailboxActionProposal[]>([]);
+  const [automations, setAutomations] = useState<MailboxAutomationRecord[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [messageSortOrder, setMessageSortOrder] = useState<"newest" | "oldest">("newest");
   const [threadSortOrder, setThreadSortOrder] = useState<ThreadSortOrder>("recent");
   const [mailboxView, setMailboxView] = useState<ThreadMailboxView>("inbox");
   const [googleWorkspaceEnabled, setGoogleWorkspaceEnabled] = useState(false);
+  const [googleWorkspaceScopes, setGoogleWorkspaceScopes] = useState<string[] | null>(null);
+  const [editingCommitmentId, setEditingCommitmentId] = useState<string | null>(null);
+  const [editingCommitmentTitle, setEditingCommitmentTitle] = useState("");
+  const [editingCommitmentDueAt, setEditingCommitmentDueAt] = useState("");
+  const [editingCommitmentOwnerEmail, setEditingCommitmentOwnerEmail] = useState("");
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [agentRoles, setAgentRoles] = useState<AgentRoleData[]>([]);
+  const [handoffPreview, setHandoffPreview] = useState<MailboxMissionControlHandoffPreview | null>(null);
+  const [handoffRecords, setHandoffRecords] = useState<MailboxMissionControlHandoffRecord[]>([]);
+  const [handoffPanelOpen, setHandoffPanelOpen] = useState(false);
+  const [handoffCompanyId, setHandoffCompanyId] = useState("");
+  const [handoffCompanyConfirmed, setHandoffCompanyConfirmed] = useState(false);
+  const [handoffOperatorRoleId, setHandoffOperatorRoleId] = useState("");
+  const [handoffIssueTitle, setHandoffIssueTitle] = useState("");
+  const [handoffIssueSummary, setHandoffIssueSummary] = useState("");
+  const [replyChannelType, setReplyChannelType] = useState<"slack" | "teams" | "whatsapp" | "signal" | "imessage" | null>(null);
+  const [replyTargetHandleId, setReplyTargetHandleId] = useState<string | null>(null);
+  const [replyMessage, setReplyMessage] = useState("");
   const [classificationWarningAcknowledged, setClassificationWarningAcknowledged] = useState(() =>
     typeof window !== "undefined" &&
       window.localStorage.getItem(MAILBOX_CLASSIFICATION_WARNING_KEY) === "1",
@@ -406,6 +483,27 @@ export function InboxAgentPanel() {
   const loadStatus = async () => {
     const next = await window.electronAPI.getMailboxSyncStatus();
     setStatus(next);
+  };
+
+  const loadMissionControlOptions = async () => {
+    const [nextCompanies, nextRoles] = await Promise.all([
+      window.electronAPI.listCompanies().catch(() => []),
+      window.electronAPI.getAgentRoles(true).catch(() => []),
+    ]);
+    setCompanies(nextCompanies);
+    setAgentRoles(nextRoles);
+  };
+
+  const loadDigest = async () => {
+    const next = await window.electronAPI.getMailboxDigest().catch(() => null);
+    setDigest(next);
+  };
+
+  const loadAutomations = async (threadId?: string) => {
+    const next = await window.electronAPI.listMailboxAutomations({
+      threadId,
+    }).catch(() => []);
+    setAutomations(next);
   };
 
   const loadThreads = async (opts?: {
@@ -433,6 +531,7 @@ export function InboxAgentPanel() {
       limit: 40,
     });
     setThreads(list);
+    setSelectedThreadIds((current) => current.filter((id) => list.some((thread) => thread.id === id)));
     setSelectedThreadId((current) =>
       current && list.some((thread) => thread.id === current) ? current : (list[0]?.id || null),
     );
@@ -443,10 +542,149 @@ export function InboxAgentPanel() {
     setSelectedThread(detail);
   };
 
+  const loadHandoffContext = async (threadId: string) => {
+    const [preview, records] = await Promise.all([
+      window.electronAPI.previewMailboxMissionControlHandoff(threadId).catch(() => null),
+      window.electronAPI.listMailboxMissionControlHandoffs(threadId).catch(() => []),
+    ]);
+    setHandoffPreview(preview);
+    setHandoffRecords(records);
+    if (preview) {
+      const nextCompanyId = preview.recommendedCompanyId || preview.companyCandidates[0]?.companyId || "";
+      const nextOperatorRoleId =
+        preview.recommendedOperatorRoleId || preview.operatorRecommendations[0]?.agentRoleId || "";
+      setHandoffCompanyId(nextCompanyId);
+      setHandoffCompanyConfirmed(false);
+      setHandoffOperatorRoleId(nextOperatorRoleId);
+      setHandoffIssueTitle(preview.issueTitle);
+      setHandoffIssueSummary(preview.issueSummary);
+    } else {
+      setHandoffCompanyId("");
+      setHandoffCompanyConfirmed(false);
+      setHandoffOperatorRoleId("");
+      setHandoffIssueTitle("");
+      setHandoffIssueSummary("");
+    }
+  };
+
   const reloadAll = async (threadId?: string) => {
-    await Promise.all([loadStatus(), loadThreads()]);
+    await Promise.all([loadStatus(), loadDigest(), loadThreads(), loadAutomations(threadId || selectedThreadId || undefined)]);
     const nextId = threadId || selectedThreadId;
-    if (nextId) await loadThread(nextId);
+    if (nextId) {
+      await loadThread(nextId);
+      if (handoffPanelOpen) {
+        await loadHandoffContext(nextId);
+      }
+    }
+  };
+
+  const selectedBulkThreadIds = selectedThreadIds.length
+    ? selectedThreadIds
+    : selectedThreadId
+      ? [selectedThreadId]
+      : [];
+
+  const selectedThreadAutomations = useMemo(() => {
+    const threadId = selectedThread?.id || selectedThreadId || null;
+    if (!threadId) return automations;
+    return automations.filter(
+      (automation) => automation.threadId === threadId || !automation.threadId,
+    );
+  }, [automations, selectedThread?.id, selectedThreadId]);
+
+  const selectedThreadReplyTargets = useMemo(() => {
+    const replyTargets = selectedThread?.research?.replyTargets || [];
+    const primaryReplyTargets = replyTargets.filter((target) =>
+      ["slack", "whatsapp", "teams"].includes(target.channelType),
+    );
+    const nextTargets = primaryReplyTargets.length ? primaryReplyTargets : replyTargets;
+    const preferredChannel = selectedThread?.research?.channelPreference?.preferredChannel || null;
+    return [...nextTargets].sort((left, right) => {
+      const leftPreferred = preferredChannel && left.channelType === preferredChannel ? 1 : 0;
+      const rightPreferred = preferredChannel && right.channelType === preferredChannel ? 1 : 0;
+      if (leftPreferred !== rightPreferred) return rightPreferred - leftPreferred;
+
+      const leftLastMessageAt = left.lastMessageAt || 0;
+      const rightLastMessageAt = right.lastMessageAt || 0;
+      if (leftLastMessageAt !== rightLastMessageAt) return rightLastMessageAt - leftLastMessageAt;
+
+      const leftLabel = `${left.displayValue || ""} ${left.channelType || ""}`.trim().toLowerCase();
+      const rightLabel = `${right.displayValue || ""} ${right.channelType || ""}`.trim().toLowerCase();
+      return leftLabel.localeCompare(rightLabel);
+    });
+  }, [selectedThread?.research?.replyTargets, selectedThread?.research?.channelPreference?.preferredChannel]);
+
+  const recommendedReplyTarget = selectedThreadReplyTargets[0] || null;
+
+  const companyCandidates = useMemo<MailboxCompanyCandidate[]>(() => {
+    if (handoffPreview?.companyCandidates?.length) return handoffPreview.companyCandidates;
+    return companies.map((company) => ({
+      companyId: company.id,
+      name: company.name,
+      slug: company.slug,
+      confidence: 0,
+      reason: "manual selection",
+      defaultWorkspaceId: company.defaultWorkspaceId,
+    }));
+  }, [companies, handoffPreview?.companyCandidates]);
+
+  const selectedCompanyRoles = useMemo(
+    () => agentRoles.filter((role) => role.companyId === handoffCompanyId && role.isActive !== false),
+    [agentRoles, handoffCompanyId],
+  );
+
+  const gmailScopesKnown = googleWorkspaceScopes !== null;
+  const gmailModifyScopeGranted =
+    !gmailScopesKnown || hasScope(googleWorkspaceScopes ?? undefined, GOOGLE_SCOPE_GMAIL_MODIFY);
+  const gmailCleanupDisabledReason = !googleWorkspaceEnabled
+    ? "Enable Google Workspace in Settings > Integrations > Google Workspace to use Gmail cleanup actions."
+    : gmailScopesKnown && !gmailModifyScopeGranted
+      ? "Reconnect Google Workspace with the Gmail modify scope to archive, trash, or mark Gmail threads."
+      : null;
+  const gmailCleanupActionsEnabled = googleWorkspaceEnabled && gmailModifyScopeGranted;
+  const selectedThreadNeedsGmailCleanupAttention =
+    selectedThread?.provider === "gmail" && Boolean(gmailCleanupDisabledReason);
+
+  const clearThreadSelection = () => {
+    setSelectedThreadIds([]);
+  };
+
+  const toggleThreadSelection = (threadId: string) => {
+    setSelectedThreadIds((current) =>
+      current.includes(threadId)
+        ? current.filter((entry) => entry !== threadId)
+        : [...current, threadId],
+    );
+  };
+
+  const beginCommitmentEdit = (commitment: MailboxCommitment) => {
+    setEditingCommitmentId(commitment.id);
+    setEditingCommitmentTitle(commitment.title);
+    setEditingCommitmentDueAt(formatDateTimeLocalValue(commitment.dueAt));
+    setEditingCommitmentOwnerEmail(commitment.ownerEmail || "");
+  };
+
+  const cancelCommitmentEdit = () => {
+    setEditingCommitmentId(null);
+    setEditingCommitmentTitle("");
+    setEditingCommitmentDueAt("");
+    setEditingCommitmentOwnerEmail("");
+  };
+
+  const saveCommitmentEdit = async (commitment: MailboxCommitment) => {
+    if (!selectedThread) return;
+    await runAction(async () => {
+      const dueAt = editingCommitmentDueAt.trim()
+        ? new Date(editingCommitmentDueAt).getTime()
+        : null;
+      await window.electronAPI.updateMailboxCommitmentDetails(commitment.id, {
+        title: editingCommitmentTitle.trim() || commitment.title,
+        dueAt: Number.isFinite(dueAt || NaN) ? dueAt : null,
+        ownerEmail: editingCommitmentOwnerEmail.trim() || null,
+      });
+      cancelCommitmentEdit();
+      await reloadAll(selectedThread.id);
+    });
   };
 
   useEffect(() => {
@@ -455,10 +693,14 @@ export function InboxAgentPanel() {
       try {
         const googleSettings = await window.electronAPI.getGoogleWorkspaceSettings().catch(() => null);
         setGoogleWorkspaceEnabled(Boolean(googleSettings?.enabled));
+        setGoogleWorkspaceScopes(googleSettings?.scopes ?? null);
+        await loadMissionControlOptions();
         await loadStatus();
         const nextStatus = await window.electronAPI.getMailboxSyncStatus();
         setStatus(nextStatus);
+        await loadDigest();
         await loadThreads();
+        await loadAutomations();
         const shouldAutoSync =
           nextStatus.connected &&
           !nextStatus.syncInFlight &&
@@ -478,8 +720,46 @@ export function InboxAgentPanel() {
 
   useEffect(() => {
     if (!selectedThreadId) return;
+    cancelCommitmentEdit();
+    setReplyChannelType(null);
+    setReplyTargetHandleId(null);
+    setReplyMessage("");
     void loadThread(selectedThreadId);
+    if (handoffPanelOpen) {
+      void loadHandoffContext(selectedThreadId);
+    }
   }, [selectedThreadId]);
+
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onMailboxEvent((event) => {
+      if (event.threadId && event.threadId === selectedThreadId) {
+        void reloadAll(event.threadId);
+      } else {
+        void loadStatus();
+        void loadDigest();
+        void loadThreads();
+      }
+    });
+    return unsubscribe;
+  }, [selectedThreadId, query, category, mailboxView, focusFilter, threadSortOrder]);
+
+  useEffect(() => {
+    if (!handoffPanelOpen || !handoffCompanyId) return;
+    if (selectedCompanyRoles.some((role) => role.id === handoffOperatorRoleId)) return;
+    const recommendedForCompany = handoffPreview?.operatorRecommendations.find(
+      (recommendation) =>
+        selectedCompanyRoles.some((role) => role.id === recommendation.agentRoleId),
+    );
+    setHandoffOperatorRoleId(
+      recommendedForCompany?.agentRoleId || selectedCompanyRoles[0]?.id || "",
+    );
+  }, [
+    handoffCompanyId,
+    handoffOperatorRoleId,
+    handoffPanelOpen,
+    handoffPreview?.operatorRecommendations,
+    selectedCompanyRoles,
+  ]);
 
   const voice = useVoiceInput({
     transcriptionMode: "local_preferred",
@@ -499,14 +779,30 @@ export function InboxAgentPanel() {
     onError: (message) => setError(message),
   });
 
-  const metrics = useMemo<Array<{ id: Exclude<FocusFilter, null>; label: string; value: number; accent: boolean }>>(
+  const pulseCards = useMemo(
     () => [
-      { id: "unread", label: "Unread", value: status?.unreadCount ?? 0, accent: true },
-      { id: "needsReply", label: "Action Needed", value: status?.needsReplyCount ?? 0, accent: true },
-      { id: "queue", label: "Suggested Actions", value: status?.proposalCount ?? 0, accent: false },
-      { id: "commitments", label: "Open Commitments", value: status?.commitmentCount ?? 0, accent: false },
+      {
+        id: "unread" as const,
+        label: "Unread",
+        value: digest?.unreadCount ?? status?.unreadCount ?? 0,
+      },
+      {
+        id: "needsReply" as const,
+        label: "Needs reply",
+        value: digest?.needsReplyCount ?? status?.needsReplyCount ?? 0,
+      },
+      {
+        id: "queue" as const,
+        label: "Suggested actions",
+        value: digest?.proposalCount ?? status?.proposalCount ?? 0,
+      },
+      {
+        id: "commitments" as const,
+        label: "Open commitments",
+        value: digest?.commitmentCount ?? status?.commitmentCount ?? 0,
+      },
     ],
-    [status],
+    [digest, status],
   );
 
   const runAction = async (work: () => Promise<void>) => {
@@ -529,7 +825,7 @@ export function InboxAgentPanel() {
     }, 600);
     try {
       await window.electronAPI.syncMailbox(25);
-      await Promise.all([loadStatus(), loadThreads()]);
+      await Promise.all([loadStatus(), loadDigest(), loadThreads()]);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
@@ -625,6 +921,129 @@ export function InboxAgentPanel() {
     });
   };
 
+  const getCrossChannelReplySeed = (): string => {
+    if (!selectedThread) return "";
+    const draftBody = selectedThread.drafts[0]?.body?.trim();
+    if (draftBody) return draftBody;
+    const summary = stripMailboxSummaryHtmlArtifacts(selectedThread.summary?.summary || "");
+    if (summary) {
+      return `Thanks for the update. I reviewed the thread and will follow up shortly.\n\nContext: ${summary.slice(0, 300)}`;
+    }
+    return `Thanks for the update. I’ll follow up shortly.`;
+  };
+
+  const openReplyComposer = (handleId: string) => {
+    const target = selectedThreadReplyTargets.find((entry) => entry.handleId === handleId) || null;
+    setReplyTargetHandleId(handleId);
+    setReplyChannelType(target?.channelType || null);
+    setReplyMessage((current) => current.trim() ? current : getCrossChannelReplySeed());
+  };
+
+  const sendReplyViaChannel = async () => {
+    const target = selectedThreadReplyTargets.find((entry) => entry.handleId === replyTargetHandleId) || null;
+    if (!selectedThread || !target || !replyMessage.trim()) return;
+    await runAction(async () => {
+      await window.electronAPI.replyViaChannel({
+        threadId: selectedThread.id,
+        handleId: target.handleId,
+        channelType: target.channelType,
+        message: replyMessage.trim(),
+        parseMode: "text",
+      });
+      setReplyChannelType(null);
+      setReplyTargetHandleId(null);
+      setReplyMessage("");
+      await reloadAll(selectedThread.id);
+    });
+  };
+
+  const handleBulkThreadAction = async (type: "archive" | "trash" | "mark_read") => {
+    if (!selectedBulkThreadIds.length) return;
+    await runAction(async () => {
+      for (const threadId of selectedBulkThreadIds) {
+        await window.electronAPI.applyMailboxAction({ threadId, type });
+      }
+      clearThreadSelection();
+      await reloadAll(selectedBulkThreadIds[0]);
+    });
+  };
+
+  const createRuleFromCurrentContext = async () => {
+    await runAction(async () => {
+      const thread = selectedThread;
+      const ruleLabel = selectedThread?.subject || query.trim() || "Inbox view";
+      const summaryText = thread?.summary?.summary;
+      const participantText = thread?.participants.length
+        ? `Participants: ${thread.participants.map((participant) => participant.email).join(", ")}`
+        : null;
+      const conditions: Array<{ field: string; operator: MailboxConditionOperator; value: string }> = [
+        { field: "eventType", operator: "equals", value: "thread_classified" },
+      ];
+
+      if (thread) {
+        conditions.push({ field: "threadId", operator: "equals", value: thread.id });
+      } else {
+        if (query.trim()) {
+          conditions.push({ field: "subject", operator: "contains", value: query.trim() });
+        }
+        if (focusFilter === "needsReply") {
+          conditions.push({ field: "needsReply", operator: "equals", value: "true" });
+        }
+      }
+
+      await window.electronAPI.createMailboxRule({
+        name: `${ruleLabel} follow-up`,
+        description: "Create a follow-up task when this thread needs attention.",
+        threadId: thread?.id,
+        source: "mailbox_event",
+        conditions,
+        conditionLogic: "all",
+        actionType: "create_task",
+        actionTitle: `Follow up: ${ruleLabel}`,
+        actionPrompt: [
+          `Create a follow-up task for this inbox context: ${ruleLabel}.`,
+          summaryText ? `Summary: ${stripMailboxSummaryHtmlArtifacts(summaryText)}` : null,
+          participantText,
+        ]
+          .filter((entry): entry is string => Boolean(entry))
+          .join("\n"),
+        enabled: true,
+        cooldownMs: 30 * 60 * 1000,
+      });
+      await reloadAll(thread?.id);
+    });
+  };
+
+  const snoozeSelectedThread = async () => {
+    if (!selectedThread) return;
+    await runAction(async () => {
+      const summaryText = selectedThread.summary?.summary;
+      const participantText = selectedThread.participants.length
+        ? `Participants: ${selectedThread.participants.map((participant) => participant.email).join(", ")}`
+        : null;
+      const reminder = new Date();
+      reminder.setDate(reminder.getDate() + 1);
+      reminder.setHours(9, 0, 0, 0);
+      await window.electronAPI.createMailboxSchedule({
+        name: `Inbox reminder: ${selectedThread.subject || "Thread"}`,
+        description: `Remind about ${selectedThread.subject || "this thread"}`,
+        threadId: selectedThread.id,
+        kind: "reminder",
+        schedule: { kind: "at", atMs: reminder.getTime() },
+        taskTitle: `Inbox reminder: ${selectedThread.subject || "Thread"}`,
+        taskPrompt: [
+          `Remind the user about this inbox thread: ${selectedThread.subject || "Untitled thread"}.`,
+          participantText,
+          summaryText ? `Summary: ${stripMailboxSummaryHtmlArtifacts(summaryText)}` : null,
+        ]
+          .filter((entry): entry is string => Boolean(entry))
+          .join("\n"),
+        enabled: true,
+      });
+      await reloadAll(selectedThread.id);
+    });
+  };
+
   const runThreadWorkflow = async () => {
     if (!selectedThread) return;
     await runAction(async () => {
@@ -659,6 +1078,38 @@ export function InboxAgentPanel() {
     });
   };
 
+  const openHandoffPanel = async () => {
+    if (!selectedThread) return;
+    await runAction(async () => {
+      await loadMissionControlOptions();
+      await loadHandoffContext(selectedThread.id);
+      setHandoffPanelOpen(true);
+    });
+  };
+
+  const createMissionControlHandoff = async () => {
+    if (!selectedThread || !handoffPreview) return;
+    if (!handoffCompanyId || !handoffOperatorRoleId || !handoffIssueTitle.trim()) {
+      setError("Company, operator, and issue title are required for inbox handoff.");
+      return;
+    }
+    if (!handoffCompanyConfirmed) {
+      setError("Confirm the target company before creating the Mission Control handoff.");
+      return;
+    }
+    await runAction(async () => {
+      await window.electronAPI.createMailboxMissionControlHandoff({
+        threadId: selectedThread.id,
+        companyId: handoffCompanyId,
+        operatorRoleId: handoffOperatorRoleId,
+        issueTitle: handoffIssueTitle.trim(),
+        issueSummary: handoffIssueSummary.trim(),
+      });
+      await loadHandoffContext(selectedThread.id);
+      await reloadAll(selectedThread.id);
+    });
+  };
+
   const categories = [
     { id: "all", label: "All" },
     { id: "priority", label: "Priority" },
@@ -688,13 +1139,140 @@ export function InboxAgentPanel() {
             if (b.priorityScore !== a.priorityScore) return b.priorityScore - a.priorityScore;
             if (b.urgencyScore !== a.urgencyScore) return b.urgencyScore - a.urgencyScore;
             return b.lastMessageAt - a.lastMessageAt;
-          };
+    };
     return [...threads].sort(compare);
   }, [threads, threadSortOrder]);
 
-  const receivedMessages = useMemo(
+  const threadGroups = useMemo<ThreadGroup[]>(() => {
+    if (!displayedThreads.length) return [];
+    const hasNarrowFilter = Boolean(query.trim() || focusFilter || category !== "all" || mailboxView !== "inbox");
+    if (hasNarrowFilter) {
+      return [
+        {
+          id: "all",
+          label: "Matching threads",
+          description: `${displayedThreads.length} thread${displayedThreads.length === 1 ? "" : "s"}`,
+          threads: displayedThreads,
+        },
+      ];
+    }
+
+    const needsReply = displayedThreads.filter((thread) => thread.needsReply);
+    const rest = displayedThreads.filter(
+      (thread) => !thread.needsReply && thread.priorityBand !== "critical" && thread.priorityBand !== "high",
+    );
+
+    const groups: ThreadGroup[] = [];
+    if (needsReply.length) {
+      groups.push({
+        id: "needs-reply",
+        label: "Needs reply",
+        description: "Threads waiting on your response",
+        threads: needsReply,
+      });
+    }
+    if (rest.length) {
+      groups.push({
+        id: "rest",
+        label: "Everything else",
+        description: "Lower priority or already handled threads",
+        threads: rest,
+      });
+    }
+    return groups;
+  }, [category, displayedThreads, focusFilter, mailboxView, query]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTyping =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable);
+      if (isTyping || busy) return;
+
+      const currentIndex = displayedThreads.findIndex((thread) => thread.id === selectedThreadId);
+      if (event.key === "j" || event.key === "k") {
+        event.preventDefault();
+        if (!displayedThreads.length) return;
+        const delta = event.key === "j" ? 1 : -1;
+        const nextIndex = currentIndex >= 0 ? currentIndex + delta : 0;
+        const boundedIndex = Math.max(0, Math.min(displayedThreads.length - 1, nextIndex));
+        setSelectedThreadId(displayedThreads[boundedIndex]?.id || null);
+        return;
+      }
+
+      if (event.key === "e") {
+        event.preventDefault();
+        void handleBulkThreadAction("archive");
+        return;
+      }
+
+      if (event.key === "#") {
+        event.preventDefault();
+        void handleBulkThreadAction("trash");
+        return;
+      }
+
+      if (event.key === "r" && selectedThread) {
+        event.preventDefault();
+        void runAction(async () => {
+          await window.electronAPI.generateMailboxDraft(selectedThread.id, {
+            tone: "concise",
+            includeAvailability: true,
+          });
+          await reloadAll(selectedThread.id);
+        });
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, displayedThreads, selectedThread, selectedThreadId, selectedBulkThreadIds.join("|")]);
+
+  const incomingMessages = useMemo(
     () => sortedThreadMessages.filter((message) => message.direction === "incoming"),
     [sortedThreadMessages],
+  );
+
+  const outgoingMessages = useMemo(
+    () => sortedThreadMessages.filter((message) => message.direction === "outgoing"),
+    [sortedThreadMessages],
+  );
+
+  const messageSections = useMemo(
+    () => {
+      if (!selectedThread) return [];
+
+      const sections: Array<{
+        title: string;
+        messages: MailboxThreadDetail["messages"];
+      }> = [];
+
+      const pushSection = (title: string, messages: MailboxThreadDetail["messages"]) => {
+        if (messages.length > 0) sections.push({ title, messages });
+      };
+
+      if (mailboxView === "sent") {
+        pushSection("Sent Emails", outgoingMessages);
+        pushSection("Received Emails", incomingMessages);
+      } else {
+        pushSection("Received Emails", incomingMessages);
+        pushSection("Sent Emails", outgoingMessages);
+      }
+
+      if (!sections.length && selectedThread.messages.length > 0) {
+        sections.push({
+          title: mailboxView === "sent" ? "Sent Emails" : "Received Emails",
+          messages: selectedThread.messages,
+        });
+      }
+
+      return sections;
+    },
+    [incomingMessages, mailboxView, outgoingMessages, selectedThread],
   );
 
   const renderMessageCard = (message: MailboxThreadDetail["messages"][number]) => {
@@ -812,7 +1390,7 @@ export function InboxAgentPanel() {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "300px minmax(0, 1fr) 340px",
+        gridTemplateColumns: "340px minmax(0, 1fr) 340px",
         gap: "12px",
         padding: "16px",
         paddingTop: "40px",
@@ -901,77 +1479,151 @@ export function InboxAgentPanel() {
             </div>
           </div>
 
-          {/* Metrics row */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-              gap: "8px",
-              marginBottom: "12px",
-            }}
-          >
-            {metrics.map((metric) => {
-              const active = focusFilter === metric.id;
+          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "12px" }}>
+            {[
+              { id: "inbox" as const, label: "Inbox" },
+              { id: "sent" as const, label: "Sent" },
+              { id: "all" as const, label: "All" },
+            ].map((view) => {
+              const active = mailboxView === view.id;
               return (
                 <button
+                  key={view.id}
                   type="button"
-                  key={metric.label}
                   onClick={() => {
-                    const nextFocus = focusFilter === metric.id ? null : metric.id;
-                    setFocusFilter(nextFocus);
-                    void loadThreads({ focusFilter: nextFocus });
+                    setMailboxView(view.id);
+                    void loadThreads({ mailboxView: view.id });
                   }}
                   style={{
-                    appearance: "none",
-                    WebkitAppearance: "none",
-                    padding: "10px 8px",
-                    minHeight: 86,
-                    borderRadius: "var(--radius-md, 12px)",
-                    background: active ? "var(--color-accent-subtle)" : "var(--color-bg-secondary)",
-                    border: `1px solid ${active ? "var(--color-accent)" : "var(--color-border-subtle)"}`,
-                    textAlign: "center" as const,
+                    padding: "4px 10px",
+                    borderRadius: "20px",
+                    fontSize: "0.74rem",
+                    fontWeight: active ? 700 : 500,
+                    border: active
+                      ? "1px solid var(--color-accent)"
+                      : "1px solid var(--color-border-subtle)",
+                    background: active ? "var(--color-accent-subtle)" : "transparent",
+                    color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
                     cursor: "pointer",
+                    transition: "all 0.12s ease",
                     fontFamily: "var(--font-ui)",
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: "6px",
-                    width: "100%",
-                    minWidth: 0,
-                    boxSizing: "border-box",
-                    boxShadow: active ? "0 0 0 1px var(--color-accent) inset" : "none",
                   }}
                   aria-pressed={active}
                 >
-                  <div
-                    style={{
-                      fontSize: "1.9rem",
-                      fontWeight: 800,
-                      color: active ? "var(--color-accent)" : "var(--color-text-primary)",
-                      lineHeight: 1,
-                      letterSpacing: "-0.03em",
-                    }}
-                  >
-                    {metric.value}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: "0.68rem",
-                      color: active ? "var(--color-accent)" : "var(--color-text-muted)",
-                      fontWeight: 700,
-                      lineHeight: 1.15,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                      whiteSpace: "normal",
-                      overflowWrap: "anywhere",
-                    }}
-                  >
-                    {metric.label}
-                  </div>
+                  {view.label}
                 </button>
               );
             })}
+          </div>
+
+          {/* Inbox pulse */}
+            <div
+              style={{
+                marginBottom: "12px",
+                padding: "8px",
+                borderRadius: "var(--radius-lg, 14px)",
+                background: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-border-subtle)",
+                boxShadow: "var(--shadow-sm)",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "10px",
+                marginBottom: "10px",
+              }}
+            >
+              <div>
+                <div
+                style={{
+                  fontSize: "0.72rem",
+                  fontWeight: 700,
+                  letterSpacing: "0.06em",
+                  textTransform: "uppercase",
+                  color: "var(--color-text-muted)",
+                  marginBottom: "2px",
+                }}
+                >
+                  Inbox pulse
+                </div>
+              </div>
+            </div>
+
+            <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                  gap: "6px",
+                }}
+              >
+                {pulseCards.map((card) => {
+                  const active = focusFilter === card.id;
+                  const filterable = card.id === "unread" || card.id === "needsReply" || card.id === "queue" || card.id === "commitments";
+                  return (
+                  <button
+                    type="button"
+                    key={card.label}
+                    onClick={() => {
+                      if (!filterable) return;
+                      const nextFocus = focusFilter === card.id ? null : card.id;
+                      setFocusFilter(nextFocus);
+                      void loadThreads({ focusFilter: nextFocus });
+                    }}
+                    style={{
+                      appearance: "none",
+                      WebkitAppearance: "none",
+                      minHeight: 72,
+                      borderRadius: "var(--radius-md, 12px)",
+                      background: active ? "var(--color-bg-secondary)" : "var(--color-bg-elevated)",
+                      border: `1px solid ${active ? "var(--color-text-primary)" : "var(--color-border-subtle)"}`,
+                      textAlign: "left" as const,
+                      cursor: filterable ? "pointer" : "default",
+                      fontFamily: "var(--font-ui)",
+                      display: "flex",
+                      flexDirection: "column",
+                      justifyContent: "center",
+                      gap: "6px",
+                      width: "100%",
+                      minWidth: 0,
+                      boxSizing: "border-box",
+                      padding: "10px 10px 8px",
+                      boxShadow: active ? "0 0 0 1px var(--color-text-primary) inset" : "none",
+                    }}
+                    aria-pressed={active}
+                  >
+                    <div style={{ display: "flex", alignItems: "baseline", justifyContent: "center", gap: "6px" }}>
+                      <div
+                        style={{
+                          fontSize: "2.3rem",
+                          fontWeight: 800,
+                          color: "var(--color-text-primary)",
+                          lineHeight: 1,
+                          letterSpacing: "-0.04em",
+                        }}
+                      >
+                        {card.value}
+                      </div>
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "0.72rem",
+                        color: "var(--color-text-muted)",
+                        fontWeight: 700,
+                        lineHeight: 1.1,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.09em",
+                        textAlign: "center",
+                      }}
+                    >
+                      {card.label}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {status &&
@@ -1021,8 +1673,68 @@ export function InboxAgentPanel() {
               </div>
             )}
 
+          {!!selectedThreadIds.length && (
+            <div
+              style={{
+                marginBottom: "10px",
+                padding: "12px",
+                borderRadius: "var(--radius-md, 10px)",
+                background:
+                  "linear-gradient(180deg, rgba(124,92,191,0.10) 0%, rgba(255,255,255,0.95) 100%)",
+                border: "1px solid rgba(124,92,191,0.18)",
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "6px",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <div style={{ fontSize: "0.74rem", color: "var(--color-text-secondary)", lineHeight: 1.4 }}>
+                <div style={{ fontWeight: 700, color: "var(--color-text-primary)", marginBottom: "2px" }}>
+                  {selectedThreadIds.length} thread{selectedThreadIds.length === 1 ? "" : "s"} selected
+                </div>
+                <div>
+                  Use bulk actions to clear the queue faster. Selection stays visible while you browse.
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                <ActionBtn
+                  onClick={() => setSelectedThreadIds(displayedThreads.map((thread) => thread.id))}
+                  icon={<CheckSquare size={11} />}
+                  label="Select all visible"
+                  disabled={busy || displayedThreads.length === 0}
+                />
+                <ActionBtn
+                  onClick={() => void handleBulkThreadAction("archive")}
+                  icon={<Archive size={11} />}
+                  label="Archive"
+                  disabled={busy}
+                />
+                <ActionBtn
+                  onClick={() => void handleBulkThreadAction("mark_read")}
+                  icon={<MailOpen size={11} />}
+                  label="Mark read"
+                  disabled={busy}
+                />
+                <ActionBtn
+                  onClick={() => void handleBulkThreadAction("trash")}
+                  icon={<Trash2 size={11} />}
+                  label="Trash"
+                  variant="danger"
+                  disabled={busy}
+                />
+                <ActionBtn
+                  onClick={clearThreadSelection}
+                  icon={<X size={11} />}
+                  label="Clear"
+                  disabled={busy}
+                />
+              </div>
+            </div>
+          )}
+
           {/* Search */}
-          <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
+          <div style={{ display: "flex", gap: "6px", marginBottom: "6px" }}>
             <div style={{ position: "relative", flex: 1 }}>
               <MailSearch
                 size={13}
@@ -1067,101 +1779,81 @@ export function InboxAgentPanel() {
             />
           </div>
 
-          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "8px" }}>
-            {[
-              { id: "inbox" as const, label: "Inbox" },
-              { id: "sent" as const, label: "Sent" },
-              { id: "all" as const, label: "All" },
-            ].map((view) => {
-              const active = mailboxView === view.id;
-              return (
-                <button
-                  key={view.id}
-                  type="button"
-                  onClick={() => {
-                    setMailboxView(view.id);
-                    void loadThreads({ mailboxView: view.id });
-                  }}
-                  style={{
-                    padding: "4px 10px",
-                    borderRadius: "20px",
-                    fontSize: "0.74rem",
-                    fontWeight: active ? 700 : 500,
-                    border: active
-                      ? "1px solid var(--color-accent)"
-                      : "1px solid var(--color-border-subtle)",
-                    background: active ? "var(--color-accent-subtle)" : "transparent",
-                    color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
-                    cursor: "pointer",
-                    transition: "all 0.12s ease",
-                    fontFamily: "var(--font-ui)",
-                  }}
-                  aria-pressed={active}
-                >
-                  {view.label}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Category filters */}
-          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
-            {categories.map((cat) => {
-              const active = category === cat.id;
-              return (
-                <button
-                  key={cat.id}
-                  onClick={() => {
-                    setCategory(cat.id as Any);
-                    void loadThreads({ category: cat.id });
-                  }}
-                  style={{
-                    padding: "4px 10px",
-                    borderRadius: "20px",
-                    fontSize: "0.74rem",
-                    fontWeight: active ? 700 : 500,
-                    border: active
-                      ? "1px solid var(--color-accent)"
-                      : "1px solid var(--color-border-subtle)",
-                    background: active ? "var(--color-accent-subtle)" : "transparent",
-                    color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
-                    cursor: "pointer",
-                    transition: "all 0.12s ease",
-                    fontFamily: "var(--font-ui)",
-                  }}
-                >
-                  {cat.label}
-                </button>
-              );
-            })}
-          </div>
-
+          {/* Categories (horizontal scroll) + compact sort segment — one row */}
           <div
             style={{
               display: "flex",
               alignItems: "center",
-              justifyContent: "space-between",
               gap: "8px",
-              marginTop: "10px",
-              marginBottom: "6px",
+              marginBottom: "8px",
+              minWidth: 0,
             }}
           >
             <div
+              aria-label="Filter by category"
+              style={
+                {
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "4px",
+                  flexWrap: "nowrap",
+                  overflowX: "auto",
+                  flex: 1,
+                  minWidth: 0,
+                  scrollbarWidth: "thin",
+                  paddingBottom: "2px",
+                  WebkitOverflowScrolling: "touch",
+                } as CSSProperties
+              }
+            >
+              {categories.map((cat) => {
+                const active = category === cat.id;
+                return (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => {
+                      setCategory(cat.id as Any);
+                      void loadThreads({ category: cat.id });
+                    }}
+                    style={{
+                      padding: "3px 9px",
+                      borderRadius: "999px",
+                      fontSize: "0.72rem",
+                      fontWeight: active ? 700 : 500,
+                      border: active
+                        ? "1px solid var(--color-accent)"
+                        : "1px solid var(--color-border-subtle)",
+                      background: active ? "var(--color-accent-subtle)" : "transparent",
+                      color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
+                      cursor: "pointer",
+                      transition: "background 0.12s ease, border-color 0.12s ease",
+                      fontFamily: "var(--font-ui)",
+                      flexShrink: 0,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {cat.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div
+              role="group"
+              aria-label="Sort threads"
               style={{
-                fontSize: "0.65rem",
-                fontWeight: 700,
-                letterSpacing: "0.12em",
-                textTransform: "uppercase",
-                color: "var(--color-text-muted)",
+                display: "flex",
+                flexShrink: 0,
+                borderRadius: "var(--radius-sm, 8px)",
+                border: "1px solid var(--color-border-subtle)",
+                overflow: "hidden",
+                background: "var(--color-bg-secondary)",
               }}
             >
-              Sort
-            </div>
-            <div style={{ display: "flex", gap: "4px" }}>
               {[
                 { id: "recent" as const, label: "Recent" },
                 { id: "priority" as const, label: "Priority" },
-              ].map((sort) => {
+              ].map((sort, sortIndex) => {
                 const active = threadSortOrder === sort.id;
                 return (
                   <button
@@ -1172,18 +1864,18 @@ export function InboxAgentPanel() {
                       void loadThreads({ sortBy: sort.id });
                     }}
                     style={{
-                      padding: "4px 10px",
-                      borderRadius: "20px",
-                      fontSize: "0.74rem",
-                      fontWeight: active ? 700 : 500,
-                      border: active
-                        ? "1px solid var(--color-accent)"
-                        : "1px solid var(--color-border-subtle)",
+                      padding: "4px 8px",
+                      fontSize: "0.72rem",
+                      fontWeight: active ? 700 : 600,
+                      border: "none",
+                      borderLeft:
+                        sortIndex > 0 ? "1px solid var(--color-border-subtle)" : "none",
                       background: active ? "var(--color-accent-subtle)" : "transparent",
                       color: active ? "var(--color-accent)" : "var(--color-text-secondary)",
                       cursor: "pointer",
-                      transition: "all 0.12s ease",
+                      transition: "background 0.12s ease, color 0.12s ease",
                       fontFamily: "var(--font-ui)",
+                      whiteSpace: "nowrap",
                     }}
                     aria-pressed={active}
                   >
@@ -1212,27 +1904,11 @@ export function InboxAgentPanel() {
               {status.syncProgress.label}
             </div>
           )}
-
-          {status?.lastSyncedAt && !status.syncInFlight && (
-            <div
-              style={{
-                marginTop: "8px",
-                fontSize: "0.68rem",
-                color: "var(--color-text-muted)",
-                display: "flex",
-                alignItems: "center",
-                gap: "4px",
-              }}
-            >
-              <Clock size={10} />
-              Synced {formatFullTime(status.lastSyncedAt)}
-            </div>
-          )}
         </div>
 
         {/* Thread list */}
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px" }}>
-          {threads.length === 0 && !busy && (
+          {displayedThreads.length === 0 && !busy && (
             <div
               style={{
                 display: "flex",
@@ -1253,131 +1929,276 @@ export function InboxAgentPanel() {
               </div>
             </div>
           )}
-          {displayedThreads.map((thread) => {
-            const selected = selectedThreadId === thread.id;
-            const badge = priorityBadge(thread.priorityBand);
-            const sender = thread.participants[0];
-            return (
-              <button
-                key={thread.id}
-                onClick={() => setSelectedThreadId(thread.id)}
+          {displayedThreads.length > 0 &&
+            threadGroups.map((group) => (
+              <div
+                key={group.id}
                 style={{
-                  width: "100%",
-                  textAlign: "left",
-                  marginBottom: "4px",
-                  padding: "10px 12px",
-                  borderRadius: "var(--radius-md, 10px)",
-                  border: selected
-                    ? "1px solid var(--color-accent)"
-                    : "1px solid transparent",
-                  background: selected
-                    ? "var(--color-accent-subtle)"
-                    : "transparent",
-                  color: "var(--color-text-primary)",
-                  cursor: "pointer",
-                  transition: "all 0.12s ease",
-                  display: "block",
-                  fontFamily: "var(--font-ui)",
-                }}
-                onMouseEnter={(e) => {
-                  if (!selected) {
-                    (e.currentTarget as HTMLElement).style.background = "var(--color-bg-hover)";
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (!selected) {
-                    (e.currentTarget as HTMLElement).style.background = "transparent";
-                  }
+                  marginBottom: "10px",
+                  padding: "10px",
+                  borderRadius: "var(--radius-lg, 14px)",
+                  border: "1px solid var(--color-border-subtle)",
+                  background: "var(--color-bg-secondary)",
                 }}
               >
-                <div style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
-                  <Avatar name={sender?.name} email={sender?.email} size={28} />
-                  <div style={{ minWidth: 0, flex: 1 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "baseline",
+                    justifyContent: "space-between",
+                    gap: "12px",
+                    marginBottom: "8px",
+                    padding: "0 2px",
+                  }}
+                >
+                  <div>
                     <div
                       style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        gap: "6px",
-                        marginBottom: "2px",
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontSize: "0.8rem",
-                          fontWeight: thread.unreadCount > 0 ? 700 : 500,
-                          color: "var(--color-text-secondary)",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {sender?.name || sender?.email || "Unknown"}
-                      </span>
-                      <span
-                        style={{
-                          fontSize: "0.68rem",
-                          color: "var(--color-text-muted)",
-                          flexShrink: 0,
-                        }}
-                      >
-                        {formatTime(thread.lastMessageAt)}
-                      </span>
-                    </div>
-                    <div
-                      style={{
-                        fontSize: "0.82rem",
-                        fontWeight: thread.unreadCount > 0 ? 700 : 500,
+                        fontSize: "0.76rem",
+                        fontWeight: 800,
+                        letterSpacing: "0.08em",
+                        textTransform: "uppercase",
                         color: "var(--color-text-primary)",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        marginBottom: "3px",
                       }}
                     >
-                      {thread.subject}
+                      {group.label}
                     </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: "6px",
-                      }}
-                    >
-                      <span
-                        style={{
-                          fontSize: "0.74rem",
-                          color: "var(--color-text-muted)",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          flex: 1,
-                        }}
-                      >
-                        {thread.snippet}
-                      </span>
-                      {thread.priorityBand !== "low" && (
-                        <span
-                          style={{
-                            fontSize: "0.64rem",
-                            fontWeight: 700,
-                            padding: "2px 6px",
-                            borderRadius: "8px",
-                            background: badge.bg,
-                            color: badge.color,
-                            flexShrink: 0,
-                          }}
-                        >
-                          {badge.label}
-                        </span>
-                      )}
+                    <div style={{ fontSize: "0.72rem", color: "var(--color-text-muted)", marginTop: "2px" }}>
+                      {group.description}
                     </div>
                   </div>
+                  <span
+                    style={{
+                      fontSize: "0.7rem",
+                      padding: "3px 8px",
+                      borderRadius: "999px",
+                      background: "var(--color-bg-elevated)",
+                      color: "var(--color-text-muted)",
+                      border: "1px solid var(--color-border-subtle)",
+                    }}
+                  >
+                    {group.threads.length}
+                  </span>
                 </div>
-              </button>
-            );
-          })}
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  {group.threads.map((thread) => {
+                    const selected = selectedThreadId === thread.id;
+                    const selectedForBulk = selectedThreadIds.includes(thread.id);
+                    const badge = priorityBadge(thread.priorityBand);
+                    const sender = thread.participants[0];
+                    const summaryLabel = thread.summary?.suggestedNextAction || thread.snippet;
+                    return (
+                      <button
+                        key={thread.id}
+                        onClick={() => setSelectedThreadId(thread.id)}
+                        style={{
+                          width: "100%",
+                          textAlign: "left",
+                          padding: "12px 12px 11px",
+                          borderRadius: "var(--radius-md, 10px)",
+                          border: selected
+                            ? "1px solid var(--color-accent)"
+                            : selectedForBulk
+                              ? "1px solid rgba(124,92,191,0.5)"
+                              : "1px solid var(--color-border-subtle)",
+                          background: selected
+                            ? "linear-gradient(180deg, rgba(124,92,191,0.12) 0%, rgba(255,255,255,0.96) 100%)"
+                            : selectedForBulk
+                              ? "rgba(124,92,191,0.08)"
+                              : "var(--color-bg-elevated)",
+                          color: "var(--color-text-primary)",
+                          cursor: "pointer",
+                          transition: "all 0.12s ease",
+                          display: "block",
+                          fontFamily: "var(--font-ui)",
+                        }}
+                        onMouseEnter={(e) => {
+                          if (!selected) {
+                            (e.currentTarget as HTMLElement).style.background = "var(--color-bg-hover)";
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (!selected && !selectedForBulk) {
+                            (e.currentTarget as HTMLElement).style.background = "var(--color-bg-elevated)";
+                          }
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                          <input
+                            type="checkbox"
+                            checked={selectedForBulk}
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={() => toggleThreadSelection(thread.id)}
+                            style={{
+                              marginTop: "7px",
+                              accentColor: "var(--color-accent)",
+                              flexShrink: 0,
+                            }}
+                          />
+                          <Avatar name={sender?.name} email={sender?.email} size={30} />
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                gap: "6px",
+                                marginBottom: "2px",
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: "0.8rem",
+                                  fontWeight: thread.unreadCount > 0 ? 700 : 600,
+                                  color: "var(--color-text-secondary)",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {sender?.name || sender?.email || "Unknown"}
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: "0.68rem",
+                                  color: "var(--color-text-muted)",
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {formatTime(thread.lastMessageAt)}
+                              </span>
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "0.84rem",
+                                fontWeight: thread.unreadCount > 0 ? 700 : 600,
+                                color: "var(--color-text-primary)",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                marginBottom: "4px",
+                              }}
+                            >
+                              {thread.subject}
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: "8px",
+                                marginBottom: "6px",
+                                flexWrap: "wrap",
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: "0.74rem",
+                                  color: "var(--color-text-muted)",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                  flex: 1,
+                                  minWidth: 0,
+                                }}
+                              >
+                                {summaryLabel}
+                              </span>
+                            </div>
+                            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                              <span
+                                style={{
+                                  fontSize: "0.64rem",
+                                  padding: "2px 6px",
+                                  borderRadius: "999px",
+                                  background: "rgba(99,102,241,0.08)",
+                                  color: "var(--color-text-muted)",
+                                  border: "1px solid var(--color-border-subtle)",
+                                }}
+                              >
+                                {thread.messageCount} msg{thread.messageCount === 1 ? "" : "s"}
+                              </span>
+                              {thread.unreadCount > 0 && (
+                                <span
+                                  style={{
+                                    fontSize: "0.64rem",
+                                    padding: "2px 6px",
+                                    borderRadius: "999px",
+                                    background: "rgba(99,102,241,0.12)",
+                                    color: "var(--color-accent)",
+                                    border: "1px solid rgba(99,102,241,0.16)",
+                                  }}
+                                >
+                                  {thread.unreadCount} unread
+                                </span>
+                              )}
+                              {thread.needsReply && (
+                                <span
+                                  style={{
+                                    fontSize: "0.64rem",
+                                    padding: "2px 6px",
+                                    borderRadius: "999px",
+                                    background: "rgba(245,158,11,0.12)",
+                                    color: "#b45309",
+                                    border: "1px solid rgba(245,158,11,0.16)",
+                                  }}
+                                >
+                                  Needs reply
+                                </span>
+                              )}
+                              {thread.cleanupCandidate && (
+                                <span
+                                  style={{
+                                    fontSize: "0.64rem",
+                                    padding: "2px 6px",
+                                    borderRadius: "999px",
+                                    background: "rgba(148,163,184,0.12)",
+                                    color: "var(--color-text-muted)",
+                                    border: "1px solid rgba(148,163,184,0.16)",
+                                  }}
+                                >
+                                  Cleanup
+                                </span>
+                              )}
+                              {thread.hasSensitiveContent && (
+                                <span
+                                  style={{
+                                    fontSize: "0.64rem",
+                                    padding: "2px 6px",
+                                    borderRadius: "999px",
+                                    background: "rgba(239,68,68,0.12)",
+                                    color: "#ef4444",
+                                    border: "1px solid rgba(239,68,68,0.16)",
+                                  }}
+                                >
+                                  Sensitive
+                                </span>
+                              )}
+                              {thread.priorityBand !== "low" && (
+                                <span
+                                  style={{
+                                    fontSize: "0.64rem",
+                                    fontWeight: 700,
+                                    padding: "2px 6px",
+                                    borderRadius: "8px",
+                                    background: badge.bg,
+                                    color: badge.color,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {badge.label}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
         </div>
       </section>
 
@@ -1429,6 +2250,74 @@ export function InboxAgentPanel() {
                     .map((p) => p.name || p.email)
                     .join(", ")}
                 </div>
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "8px" }}>
+                  <span
+                    style={{
+                      padding: "3px 8px",
+                      borderRadius: "999px",
+                      background: "var(--color-bg-secondary)",
+                      color: "var(--color-text-secondary)",
+                      fontSize: "0.68rem",
+                      border: "1px solid var(--color-border-subtle)",
+                    }}
+                  >
+                    {selectedThread.provider}
+                  </span>
+                  <span
+                    style={{
+                      padding: "3px 8px",
+                      borderRadius: "999px",
+                      background: selectedThread.needsReply
+                        ? "rgba(245,158,11,0.12)"
+                        : "var(--color-bg-secondary)",
+                      color: selectedThread.needsReply ? "#b45309" : "var(--color-text-secondary)",
+                      fontSize: "0.68rem",
+                      border: "1px solid var(--color-border-subtle)",
+                    }}
+                  >
+                    {selectedThread.needsReply ? "Needs reply" : "No reply needed"}
+                  </span>
+                  <span
+                    style={{
+                      padding: "3px 8px",
+                      borderRadius: "999px",
+                      background: "var(--color-bg-secondary)",
+                      color: "var(--color-text-secondary)",
+                      fontSize: "0.68rem",
+                      border: "1px solid var(--color-border-subtle)",
+                    }}
+                  >
+                    {selectedThread.messageCount} message{selectedThread.messageCount === 1 ? "" : "s"}
+                  </span>
+                  {selectedThread.commitments.length > 0 && (
+                    <span
+                      style={{
+                        padding: "3px 8px",
+                        borderRadius: "999px",
+                        background: "var(--color-bg-secondary)",
+                        color: "var(--color-text-secondary)",
+                        fontSize: "0.68rem",
+                        border: "1px solid var(--color-border-subtle)",
+                      }}
+                    >
+                      {selectedThread.commitments.length} commitment{selectedThread.commitments.length === 1 ? "" : "s"}
+                    </span>
+                  )}
+                  {selectedThread.sensitiveContent?.hasSensitiveContent && (
+                    <span
+                      style={{
+                        padding: "3px 8px",
+                        borderRadius: "999px",
+                        background: "rgba(239,68,68,0.12)",
+                        color: "#ef4444",
+                        fontSize: "0.68rem",
+                        border: "1px solid rgba(239,68,68,0.16)",
+                      }}
+                    >
+                      Sensitive content
+                    </span>
+                  )}
+                </div>
               </div>
               <div style={{ display: "flex", gap: "6px", flexShrink: 0 }}>
                 <IconBtn
@@ -1436,7 +2325,11 @@ export function InboxAgentPanel() {
                     setMessageSortOrder((current) => (current === "newest" ? "oldest" : "newest"))
                   }
                   icon={<Clock size={13} />}
-                  title={messageSortOrder === "newest" ? "Newest first" : "Oldest first"}
+                  title={
+                    messageSortOrder === "newest"
+                      ? "Message order: newest first (click for oldest first)"
+                      : "Message order: oldest first (click for newest first)"
+                  }
                   active={messageSortOrder === "newest"}
                 />
                 <IconBtn
@@ -1447,12 +2340,18 @@ export function InboxAgentPanel() {
                     })
                   }
                   icon={<Sparkles size={13} />}
-                  title="Generate AI summary"
+                  title="Summarize thread with AI"
                 />
                 <IconBtn
                   onClick={() => void reclassifySelectedThread()}
                   icon={<RefreshCcw size={13} />}
-                  title="Reclassify thread"
+                  title="Reclassify thread (triage labels)"
+                  disabled={busy}
+                />
+                <IconBtn
+                  onClick={() => void snoozeSelectedThread()}
+                  icon={<Clock size={13} />}
+                  title="Snooze or remind later"
                   disabled={busy}
                 />
                 <IconBtn
@@ -1466,7 +2365,7 @@ export function InboxAgentPanel() {
                     })
                   }
                   icon={<Reply size={13} />}
-                  title="Draft reply"
+                  title="Draft a reply with AI"
                 />
               </div>
             </>
@@ -1535,7 +2434,7 @@ export function InboxAgentPanel() {
                   fontSize: "0.86rem",
                 }}
               >
-                {selectedThread.summary.summary}
+                {stripMailboxSummaryHtmlArtifacts(selectedThread.summary.summary)}
               </div>
               {!!selectedThread.summary.keyAsks.length && (
                 <div
@@ -1627,6 +2526,22 @@ export function InboxAgentPanel() {
                   />
                 </div>
               </div>
+              {selectedThread.sensitiveContent?.hasSensitiveContent && (
+                <div
+                  style={{
+                    marginBottom: "10px",
+                    padding: "8px 10px",
+                    borderRadius: "var(--radius-sm, 8px)",
+                    background: "rgba(239,68,68,0.08)",
+                    border: "1px solid rgba(239,68,68,0.2)",
+                    color: "var(--color-text-secondary)",
+                    fontSize: "0.76rem",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  Sensitive content detected. Review carefully before sending or automating this thread.
+                </div>
+              )}
               <pre
                 style={{
                   margin: 0,
@@ -1652,55 +2567,41 @@ export function InboxAgentPanel() {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+                gridTemplateColumns: "1fr",
                 gap: "12px",
               }}
             >
-              <div
-                style={{
-                  border: "1px solid var(--color-border-subtle)",
-                  borderRadius: "var(--radius-lg, 14px)",
-                  background: "var(--color-bg-secondary)",
-                  padding: "12px",
-                  minWidth: 0,
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-                  <SectionLabel>Received Emails</SectionLabel>
-                  <span
-                    style={{
-                      fontSize: "0.7rem",
-                      padding: "2px 8px",
-                      borderRadius: "10px",
-                      background: "var(--color-bg-elevated)",
-                      color: "var(--color-text-muted)",
-                      border: "1px solid var(--color-border-subtle)",
-                    }}
-                  >
-                    {receivedMessages.length}
-                  </span>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                  {receivedMessages.length ? (
-                    receivedMessages.map((message) => renderMessageCard(message))
-                  ) : (
-                    <div
+              {messageSections.map((section) => (
+                <div
+                  key={section.title}
+                  style={{
+                    border: "1px solid var(--color-border-subtle)",
+                    borderRadius: "var(--radius-lg, 14px)",
+                    background: "var(--color-bg-secondary)",
+                    padding: "12px",
+                    minWidth: 0,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+                    <SectionLabel>{section.title}</SectionLabel>
+                    <span
                       style={{
-                        padding: "14px",
-                        textAlign: "center",
-                        color: "var(--color-text-muted)",
-                        fontSize: "0.82rem",
-                        borderRadius: "var(--radius-md, 10px)",
+                        fontSize: "0.7rem",
+                        padding: "2px 8px",
+                        borderRadius: "10px",
                         background: "var(--color-bg-elevated)",
+                        color: "var(--color-text-muted)",
                         border: "1px solid var(--color-border-subtle)",
                       }}
                     >
-                      No received emails
-                    </div>
-                  )}
+                      {section.messages.length}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    {section.messages.map((message) => renderMessageCard(message))}
+                  </div>
                 </div>
-              </div>
-
+              ))}
             </div>
           ) : (
             <div
@@ -1812,6 +2713,12 @@ export function InboxAgentPanel() {
               label="Refresh intel"
               disabled={busy || !selectedThread}
             />
+            <ActionBtn
+              onClick={() => void openHandoffPanel()}
+              icon={<User size={13} />}
+              label="Handoff"
+              disabled={busy || !selectedThread}
+            />
           </div>
         </div>
 
@@ -1873,6 +2780,510 @@ export function InboxAgentPanel() {
           )}
 
           {selectedThread && (
+            <div
+              style={{
+                marginBottom: "16px",
+                padding: "14px",
+                borderRadius: "var(--radius-lg, 14px)",
+                background: "linear-gradient(180deg, rgba(124,92,191,0.08) 0%, rgba(255,255,255,0.96) 100%)",
+                border: "1px solid rgba(124,92,191,0.18)",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: "0.68rem",
+                  fontWeight: 800,
+                  letterSpacing: "0.14em",
+                  textTransform: "uppercase",
+                  color: "var(--color-accent)",
+                  marginBottom: "6px",
+                }}
+              >
+                Next best action
+              </div>
+              <div
+                style={{
+                  fontSize: "0.84rem",
+                  lineHeight: 1.55,
+                  color: "var(--color-text-primary)",
+                  marginBottom: "10px",
+                  fontWeight: 600,
+                }}
+              >
+                {selectedThread.summary?.suggestedNextAction ||
+                  (selectedThread.drafts[0]
+                    ? "Review the draft, then send or discard."
+                    : selectedThread.needsReply
+                      ? "Draft a response and check the commitments."
+                      : selectedThread.commitments.length
+                        ? "Review the commitments and decide what to accept."
+                        : "Review the thread and decide whether it can be archived.")
+                }
+              </div>
+              <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                <span
+                  style={{
+                    padding: "4px 8px",
+                    borderRadius: "999px",
+                    background: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-border-subtle)",
+                    fontSize: "0.7rem",
+                    color: "var(--color-text-secondary)",
+                  }}
+                >
+                  {selectedThread.provider}
+                </span>
+                <span
+                  style={{
+                    padding: "4px 8px",
+                    borderRadius: "999px",
+                    background: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-border-subtle)",
+                    fontSize: "0.7rem",
+                    color: "var(--color-text-secondary)",
+                  }}
+                >
+                  {selectedThread.messageCount} message{selectedThread.messageCount === 1 ? "" : "s"}
+                </span>
+                <span
+                  style={{
+                    padding: "4px 8px",
+                    borderRadius: "999px",
+                    background: selectedThread.needsReply
+                      ? "rgba(245,158,11,0.12)"
+                      : "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-border-subtle)",
+                    fontSize: "0.7rem",
+                    color: selectedThread.needsReply ? "#b45309" : "var(--color-text-secondary)",
+                  }}
+                >
+                  {selectedThread.needsReply ? "Needs reply" : "No reply needed"}
+                </span>
+              </div>
+              {selectedThread.sensitiveContent?.hasSensitiveContent && (
+                <div
+                  style={{
+                    marginTop: "10px",
+                    padding: "9px 10px",
+                    borderRadius: "var(--radius-sm, 8px)",
+                    background: "rgba(239,68,68,0.08)",
+                    border: "1px solid rgba(239,68,68,0.18)",
+                    color: "var(--color-text-secondary)",
+                    fontSize: "0.76rem",
+                    lineHeight: 1.45,
+                  }}
+                >
+                  Sensitive content detected. Review before forwarding or automating this thread.
+                </div>
+              )}
+            </div>
+          )}
+
+          {selectedThreadReplyTargets.length ? (
+            <div style={{ marginBottom: "16px" }}>
+              <SectionLabel>Reply via</SectionLabel>
+              <div style={{ display: "grid", gap: "8px" }}>
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                  {selectedThreadReplyTargets.map((target) => (
+                    <ActionBtn
+                      key={target.handleId}
+                      onClick={() => openReplyComposer(target.handleId)}
+                      icon={<Reply size={11} />}
+                      label={`Reply via ${formatChannelLabel(target.channelType)}`}
+                      variant={recommendedReplyTarget?.handleId === target.handleId ? "primary" : "default"}
+                      title={
+                        recommendedReplyTarget?.handleId === target.handleId
+                          ? "Recommended target based on recent activity"
+                          : target.lastMessageAt
+                            ? `Last active ${formatFullTime(target.lastMessageAt)}`
+                            : target.displayValue
+                      }
+                      disabled={busy}
+                    />
+                    ))}
+                </div>
+                {replyChannelType && (
+                  <div
+                    style={{
+                      padding: "12px 14px",
+                      borderRadius: "var(--radius-md, 10px)",
+                      border: "1px solid var(--color-border-subtle)",
+                      background: "var(--color-bg-secondary)",
+                    }}
+                  >
+                    <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--color-text-primary)" }}>
+                      Reply via {formatChannelLabel(replyChannelType)}
+                    </div>
+                    <div style={{ marginTop: "4px", fontSize: "0.72rem", color: "var(--color-text-muted)" }}>
+                      Choose the channel target, write the reply, then send it.
+                    </div>
+                    <textarea
+                      value={replyMessage}
+                      onChange={(event) => setReplyMessage(event.target.value)}
+                      rows={5}
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        marginTop: "10px",
+                        padding: "10px 12px",
+                        borderRadius: "var(--radius-sm, 8px)",
+                        border: "1px solid var(--color-border)",
+                        background: "var(--color-bg-input)",
+                        color: "var(--color-text-primary)",
+                        fontSize: "0.78rem",
+                        resize: "vertical",
+                        lineHeight: 1.5,
+                      }}
+                    />
+                    <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "10px" }}>
+                      <ActionBtn
+                        onClick={() => void sendReplyViaChannel()}
+                        icon={<Send size={11} />}
+                        label="Send reply"
+                        variant="primary"
+                        disabled={busy || !replyMessage.trim()}
+                      />
+                      <ActionBtn
+                        onClick={() => {
+                          setReplyChannelType(null);
+                          setReplyTargetHandleId(null);
+                          setReplyMessage("");
+                        }}
+                        icon={<X size={11} />}
+                        label="Cancel"
+                        disabled={busy}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          {selectedThread && handoffPanelOpen && (
+            <div style={{ marginBottom: "16px" }}>
+              <SectionLabel>Mission Control Handoff</SectionLabel>
+              <div
+                style={{
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md, 10px)",
+                  border: "1px solid var(--color-border-subtle)",
+                  background: "var(--color-bg-secondary)",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "0.76rem",
+                    color: "var(--color-text-muted)",
+                    lineHeight: 1.5,
+                    marginBottom: "10px",
+                  }}
+                >
+                  Create a company issue from this thread, assign the operator, then wake them immediately.
+                </div>
+
+                <div style={{ display: "grid", gap: "8px", marginBottom: "10px" }}>
+                  <label style={{ display: "grid", gap: "4px" }}>
+                    <span style={{ fontSize: "0.72rem", color: "var(--color-text-muted)" }}>
+                      Company
+                    </span>
+                    <select
+                      value={handoffCompanyId}
+                      onChange={(event) => {
+                        setHandoffCompanyId(event.target.value);
+                        setHandoffCompanyConfirmed(false);
+                      }}
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        padding: "7px 10px",
+                        borderRadius: "var(--radius-sm, 8px)",
+                        border: "1px solid var(--color-border)",
+                        background: "var(--color-bg-input)",
+                        color: "var(--color-text-primary)",
+                        fontSize: "0.78rem",
+                      }}
+                    >
+                      <option value="">Select company</option>
+                      {companyCandidates.map((candidate) => (
+                        <option key={candidate.companyId} value={candidate.companyId}>
+                          {candidate.name}
+                          {candidate.confidence >= 0.7 ? " · recommended" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {handoffCompanyId && (
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        fontSize: "0.74rem",
+                        color: "var(--color-text-secondary)",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={handoffCompanyConfirmed}
+                        onChange={(event) => setHandoffCompanyConfirmed(event.target.checked)}
+                      />
+                      Confirm target company
+                    </label>
+                  )}
+
+                  <label style={{ display: "grid", gap: "4px" }}>
+                    <span style={{ fontSize: "0.72rem", color: "var(--color-text-muted)" }}>
+                      Operator
+                    </span>
+                    <select
+                      value={handoffOperatorRoleId}
+                      onChange={(event) => setHandoffOperatorRoleId(event.target.value)}
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        padding: "7px 10px",
+                        borderRadius: "var(--radius-sm, 8px)",
+                        border: "1px solid var(--color-border)",
+                        background: "var(--color-bg-input)",
+                        color: "var(--color-text-primary)",
+                        fontSize: "0.78rem",
+                      }}
+                    >
+                      <option value="">Select operator</option>
+                      {selectedCompanyRoles.map((role) => (
+                        <option key={role.id} value={role.id}>
+                          {role.displayName}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label style={{ display: "grid", gap: "4px" }}>
+                    <span style={{ fontSize: "0.72rem", color: "var(--color-text-muted)" }}>
+                      Issue title
+                    </span>
+                    <input
+                      value={handoffIssueTitle}
+                      onChange={(event) => setHandoffIssueTitle(event.target.value)}
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        padding: "7px 10px",
+                        borderRadius: "var(--radius-sm, 8px)",
+                        border: "1px solid var(--color-border)",
+                        background: "var(--color-bg-input)",
+                        color: "var(--color-text-primary)",
+                        fontSize: "0.78rem",
+                      }}
+                    />
+                  </label>
+
+                  <label style={{ display: "grid", gap: "4px" }}>
+                    <span style={{ fontSize: "0.72rem", color: "var(--color-text-muted)" }}>
+                      Issue summary
+                    </span>
+                    <textarea
+                      value={handoffIssueSummary}
+                      onChange={(event) => setHandoffIssueSummary(event.target.value)}
+                      rows={6}
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        padding: "8px 10px",
+                        borderRadius: "var(--radius-sm, 8px)",
+                        border: "1px solid var(--color-border)",
+                        background: "var(--color-bg-input)",
+                        color: "var(--color-text-primary)",
+                        fontSize: "0.76rem",
+                        resize: "vertical",
+                        lineHeight: 1.45,
+                      }}
+                    />
+                  </label>
+                </div>
+
+                {handoffPreview?.sensitiveContentRedacted && (
+                  <div
+                    style={{
+                      marginBottom: "10px",
+                      padding: "9px 10px",
+                      borderRadius: "var(--radius-sm, 8px)",
+                      background: "rgba(239,68,68,0.08)",
+                      border: "1px solid rgba(239,68,68,0.18)",
+                      color: "var(--color-text-secondary)",
+                      fontSize: "0.74rem",
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    Sensitive content detected. The handoff uses summary-level context and mailbox evidence refs only.
+                  </div>
+                )}
+
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: handoffRecords.length ? "12px" : 0 }}>
+                  <ActionBtn
+                    onClick={() => void createMissionControlHandoff()}
+                    icon={<CheckSquare size={11} />}
+                    label="Create issue & wake operator"
+                    variant="primary"
+                    disabled={busy || !handoffCompanyId || !handoffOperatorRoleId || !handoffIssueTitle.trim()}
+                  />
+                  <ActionBtn
+                    onClick={() => setHandoffPanelOpen(false)}
+                    icon={<X size={11} />}
+                    label="Close"
+                    disabled={busy}
+                  />
+                </div>
+
+                {handoffRecords.length > 0 && (
+                  <div style={{ display: "grid", gap: "8px", marginTop: "10px" }}>
+                    {handoffRecords.map((record) => (
+                      <div
+                        key={record.id}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: "var(--radius-sm, 8px)",
+                          background: "var(--color-bg-elevated)",
+                          border: "1px solid var(--color-border-subtle)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: "8px",
+                            marginBottom: "4px",
+                          }}
+                        >
+                          <div style={{ fontSize: "0.8rem", fontWeight: 600, color: "var(--color-text-primary)" }}>
+                            {record.issueTitle}
+                          </div>
+                          <span className="mc-v2-ops-pill">{record.issueStatus}</span>
+                        </div>
+                        <div style={{ fontSize: "0.72rem", color: "var(--color-text-muted)", lineHeight: 1.45 }}>
+                          {record.companyName} · {record.operatorDisplayName}
+                          {record.latestOutcome ? ` · ${record.latestOutcome}` : ""}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {selectedThread && (
+            <div style={{ marginBottom: "16px" }}>
+              <SectionLabel>Automations</SectionLabel>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", marginBottom: "10px" }}>
+                <ActionBtn
+                  onClick={() => void createRuleFromCurrentContext()}
+                  icon={<Sparkles size={13} />}
+                  label="Rule from context"
+                  disabled={busy}
+                />
+                <ActionBtn
+                  onClick={() => void snoozeSelectedThread()}
+                  icon={<Clock size={13} />}
+                  label="Remind later"
+                  disabled={busy}
+                />
+              </div>
+              <div
+                style={{
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md, 10px)",
+                  border: "1px solid var(--color-border-subtle)",
+                  background: "var(--color-bg-secondary)",
+                }}
+              >
+                {selectedThreadAutomations.length ? (
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    {selectedThreadAutomations.map((automation) => (
+                      <div
+                        key={automation.id}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: "var(--radius-sm, 8px)",
+                          background: "var(--color-bg-elevated)",
+                          border: "1px solid var(--color-border-subtle)",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: "8px", justifyContent: "space-between" }}>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div
+                              style={{
+                                fontSize: "0.82rem",
+                                fontWeight: 600,
+                                color: "var(--color-text-primary)",
+                                marginBottom: "3px",
+                              }}
+                            >
+                              {automation.name}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "0.72rem",
+                                color: "var(--color-text-muted)",
+                                lineHeight: 1.45,
+                              }}
+                            >
+                              {automation.kind}
+                              {" · "}
+                              {automation.status}
+                              {automation.latestOutcome ? ` · ${automation.latestOutcome}` : ""}
+                              {automation.nextRunAt ? ` · Next ${formatFullTime(automation.nextRunAt)}` : ""}
+                              {automation.latestFireAt ? ` · Fired ${formatFullTime(automation.latestFireAt)}` : ""}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void runAction(async () => {
+                                if (automation.kind === "rule") {
+                                  await window.electronAPI.deleteMailboxRule(automation.id);
+                                } else {
+                                  await window.electronAPI.deleteMailboxSchedule(automation.id);
+                                }
+                                await reloadAll(selectedThread.id);
+                              })
+                            }
+                            style={{
+                              border: "1px solid var(--color-border-subtle)",
+                              background: "var(--color-bg-secondary)",
+                              borderRadius: "999px",
+                              color: "var(--color-text-muted)",
+                              fontSize: "0.68rem",
+                              padding: "2px 8px",
+                              cursor: "pointer",
+                              flexShrink: 0,
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      fontSize: "0.78rem",
+                      color: "var(--color-text-muted)",
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    No automations are attached to this thread yet.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {selectedThread && (
             <div style={{ marginBottom: "16px" }}>
               <SectionLabel>Quick Actions</SectionLabel>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
@@ -1880,22 +3291,61 @@ export function InboxAgentPanel() {
                   onClick={() => void handleThreadAction("mark_read")}
                   icon={<MailOpen size={13} />}
                   label="Mark read"
-                  disabled={busy || selectedThread.unreadCount === 0}
+                  disabled={
+                    busy ||
+                    selectedThread.unreadCount === 0 ||
+                    (selectedThread.provider === "gmail" && !gmailCleanupActionsEnabled)
+                  }
+                  title={
+                    selectedThread.provider === "gmail" && gmailCleanupDisabledReason
+                      ? gmailCleanupDisabledReason
+                      : undefined
+                  }
                 />
                 <ActionBtn
                   onClick={() => void handleThreadAction("archive")}
                   icon={<Archive size={13} />}
                   label="Archive"
-                  disabled={busy || selectedThread.provider !== "gmail"}
+                  disabled={
+                    busy ||
+                    selectedThread.provider !== "gmail" ||
+                    !gmailCleanupActionsEnabled
+                  }
+                  title={
+                    selectedThread.provider === "gmail" && gmailCleanupDisabledReason
+                      ? gmailCleanupDisabledReason
+                      : undefined
+                  }
                 />
                 <ActionBtn
                   onClick={() => void handleThreadAction("trash")}
                   icon={<Trash2 size={13} />}
                   label="Trash"
                   variant="danger"
-                  disabled={busy || selectedThread.provider !== "gmail"}
+                  disabled={
+                    busy ||
+                    selectedThread.provider !== "gmail" ||
+                    !gmailCleanupActionsEnabled
+                  }
+                  title={
+                    selectedThread.provider === "gmail" && gmailCleanupDisabledReason
+                      ? gmailCleanupDisabledReason
+                      : undefined
+                  }
                 />
               </div>
+              {selectedThreadNeedsGmailCleanupAttention && (
+                <div
+                  style={{
+                    marginTop: "8px",
+                    fontSize: "0.74rem",
+                    lineHeight: 1.45,
+                    color: "var(--color-text-muted)",
+                  }}
+                >
+                  {gmailCleanupDisabledReason}
+                </div>
+              )}
             </div>
           )}
 
@@ -1926,70 +3376,79 @@ export function InboxAgentPanel() {
                   {queueProposals.length}
                 </span>
               </div>
-              {queueProposals.map((proposal) => (
-                <div
-                  key={proposal.id}
-                  style={{
-                    padding: "12px 14px",
-                    borderRadius: "var(--radius-md, 10px)",
-                    border: "1px solid var(--color-border-subtle)",
-                    background: "var(--color-bg-secondary)",
-                    marginBottom: "8px",
-                  }}
-                >
+              {queueProposals.map((proposal) => {
+                const proposalThread = threads.find((thread) => thread.id === proposal.threadId);
+                const proposalRequiresGmailModify =
+                  proposal.type === "cleanup" &&
+                  proposalThread?.provider === "gmail" &&
+                  Boolean(gmailCleanupDisabledReason);
+
+                return (
                   <div
+                    key={proposal.id}
                     style={{
-                      fontWeight: 600,
-                      fontSize: "0.84rem",
-                      color: "var(--color-text-primary)",
-                      marginBottom: "4px",
+                      padding: "12px 14px",
+                      borderRadius: "var(--radius-md, 10px)",
+                      border: "1px solid var(--color-border-subtle)",
+                      background: "var(--color-bg-secondary)",
+                      marginBottom: "8px",
                     }}
                   >
-                    {proposal.title}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: "0.78rem",
-                      color: "var(--color-text-muted)",
-                      lineHeight: 1.5,
-                      marginBottom: "10px",
-                    }}
-                  >
-                    {proposal.reasoning}
-                  </div>
-                  <div style={{ display: "flex", gap: "6px" }}>
-                    <ActionBtn
-                      onClick={() => void handleApplyProposal(proposal)}
-                      icon={<CheckSquare size={12} />}
-                      label={proposalActionLabel(proposal)}
-                      variant="primary"
-                      disabled={busy}
-                    />
-                    <ActionBtn
-                      onClick={() =>
-                        void runAction(async () => {
-                          await window.electronAPI.applyMailboxAction({
-                            proposalId: proposal.id,
-                            threadId: proposal.threadId,
-                            type: "dismiss_proposal",
-                          });
-                          if (queueMode) {
-                            const result = await window.electronAPI.reviewMailboxBulkAction({
-                              type: queueMode,
-                              limit: 20,
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        fontSize: "0.84rem",
+                        color: "var(--color-text-primary)",
+                        marginBottom: "4px",
+                      }}
+                    >
+                      {proposal.title}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: "0.78rem",
+                        color: "var(--color-text-muted)",
+                        lineHeight: 1.5,
+                        marginBottom: "10px",
+                      }}
+                    >
+                      {proposal.reasoning}
+                    </div>
+                    <div style={{ display: "flex", gap: "6px" }}>
+                      <ActionBtn
+                        onClick={() => void handleApplyProposal(proposal)}
+                        icon={<CheckSquare size={12} />}
+                        label={proposalActionLabel(proposal)}
+                        variant="primary"
+                        disabled={busy || proposalRequiresGmailModify}
+                        title={proposalRequiresGmailModify ? gmailCleanupDisabledReason || undefined : undefined}
+                      />
+                      <ActionBtn
+                        onClick={() =>
+                          void runAction(async () => {
+                            await window.electronAPI.applyMailboxAction({
+                              proposalId: proposal.id,
+                              threadId: proposal.threadId,
+                              type: "dismiss_proposal",
                             });
-                            setQueueProposals(result.proposals);
-                          }
-                          await loadStatus();
-                        })
-                      }
-                      icon={<X size={12} />}
-                      label="Dismiss"
-                      disabled={busy}
-                    />
+                            if (queueMode) {
+                              const result = await window.electronAPI.reviewMailboxBulkAction({
+                                type: queueMode,
+                                limit: 20,
+                              });
+                              setQueueProposals(result.proposals);
+                            }
+                            await loadStatus();
+                          })
+                        }
+                        icon={<X size={12} />}
+                        label="Dismiss"
+                        disabled={busy}
+                      />
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               {queueProposals.length === 0 && (
                 <div
                   style={{
@@ -2020,6 +3479,11 @@ export function InboxAgentPanel() {
                   const draftSubject = typeof proposal.preview?.subject === "string"
                     ? proposal.preview.subject
                     : null;
+                  const proposalThread = threads.find((thread) => thread.id === proposal.threadId);
+                  const proposalRequiresGmailModify =
+                    proposal.type === "cleanup" &&
+                    proposalThread?.provider === "gmail" &&
+                    Boolean(gmailCleanupDisabledReason);
                   return (
                     <div
                       key={proposal.id}
@@ -2090,7 +3554,8 @@ export function InboxAgentPanel() {
                           icon={<CheckSquare size={12} />}
                           label={proposalActionLabel(proposal)}
                           variant="primary"
-                          disabled={busy}
+                          disabled={busy || proposalRequiresGmailModify}
+                          title={proposalRequiresGmailModify ? gmailCleanupDisabledReason || undefined : undefined}
                         />
                         <ActionBtn
                           onClick={() =>
@@ -2249,15 +3714,35 @@ export function InboxAgentPanel() {
                     marginBottom: "8px",
                   }}
                 >
-                  <div
-                    style={{
-                      fontWeight: 600,
-                      fontSize: "0.84rem",
-                      color: "var(--color-text-primary)",
-                      marginBottom: "4px",
-                    }}
-                  >
-                    {commitment.title}
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: "8px", justifyContent: "space-between" }}>
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        fontSize: "0.84rem",
+                        color: "var(--color-text-primary)",
+                        marginBottom: "4px",
+                        minWidth: 0,
+                        flex: 1,
+                      }}
+                    >
+                      {commitment.title}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => beginCommitmentEdit(commitment)}
+                      style={{
+                        border: "1px solid var(--color-border-subtle)",
+                        background: "var(--color-bg-elevated)",
+                        borderRadius: "999px",
+                        color: "var(--color-text-secondary)",
+                        fontSize: "0.68rem",
+                        padding: "2px 8px",
+                        cursor: "pointer",
+                        flexShrink: 0,
+                      }}
+                    >
+                      Edit
+                    </button>
                   </div>
                   <div
                     style={{
@@ -2282,38 +3767,115 @@ export function InboxAgentPanel() {
                         fontSize: "0.68rem",
                         fontWeight: 600,
                       }}
-                    >
+                      >
                       {commitment.state}
                     </span>
                   </div>
-                  <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
-                    <ActionBtn
-                      onClick={() => void handleCommitmentState(commitment, "accepted")}
-                      icon={<CheckSquare size={11} />}
-                      label={
-                        commitment.state === "accepted"
-                          ? commitment.followUpTaskId
-                            ? "Accepted"
-                            : "Create follow-up"
-                          : "Accept"
-                      }
-                      variant={commitment.state === "accepted" && commitment.followUpTaskId ? "default" : "primary"}
-                      disabled={busy || (commitment.state === "accepted" && Boolean(commitment.followUpTaskId))}
-                    />
-                    <ActionBtn
-                      onClick={() => void handleCommitmentState(commitment, "done")}
-                      icon={<CheckSquare size={11} />}
-                      label="Done"
-                      disabled={busy}
-                    />
-                    <ActionBtn
-                      onClick={() => void handleCommitmentState(commitment, "dismissed")}
-                      icon={<X size={11} />}
-                      label="Dismiss"
-                      variant="danger"
-                      disabled={busy}
-                    />
-                  </div>
+                  {editingCommitmentId === commitment.id ? (
+                    <div
+                      style={{
+                        display: "grid",
+                        gap: "8px",
+                        marginTop: "8px",
+                        padding: "10px",
+                        borderRadius: "var(--radius-md, 10px)",
+                        background: "var(--color-bg-elevated)",
+                        border: "1px solid var(--color-border-subtle)",
+                      }}
+                    >
+                      <input
+                        value={editingCommitmentTitle}
+                        onChange={(event) => setEditingCommitmentTitle(event.target.value)}
+                        placeholder="Commitment title"
+                        style={{
+                          width: "100%",
+                          boxSizing: "border-box",
+                          padding: "7px 10px",
+                          borderRadius: "var(--radius-sm, 8px)",
+                          border: "1px solid var(--color-border)",
+                          background: "var(--color-bg-input)",
+                          color: "var(--color-text-primary)",
+                          fontSize: "0.78rem",
+                        }}
+                      />
+                      <input
+                        type="datetime-local"
+                        value={editingCommitmentDueAt}
+                        onChange={(event) => setEditingCommitmentDueAt(event.target.value)}
+                        style={{
+                          width: "100%",
+                          boxSizing: "border-box",
+                          padding: "7px 10px",
+                          borderRadius: "var(--radius-sm, 8px)",
+                          border: "1px solid var(--color-border)",
+                          background: "var(--color-bg-input)",
+                          color: "var(--color-text-primary)",
+                          fontSize: "0.78rem",
+                        }}
+                      />
+                      <input
+                        value={editingCommitmentOwnerEmail}
+                        onChange={(event) => setEditingCommitmentOwnerEmail(event.target.value)}
+                        placeholder="Owner email"
+                        style={{
+                          width: "100%",
+                          boxSizing: "border-box",
+                          padding: "7px 10px",
+                          borderRadius: "var(--radius-sm, 8px)",
+                          border: "1px solid var(--color-border)",
+                          background: "var(--color-bg-input)",
+                          color: "var(--color-text-primary)",
+                          fontSize: "0.78rem",
+                        }}
+                      />
+                      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                        <ActionBtn
+                          onClick={() => void saveCommitmentEdit(commitment)}
+                          icon={<CheckSquare size={11} />}
+                          label="Save"
+                          variant="primary"
+                          disabled={busy}
+                        />
+                        <ActionBtn
+                          onClick={cancelCommitmentEdit}
+                          icon={<X size={11} />}
+                          label="Cancel"
+                          disabled={busy}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", gap: "5px", flexWrap: "wrap" }}>
+                      <ActionBtn
+                        onClick={() => void handleCommitmentState(commitment, "accepted")}
+                        icon={<CheckSquare size={11} />}
+                        label={
+                          commitment.state === "accepted"
+                            ? commitment.followUpTaskId
+                              ? "Accepted"
+                              : "Create follow-up"
+                            : "Accept"
+                        }
+                        variant={
+                          commitment.state === "accepted" && commitment.followUpTaskId ? "default" : "primary"
+                        }
+                        disabled={busy || (commitment.state === "accepted" && Boolean(commitment.followUpTaskId))}
+                      />
+                      <ActionBtn
+                        onClick={() => void handleCommitmentState(commitment, "done")}
+                        icon={<CheckSquare size={11} />}
+                        label="Done"
+                        disabled={busy}
+                      />
+                      <ActionBtn
+                        onClick={() => void handleCommitmentState(commitment, "dismissed")}
+                        icon={<X size={11} />}
+                        label="Dismiss"
+                        variant="danger"
+                        disabled={busy}
+                      />
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -2338,6 +3900,18 @@ export function InboxAgentPanel() {
                   <User size={13} style={{ flexShrink: 0, marginTop: "2px", color: "var(--color-text-muted)" }} />
                   <span>{selectedThread.research.primaryContact?.email || "Unknown contact"}</span>
                 </div>
+                {selectedThread.research.contactIdentityId && (
+                  <div
+                    style={{
+                      paddingLeft: "19px",
+                      fontSize: "0.74rem",
+                      color: "var(--color-text-muted)",
+                      marginBottom: "6px",
+                    }}
+                  >
+                    Identity confidence: {Math.round((selectedThread.research.identityConfidence || 0) * 100)}%
+                  </div>
+                )}
                 {selectedThread.research.company && (
                   <div style={{ color: "var(--color-text-muted)", paddingLeft: "19px", marginBottom: "6px" }}>
                     {selectedThread.research.company}
@@ -2366,6 +3940,51 @@ export function InboxAgentPanel() {
                     {selectedThread.research.recommendedQueries.join(" · ")}
                   </div>
                 )}
+                {!!selectedThread.research.relatedEntities?.length && (
+                  <div
+                    style={{
+                      paddingLeft: "19px",
+                      marginTop: "8px",
+                      fontSize: "0.76rem",
+                      color: "var(--color-text-muted)",
+                    }}
+                  >
+                    Related: {selectedThread.research.relatedEntities.join(" · ")}
+                  </div>
+                )}
+                {!!selectedThread.research.linkedChannels?.length && (
+                  <div
+                    style={{
+                      paddingLeft: "19px",
+                      marginTop: "8px",
+                      fontSize: "0.76rem",
+                      color: "var(--color-text-muted)",
+                    }}
+                  >
+                    Linked channels:{" "}
+                    {selectedThread.research.linkedChannels
+                      .map((channel) => channel.channelType || channel.handleType)
+                      .join(" · ")}
+                  </div>
+                )}
+                {!!selectedThread.research.identityCandidates?.length &&
+                  !selectedThread.research.linkedChannels?.length && (
+                    <div
+                      style={{
+                        paddingLeft: "19px",
+                        marginTop: "8px",
+                        fontSize: "0.76rem",
+                        color: "var(--color-warning, #c47f00)",
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      Possible matches:{" "}
+                      {selectedThread.research.identityCandidates
+                        .slice(0, 3)
+                        .map((candidate) => candidate.sourceLabel)
+                        .join(" · ")}
+                    </div>
+                  )}
                 {!!selectedThread.research.styleSignals?.length && (
                   <div
                     style={{
@@ -2401,6 +4020,77 @@ export function InboxAgentPanel() {
                     }}
                   >
                     Last outbound: {selectedThread.research.recentOutboundExample}
+                  </div>
+                )}
+                {selectedThread.research.channelPreference?.recommendedReason && (
+                  <div
+                    style={{
+                      paddingLeft: "19px",
+                      marginTop: "8px",
+                      fontSize: "0.76rem",
+                      color: "var(--color-text-secondary)",
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Channel recommendation: {selectedThread.research.channelPreference.recommendedReason}
+                  </div>
+                )}
+                {!!selectedThread.research.unifiedTimeline?.length && (
+                  <div
+                    style={{
+                      paddingLeft: "19px",
+                      marginTop: "10px",
+                      display: "grid",
+                      gap: "8px",
+                    }}
+                  >
+                    <div style={{ fontSize: "0.74rem", color: "var(--color-text-muted)" }}>
+                      Unified timeline
+                    </div>
+                    {selectedThread.research.unifiedTimeline.slice(0, 5).map((event) => (
+                      <div
+                        key={event.id}
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: "8px",
+                          border: "1px solid var(--color-border-subtle)",
+                          background: "var(--color-bg-elevated)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            gap: "8px",
+                            fontSize: "0.72rem",
+                            color: "var(--color-text-muted)",
+                          }}
+                        >
+                          <span>{event.sourceLabel}</span>
+                          <span>{formatTime(event.timestamp)}</span>
+                        </div>
+                        <div
+                          style={{
+                            marginTop: "3px",
+                            fontSize: "0.76rem",
+                            color: "var(--color-text-primary)",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {event.title}
+                        </div>
+                        <div
+                          style={{
+                            marginTop: "2px",
+                            fontSize: "0.74rem",
+                            color: "var(--color-text-secondary)",
+                            lineHeight: 1.45,
+                          }}
+                        >
+                          {event.summary}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
                 {!!selectedThread.research.nextSteps?.length && (

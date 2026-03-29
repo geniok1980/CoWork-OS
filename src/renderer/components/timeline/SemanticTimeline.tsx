@@ -11,14 +11,19 @@
  * frame. A "Show all" toggle expands to the full list.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UiTimelineEvent } from "../../../shared/timeline-events";
 import type { TaskEvent, TimelineVerbosity } from "../../../shared/types";
+import { VirtualList } from "../VirtualList";
+import { getGlobalMeasurer, isPretextEnabled } from "../../utils/pretext-adapter";
 import { AgentEventCard } from "./AgentEventCard";
 import { ApprovalEventCard } from "./ApprovalEventCard";
 import { SummaryEventCard } from "./SummaryEventCard";
 
 const WINDOW_SIZE = 6;
+const ESTIMATED_CARD_HEIGHT = 56;
+const ESTIMATED_TEXT_LINE_HEIGHT = 18;
+const TIMELINE_HORIZONTAL_CHROME = 96;
 
 // ---------------------------------------------------------------------------
 // Phase chip strip
@@ -98,6 +103,75 @@ function ShowAllToggle({ showAll, totalCount, onChange }: ShowAllToggleProps) {
   );
 }
 
+function estimateTimelineCardChrome(event: UiTimelineEvent, isVerbose: boolean): number {
+  let chrome = 34;
+
+  if (event.kind === "approval") {
+    chrome += 18;
+  }
+  if (event.kind === "agent") {
+    chrome += 10;
+  }
+
+  const defaultExpanded =
+    event.kind === "approval" || (event.kind === "summary" && isVerbose) ||
+    (event.kind === "agent" && (isVerbose || event.status === "running"));
+
+  if (defaultExpanded) {
+    chrome += 28;
+    if (event.evidence.length > 0) chrome += 56;
+    if (event.rawEventIds.length > 0) chrome += 48;
+    if (event.kind === "agent" && event.children?.length) {
+      chrome += event.children.length * 44;
+    }
+  }
+
+  return chrome;
+}
+
+function MeasuredTimelineItem({
+  eventId,
+  onHeightChange,
+  children,
+}: {
+  eventId: string;
+  onHeightChange: (eventId: string, height: number) => void;
+  children: ReactNode;
+}) {
+  const itemRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const element = itemRef.current;
+    if (!element) return;
+
+    let frame = 0;
+    const measure = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const nextHeight = Math.ceil(element.getBoundingClientRect().height);
+        if (nextHeight > 0) onHeightChange(eventId, nextHeight);
+      });
+    };
+
+    measure();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => measure());
+      observer.observe(element);
+      return () => {
+        if (frame) cancelAnimationFrame(frame);
+        observer.disconnect();
+      };
+    }
+
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [eventId, onHeightChange]);
+
+  return <div ref={itemRef}>{children}</div>;
+}
+
 // ---------------------------------------------------------------------------
 // SemanticTimeline
 // ---------------------------------------------------------------------------
@@ -125,6 +199,9 @@ export function SemanticTimeline({
   const [verbosity, setVerbosity] = useState<TimelineVerbosity>(initialVerbosity);
   const [showAll, setShowAll] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
+  const [measuredHeights, setMeasuredHeights] = useState<Record<string, number>>({});
+  const [containerWidth, setContainerWidth] = useState(0);
+  const useVirtual = !showAll && isPretextEnabled() && events.length > WINDOW_SIZE;
 
   const activePhases = useMemo(() => {
     const phases = new Set<TimelinePhase>();
@@ -138,16 +215,127 @@ export function SemanticTimeline({
 
   const isVerbose = verbosity === "verbose";
   const isWindowed = !showAll;
-
-  // In windowed mode, show only the last WINDOW_SIZE events
   const visibleEvents = isWindowed ? events.slice(-WINDOW_SIZE) : events;
 
   // Auto-scroll to bottom in windowed mode when events change
   useEffect(() => {
-    if (isWindowed && feedRef.current) {
+    if (isWindowed && !useVirtual && feedRef.current) {
       feedRef.current.scrollTop = feedRef.current.scrollHeight;
     }
-  }, [visibleEvents, isWindowed]);
+  }, [visibleEvents, isWindowed, useVirtual]);
+
+  useEffect(() => {
+    if (!useVirtual) return;
+    const measurer = getGlobalMeasurer();
+    measurer.prepare(events.map(extractMeasurableText));
+  }, [events, useVirtual]);
+
+  useEffect(() => {
+    if (!useVirtual) {
+      setMeasuredHeights({});
+      return;
+    }
+
+    const validIds = new Set(events.map((event) => event.id));
+    setMeasuredHeights((prev) => {
+      let changed = false;
+      const next: Record<string, number> = {};
+      for (const [eventId, height] of Object.entries(prev)) {
+        if (validIds.has(eventId)) {
+          next[eventId] = height;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [events, useVirtual]);
+
+  useEffect(() => {
+    if (!useVirtual) return;
+    const element = feedRef.current;
+    if (!element) return;
+
+    const updateWidth = () => {
+      setContainerWidth(element.clientWidth);
+    };
+
+    updateWidth();
+
+    const observer = new ResizeObserver(() => updateWidth());
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [useVirtual]);
+
+  const handleMeasuredHeight = useCallback((eventId: string, height: number) => {
+    setMeasuredHeights((prev) => (prev[eventId] === height ? prev : { ...prev, [eventId]: height }));
+  }, []);
+
+  const getItemHeight = useCallback(
+    (event: UiTimelineEvent) => {
+      const measuredHeight = measuredHeights[event.id];
+      if (typeof measuredHeight === "number" && measuredHeight > 0) {
+        return measuredHeight;
+      }
+
+      const textWidth = Math.max((containerWidth || 400) - TIMELINE_HORIZONTAL_CHROME, 140);
+      const textHeight = getGlobalMeasurer().getHeight(
+        extractMeasurableText(event),
+        textWidth,
+        ESTIMATED_TEXT_LINE_HEIGHT,
+      );
+      return Math.max(
+        ESTIMATED_CARD_HEIGHT,
+        Math.ceil(textHeight + estimateTimelineCardChrome(event, isVerbose)),
+      );
+    },
+    [containerWidth, isVerbose, measuredHeights],
+  );
+
+  // ---------- Render helpers ------------------------------------------------
+
+  const renderCard = useCallback(
+    (event: UiTimelineEvent, index: number) => {
+      const total = events.length;
+      const showConnectorAbove = index > 0;
+      const showConnectorBelow = index < total - 1;
+
+      switch (event.kind) {
+        case "summary":
+          return (
+            <SummaryEventCard
+              event={event}
+              allEvents={allEvents}
+              showConnectorAbove={showConnectorAbove}
+              showConnectorBelow={showConnectorBelow}
+              defaultExpanded={isVerbose}
+            />
+          );
+        case "approval":
+          return (
+            <ApprovalEventCard
+              event={event}
+              allEvents={allEvents}
+              showConnectorAbove={showConnectorAbove}
+              showConnectorBelow={showConnectorBelow}
+            />
+          );
+        case "agent":
+          return (
+            <AgentEventCard
+              event={event}
+              allEvents={allEvents}
+              showConnectorAbove={showConnectorAbove}
+              showConnectorBelow={showConnectorBelow}
+              defaultExpanded={isVerbose || event.status === "running"}
+            />
+          );
+        default:
+          return null;
+      }
+    },
+    [allEvents, events.length, isVerbose],
+  );
 
   if (events.length === 0) {
     return <div className="semantic-timeline semantic-timeline-empty" />;
@@ -170,58 +358,47 @@ export function SemanticTimeline({
         </div>
       )}
 
-      {/* Card list */}
-      <div
-        ref={feedRef}
-        className={`semantic-timeline-window ${isWindowed ? "windowed" : "expanded"}`}
-      >
-        <div className="semantic-timeline-feed" role="list">
-          {visibleEvents.map((event, index) => {
-            const showConnectorAbove = index > 0;
-            const showConnectorBelow = index < visibleEvents.length - 1;
-
-            switch (event.kind) {
-              case "summary":
-                return (
-                  <div key={event.id} role="listitem">
-                    <SummaryEventCard
-                      event={event}
-                      allEvents={allEvents}
-                      showConnectorAbove={showConnectorAbove}
-                      showConnectorBelow={showConnectorBelow}
-                      defaultExpanded={isVerbose}
-                    />
-                  </div>
-                );
-              case "approval":
-                return (
-                  <div key={event.id} role="listitem">
-                    <ApprovalEventCard
-                      event={event}
-                      allEvents={allEvents}
-                      showConnectorAbove={showConnectorAbove}
-                      showConnectorBelow={showConnectorBelow}
-                    />
-                  </div>
-                );
-              case "agent":
-                return (
-                  <div key={event.id} role="listitem">
-                    <AgentEventCard
-                      event={event}
-                      allEvents={allEvents}
-                      showConnectorAbove={showConnectorAbove}
-                      showConnectorBelow={showConnectorBelow}
-                      defaultExpanded={isVerbose || event.status === "running"}
-                    />
-                  </div>
-                );
-              default:
-                return null;
-            }
-          })}
+      {useVirtual ? (
+        <div
+          ref={feedRef}
+          className={`semantic-timeline-window ${isWindowed ? "windowed" : "expanded"} semantic-timeline-window-virtualized`}
+          style={{ overflow: "hidden" }}
+        >
+          <VirtualList
+            items={events}
+            getItemKey={(event) => event.id}
+            getItemHeight={getItemHeight}
+            renderItem={(event, index) => (
+              <MeasuredTimelineItem eventId={event.id} onHeightChange={handleMeasuredHeight}>
+                {renderCard(event, index)}
+              </MeasuredTimelineItem>
+            )}
+            estimatedItemHeight={ESTIMATED_CARD_HEIGHT}
+            overscan={4}
+            enabled
+            className="semantic-timeline-feed semantic-timeline-feed-virtual"
+            style={{ height: "100%" }}
+            role="list"
+          />
         </div>
-      </div>
+      ) : (
+        <div
+          ref={feedRef}
+          className={`semantic-timeline-window ${isWindowed ? "windowed" : "expanded"}`}
+        >
+          <div className="semantic-timeline-feed" role="list">
+            {visibleEvents.map((event, index) => (
+              <div key={event.id} role="listitem">
+                {renderCard(event, isWindowed ? events.length - WINDOW_SIZE + index : index)}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+function extractMeasurableText(event: UiTimelineEvent): string {
+  return event.summary ?? "";
 }

@@ -63,6 +63,7 @@ import { importProcessEnvToSettings, migrateEnvToSettings } from "./utils/env-mi
 import {
   TEMP_WORKSPACE_ID,
   TEMP_WORKSPACE_ROOT_DIR_NAME,
+  IPC_CHANNELS,
   isTempWorkspaceId,
 } from "../shared/types";
 import type { Task } from "../shared/types";
@@ -88,6 +89,9 @@ import {
 } from "./cron/workspace-context";
 import { MemoryService } from "./memory/MemoryService";
 import { KnowledgeGraphService } from "./knowledge-graph/KnowledgeGraphService";
+import { MailboxAutomationHub } from "./mailbox/MailboxAutomationHub";
+import { MailboxAutomationRegistry } from "./mailbox/MailboxAutomationRegistry";
+import { getMailboxServiceInstance } from "./mailbox/MailboxService";
 import {
   ControlPlaneSettingsManager,
   setupControlPlaneHandlers,
@@ -1055,6 +1059,11 @@ if (!gotTheLock) {
             mainWindow.webContents.send("cron:event", evt);
           }
           console.log("[Cron] Event:", evt.action, evt.jobId);
+          try {
+            await MailboxAutomationRegistry.recordCronEvent(evt);
+          } catch (error) {
+            logger.debug("[MailboxAutomationRegistry] Failed to record cron event:", error);
+          }
 
           if (evt.action === "finished" && evt.taskId && councilService?.isCouncilJob(evt.jobId)) {
             await councilService.finalizeRunForTask(evt.taskId).catch((error) => {
@@ -1648,13 +1657,37 @@ if (!gotTheLock) {
               params.text,
             );
           },
+          wakeAgent: (agentRoleId: string) => {
+            if (!heartbeatService) return;
+            void heartbeatService.triggerHeartbeat(agentRoleId).catch((error) => {
+              logger.debug("[EventTriggers] wakeAgent failed:", error);
+            });
+          },
           getDefaultWorkspaceId: () => "",
           log: (...args: unknown[]) => console.log("[EventTriggers]", ...args),
+          onTriggerFired: (payload) => {
+            MailboxAutomationRegistry.recordTriggerFire(payload);
+          },
         },
         db,
       );
+      MailboxAutomationRegistry.configure({
+        db,
+        triggerService,
+        resolveDefaultWorkspaceId: () => resolveDefaultWorkspace()?.id,
+        log: (...args: unknown[]) => logger.debug("[MailboxAutomationRegistry]", ...args),
+      });
       triggerService.start();
       setupTriggerHandlers(triggerService);
+      MailboxAutomationHub.configure({
+        triggerService,
+        heartbeatService,
+        resolveDefaultWorkspaceId: () => resolveDefaultWorkspace()?.id,
+        emitMailboxEvent: (event) => {
+          mainWindow?.webContents.send(IPC_CHANNELS.MAILBOX_EVENT, event);
+        },
+        log: (...args: unknown[]) => logger.debug("[MailboxAutomationHub]", ...args),
+      });
       ambientMonitoringService = new AmbientMonitoringService({
         listWorkspaces: () =>
           workspaceRepo
@@ -1757,6 +1790,8 @@ if (!gotTheLock) {
             const workspacePath = workspaceRepo.findById(workspaceId)?.path;
             return readWorkspaceOpenLoops(workspacePath);
           },
+          getMailboxDigest: async (workspaceId) =>
+            getMailboxServiceInstance()?.getMailboxDigest(workspaceId) || null,
           getAwarenessSummary: async (workspaceId) => awarenessService?.getSummary(workspaceId) || null,
           getAutonomyState: async (workspaceId) => autonomyEngine?.getWorldModel(workspaceId) || null,
           getAutonomyDecisions: async (workspaceId) => autonomyEngine?.listDecisions(workspaceId) || [],

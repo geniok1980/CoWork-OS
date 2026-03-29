@@ -171,7 +171,14 @@ function OpsOutputs({ outputs, reviewQueue, setSelectedIssueId, setDetailPanel, 
                 }}
               >
                 <div>
-                  <div className="mc-v2-ops-row-title">{output.title}</div>
+                  <div className="mc-v2-ops-row-title">
+                    {output.title}
+                    {output.originLabel && (
+                      <span style={{ marginLeft: 8 }} className="mc-v2-ops-pill">
+                        {output.originLabel}
+                      </span>
+                    )}
+                  </div>
                   <div className="mc-v2-ops-row-subtitle">{output.outputType} · {output.valueReason}</div>
                   {(output.whatChanged || output.nextStep) && (
                     <div className="mc-v2-ops-row-subtitle">{[output.whatChanged, output.nextStep].filter(Boolean).join(" · ")}</div>
@@ -204,7 +211,14 @@ function OpsOutputs({ outputs, reviewQueue, setSelectedIssueId, setDetailPanel, 
                 }}
               >
                 <div>
-                  <div className="mc-v2-ops-row-title">{item.title}</div>
+                  <div className="mc-v2-ops-row-title">
+                    {item.title}
+                    {item.originLabel && (
+                      <span style={{ marginLeft: 8 }} className="mc-v2-ops-pill">
+                        {item.originLabel}
+                      </span>
+                    )}
+                  </div>
                   <div className="mc-v2-ops-row-subtitle">{item.reviewReason} · {item.outputType || item.sourceType}</div>
                   {item.summary && <div className="mc-v2-ops-row-subtitle">{item.summary}</div>}
                 </div>
@@ -234,7 +248,14 @@ function OpsExecutionMap({ executionMap, setSelectedIssueId, setDetailPanel, sel
           }}
         >
           <div>
-            <div className="mc-v2-ops-row-title">{entry.issueTitle}</div>
+            <div className="mc-v2-ops-row-title">
+              {entry.issueTitle}
+              {entry.originLabel && (
+                <span style={{ marginLeft: 8 }} className="mc-v2-ops-pill">
+                  {entry.originLabel}
+                </span>
+              )}
+            </div>
             <div className="mc-v2-ops-row-subtitle">
               {[entry.goalTitle, entry.projectName, entry.outputType, entry.taskStatus ? `task:${entry.taskStatus}` : undefined].filter(Boolean).join(" · ")}
             </div>

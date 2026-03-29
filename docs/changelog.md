@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Renderer performance**: in the `CoWork-OS/CoWork-OS` repo, sidebar rows now flatten before virtualization, timeline cards use `@chenglou/pretext` estimates with `ResizeObserver` reconciliation, and the main transcript cap stays conservative until the transcript surface is virtualized.
 
+## [0.5.14] - 2026-03-29
+
+### Added
+- **Release notes for 0.5.14**: detailed summary page covering inbox identity, Mission Control handoff, mailbox automation, Google Workspace helpers, and the related UI and branding refresh. See [Release Notes 0.5.14](release-notes-0.5.14.md).
+- **Inbox identity and handoff**: Inbox Agent now links contact identities across email and messaging, can reply through the active channel, and can hand threads off to Mission Control.
+- **Mailbox automation**: rules, reminder cadences, and patrol schedules are now modeled as first-class inbox automation flows.
+
+### Changed
+- **Workspace surfaces**: inbox, settings, and Mission Control views now reflect the new cross-channel inbox workflow.
+- **Documentation counts**: docs home and feature references were synchronized to the current product counts.
+
 ## [0.5.11] - 2026-03-20
 
 ### Added

@@ -56,6 +56,7 @@
 - **Context Summarization**: Automatic context compression surfaced in the task timeline
 - **Structured Input Requests**: In plan-mode flows, the agent can pause with 1-3 short multiple-choice questions instead of asking ambiguous free-text follow-ups
 - **Parallel Tool Timeline**: Concurrent read-only tool bursts are grouped into lane-based timeline cards instead of flooding the event feed
+- **Renderer Performance**: In the `CoWork-OS/CoWork-OS` repo, the renderer uses `@chenglou/pretext` for text-heavy sidebar/timeline measurement, with flattened visible sidebar rows and post-render height reconciliation for expanded timeline cards
 - **Adaptive Runtime Recovery**: Execute tasks use adaptive turn budgets, bounded follow-up recovery, and safety-stop escalation instead of hard window failure by default
 - **Path Drift Repair**: `/workspace/...` aliases and drifted relative paths can be normalized back into the active workspace or pinned task root, with strict-fail policies when hard enforcement is preferred
 - **Action-First Planning**: Agent prioritizes direct action over excessive pre-planning

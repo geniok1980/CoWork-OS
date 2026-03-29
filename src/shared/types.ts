@@ -3860,6 +3860,8 @@ export const IPC_CHANNELS = {
   MAILBOX_SYNC: "mailbox:sync",
   MAILBOX_LIST_THREADS: "mailbox:listThreads",
   MAILBOX_GET_THREAD: "mailbox:getThread",
+  MAILBOX_LIST_EVENTS: "mailbox:listEvents",
+  MAILBOX_GET_DIGEST: "mailbox:getDigest",
   MAILBOX_SUMMARIZE_THREAD: "mailbox:summarizeThread",
   MAILBOX_GENERATE_DRAFT: "mailbox:generateDraft",
   MAILBOX_EXTRACT_COMMITMENTS: "mailbox:extractCommitments",
@@ -3868,8 +3870,26 @@ export const IPC_CHANNELS = {
   MAILBOX_RESEARCH_CONTACT: "mailbox:researchContact",
   MAILBOX_APPLY_ACTION: "mailbox:applyAction",
   MAILBOX_UPDATE_COMMITMENT_STATE: "mailbox:updateCommitmentState",
+  MAILBOX_UPDATE_COMMITMENT_DETAILS: "mailbox:updateCommitmentDetails",
   MAILBOX_RECLASSIFY_THREAD: "mailbox:reclassifyThread",
   MAILBOX_RECLASSIFY_ACCOUNT: "mailbox:reclassifyAccount",
+  MAILBOX_MC_HANDOFF_PREVIEW: "mailbox:missionControlHandoffPreview",
+  MAILBOX_MC_HANDOFF_CREATE: "mailbox:missionControlHandoffCreate",
+  MAILBOX_MC_HANDOFF_LIST: "mailbox:missionControlHandoffList",
+  MAILBOX_IDENTITY_RESOLVE: "mailbox:identityResolve",
+  MAILBOX_IDENTITY_GET: "mailbox:identityGet",
+  MAILBOX_IDENTITY_LIST: "mailbox:identityList",
+  MAILBOX_IDENTITY_SEARCH: "mailbox:identitySearch",
+  MAILBOX_IDENTITY_LINK: "mailbox:identityLink",
+  MAILBOX_IDENTITY_TIMELINE: "mailbox:identityTimeline",
+  MAILBOX_IDENTITY_CANDIDATES: "mailbox:identityCandidates",
+  MAILBOX_IDENTITY_CONFIRM: "mailbox:identityConfirm",
+  MAILBOX_IDENTITY_REJECT: "mailbox:identityReject",
+  MAILBOX_IDENTITY_UNLINK: "mailbox:identityUnlink",
+  MAILBOX_IDENTITY_PREFERENCE: "mailbox:identityPreference",
+  MAILBOX_IDENTITY_COVERAGE: "mailbox:identityCoverage",
+  MAILBOX_REPLY_VIA_CHANNEL: "mailbox:replyViaChannel",
+  MAILBOX_EVENT: "mailbox:event",
 
   // Sub-Agent / Parallel Agent operations
   AGENT_GET_CHILDREN: "agent:getChildren", // Get child tasks for a parent
@@ -4604,6 +4624,16 @@ export const IPC_CHANNELS = {
   TRIGGER_UPDATE: "trigger:update",
   TRIGGER_REMOVE: "trigger:remove",
   TRIGGER_HISTORY: "trigger:history",
+
+  // Mailbox Automations
+  MAILBOX_AUTOMATION_LIST: "mailboxAutomation:list",
+  MAILBOX_AUTOMATION_LIST_THREAD: "mailboxAutomation:listThread",
+  MAILBOX_AUTOMATION_CREATE_RULE: "mailboxAutomation:createRule",
+  MAILBOX_AUTOMATION_UPDATE_RULE: "mailboxAutomation:updateRule",
+  MAILBOX_AUTOMATION_DELETE_RULE: "mailboxAutomation:deleteRule",
+  MAILBOX_AUTOMATION_CREATE_SCHEDULE: "mailboxAutomation:createSchedule",
+  MAILBOX_AUTOMATION_UPDATE_SCHEDULE: "mailboxAutomation:updateSchedule",
+  MAILBOX_AUTOMATION_DELETE_SCHEDULE: "mailboxAutomation:deleteSchedule",
 
   // Daily Briefing (extended)
   BRIEFING_GET_LATEST: "briefing:getLatest",
@@ -8293,6 +8323,8 @@ export interface CompanyOperatorStatus {
 export interface CompanyOutputFeedItem {
   id: string;
   sourceType: "planner_run" | "issue" | "run" | "activity";
+  origin?: "planner" | "inbox" | "manual" | "activity";
+  originLabel?: string;
   title: string;
   summary?: string;
   status?: string;
@@ -8318,6 +8350,8 @@ export interface CompanyReviewQueueItem {
   title: string;
   createdAt: number;
   sourceType: "issue" | "run" | "planner_run" | "activity";
+  origin?: "planner" | "inbox" | "manual" | "activity";
+  originLabel?: string;
   reviewReason: CompanyReviewReason;
   outputType?: CompanyOutputType;
   companyPriority?: CompanyPriority;
@@ -8332,6 +8366,8 @@ export interface CompanyExecutionMapItem {
   issueId: string;
   issueTitle: string;
   issueStatus: Issue["status"];
+  origin?: "planner" | "inbox" | "manual";
+  originLabel?: string;
   goalId?: string;
   goalTitle?: string;
   projectId?: string;

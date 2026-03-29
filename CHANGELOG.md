@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Renderer performance**: in the `CoWork-OS/CoWork-OS` repo, sidebar rows now flatten before virtualization, timeline cards use `@chenglou/pretext` estimates with `ResizeObserver` reconciliation, and the main transcript cap stays conservative until the transcript surface is virtualized.
 
+## [0.5.14] - 2026-03-29
+
+### Added
+- **Release notes for 0.5.14**: added a detailed summary page covering inbox identity, Mission Control handoff, mailbox automation, Google Workspace helpers, and the related UI/branding refresh. See [Release Notes 0.5.14](docs/release-notes-0.5.14.md).
+- **Cross-channel inbox identity**: Inbox Agent now supports unified contact identity linking across email, Slack, Teams, WhatsApp, Signal, iMessage, and CRM-linked handles, with reply targets surfaced from the active channel.
+- **Mission Control handoff**: inbox threads can be turned into company issues with mailbox evidence and operator wake-up context.
+- **Mailbox automation hub**: inbox rules, reminder cadences, and patrol schedules are now modeled as first-class mailbox automation flows.
+- **Brand refresh assets**: new screenshot, logo, and favicon variants were added for the current product branding.
+
+### Changed
+- **Inbox Agent surfaces**: inbox, settings, workspace selector, Mission Control, and task routing UIs were updated to reflect the new cross-channel inbox workflow.
+- **Google Workspace helpers**: shared Gmail/Calendar/Drive helpers and OAuth normalization were consolidated to support the inbox pipeline and identity linking.
+- **Heartbeat and briefing flow**: mailbox and scheduling signals now feed Heartbeat v3, planner, briefing, playbook, and knowledge-graph paths more directly.
+- **Documentation counts**: README, docs home, feature docs, project status, and comparison docs were synchronized to current product counts and release scope.
+
+### Fixed
+- **Identity-linking conservatism**: ambiguous contact matches stay review-first instead of auto-linking blindly.
+- **Reply routing clarity**: reply actions now prefer real conversation targets rather than generic fallbacks.
+
 ## [0.5.13] - 2026-03-28
 
 ### Added

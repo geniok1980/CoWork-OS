@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="screenshots/cowork-os-sl-dark-logo.png">
     <source media="(prefers-color-scheme: light)" srcset="screenshots/cowork-os-sl-color-logo.png">
-    <img src="screenshots/cowork-os-sl-color-logo.png" alt="CoWork OS" width="360">
+    <img src="screenshots/cowork-os-sl-color-logo.png" alt="CoWork OS" width="600">
   </picture>
 </p>
 

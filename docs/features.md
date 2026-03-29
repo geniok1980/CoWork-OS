@@ -75,8 +75,10 @@ Local-first inbox workspace for email triage, follow-up, and task capture.
 - **Live inbox surfaces**: `Unread`, `Action Needed`, `Suggested Actions`, and `Open Commitments`
 - **Mailbox views**: `Inbox`, `Sent`, and `All`, with `Recent` and `Priority` sorting
 - **Action rail**: cleanup, follow-up, thread prep, todo extraction, scheduling, and intel refresh
-- **Draft review**: generated replies can be sent or discarded before anything leaves the app
+- **Thread visibility**: received and sent message content are both shown in the thread detail view
 - **Commitment handling**: accepted commitments become real follow-up tasks that can later be marked done or dismissed
+- **Event pipeline**: mailbox sync, triage, draft, and action events feed Knowledge Graph, Heartbeat, triggers, playbooks, and briefing
+- **Safer review**: sensitive-content warnings and draft review keep outbound actions visible before anything leaves the app
 - **Local persistence**: cached mail remains visible after restart while background sync refreshes new mail
 
 See the full workflow guide in [Inbox Agent](inbox-agent.md).

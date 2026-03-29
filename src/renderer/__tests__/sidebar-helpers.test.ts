@@ -7,6 +7,7 @@ import type { Task } from "../../shared/types";
 import {
   compareTasksByPinAndRecency,
   countHiddenFailedSessions,
+  flattenVisibleTaskRows,
   isActiveSessionStatus,
   isAutomatedSession,
   isAwaitingSessionStatus,
@@ -136,6 +137,47 @@ describe("countHiddenFailedSessions", () => {
     const tasks = [createTask({ id: "failed-root", status: "failed" })];
     const count = countHiddenFailedSessions(tasks, "full");
     expect(count).toBe(0);
+  });
+});
+
+describe("flattenVisibleTaskRows", () => {
+  it("returns depth-first visible rows while preserving root numbering", () => {
+    const tree = [
+      {
+        task: createTask({ id: "root-1" }),
+        children: [
+          { task: createTask({ id: "child-1", parentTaskId: "root-1" }), children: [] },
+          { task: createTask({ id: "child-2", parentTaskId: "root-1" }), children: [] },
+        ],
+      },
+      {
+        task: createTask({ id: "root-2" }),
+        children: [{ task: createTask({ id: "child-3", parentTaskId: "root-2" }), children: [] }],
+      },
+    ];
+
+    const rows = flattenVisibleTaskRows(tree, new Set());
+
+    expect(rows.map((row) => [row.node.task.id, row.depth, row.rootIndex, row.isLast])).toEqual([
+      ["root-1", 0, 0, false],
+      ["child-1", 1, 0, false],
+      ["child-2", 1, 0, true],
+      ["root-2", 0, 1, true],
+      ["child-3", 1, 1, true],
+    ]);
+  });
+
+  it("omits descendants of collapsed rows", () => {
+    const tree = [
+      {
+        task: createTask({ id: "root-1" }),
+        children: [{ task: createTask({ id: "child-1", parentTaskId: "root-1" }), children: [] }],
+      },
+    ];
+
+    const rows = flattenVisibleTaskRows(tree, new Set(["root-1"]));
+
+    expect(rows.map((row) => row.node.task.id)).toEqual(["root-1"]);
   });
 });
 

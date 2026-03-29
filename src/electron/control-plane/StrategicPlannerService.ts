@@ -429,13 +429,21 @@ export class StrategicPlannerService {
       }
 
       if (staleIssue) {
+        const staleIssueMetadata = this.getPlannerMetadata(staleIssue);
         seeds.push({
           kind: "issue_refresh",
-          title: `Refresh stale issue: ${staleIssue.title}`,
+          title:
+            staleIssueMetadata?.source === "mailbox_handoff"
+              ? `Planner follow-up for inbox issue: ${staleIssue.title}`
+              : `Refresh stale issue: ${staleIssue.title}`,
           description:
-            `This issue appears stale and needs a next step.\n\n` +
-            `Issue: ${staleIssue.title}\nStatus: ${staleIssue.status}\n\n` +
-            `Reassess the blocker, progress, or required action and move it forward.`,
+            staleIssueMetadata?.source === "mailbox_handoff"
+              ? `This inbox-originated issue appears stale and may need planner co-management.\n\n` +
+                `Issue: ${staleIssue.title}\nStatus: ${staleIssue.status}\n\n` +
+                `Create a linked follow-up issue that clarifies the next step without taking ownership away from the original inbox handoff.`
+              : `This issue appears stale and needs a next step.\n\n` +
+                `Issue: ${staleIssue.title}\nStatus: ${staleIssue.status}\n\n` +
+                `Reassess the blocker, progress, or required action and move it forward.`,
           priority: Math.min(2, staleIssue.priority || 2),
           projectId: project.id,
           workspaceId: staleIssue.workspaceId || linkedWorkspaceId,
@@ -490,6 +498,10 @@ export class StrategicPlannerService {
         companyId: company.id,
         goalId: seed.goalId,
         projectId: seed.projectId,
+        parentIssueId:
+          seed.kind === "issue_refresh" && seed.targetIssueId
+            ? seed.targetIssueId
+            : undefined,
         workspaceId: seed.workspaceId,
         title: seed.title,
         description: seed.description,
@@ -668,6 +680,7 @@ export class StrategicPlannerService {
     plannerKind?: PlannerManagedIssueKind;
     targetIssueId?: string;
     outputContract?: CompanyOutputContract;
+    source?: string;
   } | null {
     if (!issue.metadata || typeof issue.metadata !== "object") return null;
     return issue.metadata as {
@@ -675,6 +688,7 @@ export class StrategicPlannerService {
       plannerKind?: PlannerManagedIssueKind;
       targetIssueId?: string;
       outputContract?: CompanyOutputContract;
+      source?: string;
     };
   }
 

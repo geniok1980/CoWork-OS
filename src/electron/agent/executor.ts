@@ -17660,18 +17660,35 @@ Return ONLY a JSON object:
       (c: Any) => c?.type === "text" && typeof c.text === "string" && c.text.trim().length > 0,
     );
     const combinedPlanText = textBlocks.map((c: Any) => String(c.text)).join("\n\n").trim();
-    if (combinedPlanText) {
+    const sanitizedCombinedPlanText = sanitizeToolCallTextFromAssistant(combinedPlanText);
+    const planParsingText = sanitizedCombinedPlanText.text
+      ? sanitizedCombinedPlanText.text
+      : !sanitizedCombinedPlanText.hadToolCallText
+        ? combinedPlanText
+        : "";
+
+    if (planParsingText) {
       try {
         // Try to extract and parse JSON from the response
-        const json = this.extractJsonObject(combinedPlanText);
+        const json = this.extractJsonObject(planParsingText);
         // Validate that the JSON has a valid steps array
         if (json && Array.isArray(json.steps) && json.steps.length > 0) {
           // Ensure each step has required fields
           this.plan = this.sanitizePlan({
-            description: json.description || "Execution plan",
+            description:
+              typeof json.description === "string" && json.description.trim().length > 0
+                ? json.description
+                : "Execution plan",
             steps: json.steps.map((s: Any, i: number) => ({
               id: s.id || String(i + 1),
-              description: s.description || s.step || s.task || String(s),
+              description:
+                typeof s?.description === "string" && s.description.trim()
+                  ? s.description
+                  : typeof s?.step === "string" && s.step.trim()
+                    ? s.step
+                    : typeof s?.task === "string" && s.task.trim()
+                      ? s.task
+                      : `Step ${i + 1}`,
               kind:
                 s.kind === "verification" || s.kind === "recovery" || s.kind === "primary"
                   ? s.kind
@@ -17682,7 +17699,7 @@ Return ONLY a JSON object:
           this.emitEvent("plan_created", { plan: this.plan });
         } else {
           // Fallback: recover structured steps from plain text output
-          const recoveredSteps = this.extractPlanStepsFromText(combinedPlanText);
+          const recoveredSteps = this.extractPlanStepsFromText(planParsingText);
           this.plan = this.sanitizePlan({
             description: "Execution plan",
             steps:
@@ -17695,10 +17712,10 @@ Return ONLY a JSON object:
                       : "primary",
                     status: "pending" as const,
                   }))
-                : [
+                  : [
                     {
                       id: "1",
-                      description: combinedPlanText.slice(0, 500),
+                      description: planParsingText.slice(0, 500),
                       kind: "primary",
                       status: "pending" as const,
                     },

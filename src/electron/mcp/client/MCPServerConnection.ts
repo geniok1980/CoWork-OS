@@ -40,7 +40,18 @@ export interface MCPServerConnectionEvents {
   tools_changed: (tools: MCPTool[]) => void;
   resources_changed: (resources: MCPResource[]) => void;
   prompts_changed: (prompts: MCPPrompt[]) => void;
+  connector_event: (event: MCPConnectorEvent) => void;
   error: (error: Error) => void;
+}
+
+export interface MCPConnectorEvent {
+  serverId: string;
+  serverName: string;
+  connectorId?: string;
+  type: "tool_list_changed" | "resource_list_changed" | "resource_updated" | "prompt_list_changed";
+  resourceUri?: string;
+  timestamp: number;
+  payload?: Record<string, Any>;
 }
 
 export class MCPServerConnection extends EventEmitter {
@@ -57,6 +68,7 @@ export class MCPServerConnection extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connectedAt: number | null = null;
   private intentionalDisconnect = false;
+  private subscribedResourceUris = new Set<string>();
 
   constructor(
     config: MCPServerConfig,
@@ -94,6 +106,14 @@ export class MCPServerConnection extends EventEmitter {
    */
   getTools(): MCPTool[] {
     return this.tools;
+  }
+
+  getResources(): MCPResource[] {
+    return this.resources;
+  }
+
+  getPrompts(): MCPPrompt[] {
+    return this.prompts;
   }
 
   /**
@@ -193,6 +213,51 @@ export class MCPServerConnection extends EventEmitter {
     } catch (error: Any) {
       logger.error("Tool call failed:", error);
       throw new Error(`Tool ${name} failed: ${error.message}`);
+    }
+  }
+
+  async subscribeResource(uri: string): Promise<void> {
+    if (!uri.trim()) return;
+    if (!this.transport || this.status !== "connected") {
+      throw new Error(`Server ${this.config.name} is not connected`);
+    }
+    if (!this.serverInfo?.capabilities?.resources?.subscribe) {
+      return;
+    }
+    if (this.subscribedResourceUris.has(uri)) {
+      return;
+    }
+    await this.transport.sendRequest(MCP_METHODS.RESOURCES_SUBSCRIBE, { uri });
+    this.subscribedResourceUris.add(uri);
+  }
+
+  async unsubscribeResource(uri: string): Promise<void> {
+    if (!uri.trim()) return;
+    if (!this.transport || this.status !== "connected") {
+      this.subscribedResourceUris.delete(uri);
+      return;
+    }
+    if (!this.serverInfo?.capabilities?.resources?.subscribe) {
+      this.subscribedResourceUris.delete(uri);
+      return;
+    }
+    await this.transport.sendRequest(MCP_METHODS.RESOURCES_UNSUBSCRIBE, { uri });
+    this.subscribedResourceUris.delete(uri);
+  }
+
+  async syncResourceSubscriptions(resourceUris: Iterable<string>): Promise<void> {
+    const nextUris = new Set(
+      Array.from(resourceUris)
+        .map((uri) => String(uri || "").trim())
+        .filter(Boolean),
+    );
+    const toUnsubscribe = Array.from(this.subscribedResourceUris).filter((uri) => !nextUris.has(uri));
+    const toSubscribe = Array.from(nextUris).filter((uri) => !this.subscribedResourceUris.has(uri));
+    for (const uri of toUnsubscribe) {
+      await this.unsubscribeResource(uri);
+    }
+    for (const uri of toSubscribe) {
+      await this.subscribeResource(uri);
     }
   }
 
@@ -347,17 +412,32 @@ export class MCPServerConnection extends EventEmitter {
     switch (notification.method) {
       case MCP_METHODS.TOOLS_LIST_CHANGED:
         // Re-fetch tools
-        this.refreshTools();
+        void this.refreshTools();
+        this.emitConnectorEvent("tool_list_changed", notification.params);
         break;
 
       case MCP_METHODS.RESOURCES_LIST_CHANGED:
         // Re-fetch resources
-        this.refreshResources();
+        void this.refreshResources();
+        this.emitConnectorEvent("resource_list_changed", notification.params);
+        break;
+
+      case MCP_METHODS.RESOURCES_UPDATED:
+        this.emitConnectorEvent(
+          "resource_updated",
+          notification.params,
+          typeof notification.params?.uri === "string"
+            ? notification.params.uri
+            : typeof notification.params?.resource?.uri === "string"
+              ? notification.params.resource.uri
+              : undefined,
+        );
         break;
 
       case MCP_METHODS.PROMPTS_LIST_CHANGED:
         // Re-fetch prompts
-        this.refreshPrompts();
+        void this.refreshPrompts();
+        this.emitConnectorEvent("prompt_list_changed", notification.params);
         break;
 
       case MCP_METHODS.CANCELLED:
@@ -377,6 +457,21 @@ export class MCPServerConnection extends EventEmitter {
         // Only log truly unknown notifications at debug level
         logger.debug(`Unknown notification: ${notification.method}`);
     }
+  }
+
+  private emitConnectorEvent(
+    type: MCPConnectorEvent["type"],
+    payload?: Record<string, Any>,
+    resourceUri?: string,
+  ): void {
+    this.emit("connector_event", {
+      serverId: this.config.id,
+      serverName: this.config.name,
+      type,
+      resourceUri,
+      timestamp: Date.now(),
+      payload,
+    } satisfies MCPConnectorEvent);
   }
 
   /**
@@ -496,6 +591,7 @@ export class MCPServerConnection extends EventEmitter {
     this.tools = [];
     this.resources = [];
     this.prompts = [];
+    this.subscribedResourceUris.clear();
     this.serverInfo = null;
     this.connectedAt = null;
   }

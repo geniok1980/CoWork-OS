@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AgentDaemon } from "../daemon";
 import type { TaskOutputSummary } from "../../../shared/types";
+import { PersonalityManager } from "../../settings/personality-manager";
+
+vi.spyOn(PersonalityManager, "recordTaskCompleted").mockImplementation(() => {});
 
 function createDaemonLike() {
   return {
@@ -53,7 +56,8 @@ function createDaemonLike() {
       passed: true,
       issues: [],
     }),
-    runPostCompletionVerification: vi.fn(),
+    runPostCompletionVerification: vi.fn().mockResolvedValue(undefined),
+    runPostTaskEntropySweep: vi.fn().mockResolvedValue(undefined),
     worktreeManager: {
       getSettings: vi.fn().mockReturnValue({
         autoCommitOnComplete: false,
@@ -666,6 +670,109 @@ describe("AgentDaemon.completeTask", () => {
       "verification_pending_user_action",
       expect.objectContaining({
         nonBlockingFailedStepIds: ["step:verify"],
+      }),
+    );
+  });
+
+  it("passes verification evidence bundle into the quality gate and verifier", () => {
+    const daemonLike = createDaemonLike();
+    daemonLike.taskRepo.findById.mockReturnValue({
+      id: "task-1",
+      title: "Task 1",
+      prompt: "Ship the verified endpoint change",
+      status: "executing",
+      workspaceId: "workspace-1",
+      agentType: "main",
+      agentConfig: {
+        reviewPolicy: "strict",
+      },
+    });
+    daemonLike.eventRepo.findByTaskId.mockReturnValue([
+      {
+        id: "e1",
+        taskId: "task-1",
+        timestamp: Date.now(),
+        type: "tool_call",
+        payload: {
+          tool: "run_command",
+          input: { command: "npm install" },
+        },
+      },
+      {
+        id: "e2",
+        taskId: "task-1",
+        timestamp: Date.now(),
+        type: "tool_error",
+        payload: { tool: "run_command", error: "failed" },
+      },
+      {
+        id: "e3",
+        taskId: "task-1",
+        timestamp: Date.now(),
+        type: "tool_error",
+        payload: { tool: "run_command", error: "failed" },
+      },
+      {
+        id: "e4",
+        taskId: "task-1",
+        timestamp: Date.now(),
+        type: "tool_error",
+        payload: { tool: "run_command", error: "failed" },
+      },
+    ]);
+    const verificationEvidenceBundle = {
+      entries: [{ kind: "shell_command", ok: true, detail: "ok", capturedAt: Date.now() }],
+    };
+
+    AgentDaemon.prototype.completeTask.call(daemonLike, "task-1", "done", {
+      verificationEvidenceBundle,
+    });
+
+    expect(daemonLike.runQuickQualityPass).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verificationEvidenceBundle,
+      }),
+    );
+    expect(daemonLike.runPostCompletionVerification).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "task-1" }),
+      "done",
+      verificationEvidenceBundle,
+    );
+  });
+
+  it("starts entropy sweep for top-level mutating tasks when policy allows it", () => {
+    const daemonLike = createDaemonLike();
+    daemonLike.taskRepo.findById.mockReturnValue({
+      id: "task-1",
+      title: "Task 1",
+      prompt: "Update docs after code changes",
+      status: "executing",
+      workspaceId: "workspace-1",
+      agentType: "main",
+      agentConfig: {
+        reviewPolicy: "strict",
+      },
+    });
+
+    AgentDaemon.prototype.completeTask.call(daemonLike, "task-1", "done", {
+      outputSummary: {
+        created: ["docs/update.md"],
+        modifiedFallback: ["README.md"],
+        outputCount: 2,
+      },
+    });
+
+    expect(daemonLike.logEvent).toHaveBeenCalledWith(
+      "task-1",
+      "entropy_sweep_started",
+      expect.objectContaining({
+        source: "post_completion_entropy_sweep",
+      }),
+    );
+    expect(daemonLike.runPostTaskEntropySweep).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "task-1" }),
+      expect.objectContaining({
+        parentSummary: "done",
       }),
     );
   });

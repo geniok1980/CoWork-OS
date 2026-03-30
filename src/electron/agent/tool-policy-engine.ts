@@ -174,6 +174,19 @@ const VIDEO_CREATION_INTENT_PATTERN =
   /\b(video|clip|animation|footage|reel|movie)\b|create\s+(?:an?\s+)?video|generate\s+(?:an?\s+)?video|make\s+(?:an?\s+)?video|record\s+(?:an?\s+)?video/i;
 const SYSTEM_INTENT_PATTERN =
   /\b(clipboard|screenshot|finder|application|open app|open url|environment variable|env var|applescript|desktop automation)\b/i;
+/** Native / full-desktop control — last resort after MCP, browser, and shell. */
+const COMPUTER_USE_INTENT_PATTERN =
+  /\b(computer use|desktop automation|native app|native macos|macos app|control my (mac|screen|desktop)|not in browser|gui only|ios simulator|simulator|xcode|system preferences|menu bar)\b/i;
+const EXPLICIT_APPLESCRIPT_INTENT_PATTERN =
+  /\b(applescript|osascript|script editor|apple script|tell application|system events)\b/i;
+const NATIVE_APP_REFERENCE_PATTERN =
+  /\b(calculator|notes?|finder|preview|textedit|system settings|system preferences|simulator|ios simulator|xcode|mail|messages|photos|music|quicktime|terminal|iterm|warp|cursor|vscode|visual studio code|menu bar|dock|spotlight|native app|desktop app|macos app)\b/i;
+const NATIVE_GUI_ACTION_PATTERN =
+  /\b(click|tap|press|type|enter|select|choose|toggle|drag|drop|scroll|hover|move (?:the )?mouse|cursor|navigate|create|rename|delete|compose|reply|submit)\b/i;
+const NATIVE_APP_OPEN_PATTERN =
+  /\b(open|launch|activate|bring(?:ing)? .* front|focus|switch to|use)\b/i;
+const WEB_SURFACE_PATTERN =
+  /\b(browser|website|web page|web app|dom|url|https?:\/\/|localhost|127\.0\.0\.1|chrome|safari|firefox|brave|edge|browser tab|webview)\b/i;
 const ORCHESTRATION_INTENT_PATTERN =
   /\b(spawn agent|sub-?agent|delegate|parallel agent|orchestrate|multi-agent|handoff|coordinate agents|agent team)\b/i;
 const ADMIN_INTENT_PATTERN =
@@ -181,6 +194,26 @@ const ADMIN_INTENT_PATTERN =
 
 function normalizeTaskText(taskText?: string): string {
   return String(taskText || "").trim().toLowerCase();
+}
+
+function hasBrowserSurfaceIntent(taskText: string): boolean {
+  return WEB_SURFACE_PATTERN.test(taskText);
+}
+
+export function hasNativeDesktopGuiIntent(taskText: string): boolean {
+  if (!taskText) return false;
+  if (COMPUTER_USE_INTENT_PATTERN.test(taskText)) return true;
+  const hasNativeAppReference = NATIVE_APP_REFERENCE_PATTERN.test(taskText);
+  const hasGuiAction = NATIVE_GUI_ACTION_PATTERN.test(taskText);
+  const hasOpenOrFocusAction = NATIVE_APP_OPEN_PATTERN.test(taskText);
+
+  if (hasNativeAppReference && (hasGuiAction || hasOpenOrFocusAction)) {
+    return true;
+  }
+
+  if (hasBrowserSurfaceIntent(taskText)) return false;
+
+  return hasOpenOrFocusAction && hasGuiAction;
 }
 
 function hasToolAffinity(toolName: string, tools?: Iterable<string>): boolean {
@@ -225,6 +258,9 @@ function inferToolExposureMetadata(toolName: string): ToolExposureMetadata {
   }
   if (CONDITIONAL_SYSTEM_TOOLS.has(toolName)) {
     return { lane: "system", exposure: "conditional", overlapGroup: "system_interaction" };
+  }
+  if (toolName.startsWith("computer_")) {
+    return { lane: "system", exposure: "conditional", overlapGroup: "computer_use" };
   }
   if (toolName === "web_search" || toolName === "web_fetch" || toolName === "http_request") {
     return { lane: "research", exposure: "always", overlapGroup: "web_access" };
@@ -297,6 +333,29 @@ export function evaluateToolAvailability(
       }
       return { decision: "defer", reason: "artifact_intent_missing", metadata };
     case "system":
+      if (normalizedToolName === "open_application") {
+        return hasNativeDesktopGuiIntent(taskText) ||
+          SYSTEM_INTENT_PATTERN.test(taskText) ||
+          ctx.taskDomain === "operations"
+          ? { decision: "allow", metadata }
+          : { decision: "defer", reason: "system_intent_missing", metadata };
+      }
+      if (normalizedToolName === "run_applescript") {
+        if (EXPLICIT_APPLESCRIPT_INTENT_PATTERN.test(taskText)) {
+          return { decision: "allow", metadata };
+        }
+        if (hasNativeDesktopGuiIntent(taskText)) {
+          return { decision: "defer", reason: "prefer_computer_use_for_native_gui", metadata };
+        }
+        return SYSTEM_INTENT_PATTERN.test(taskText) || ctx.taskDomain === "operations"
+          ? { decision: "allow", metadata }
+          : { decision: "defer", reason: "system_intent_missing", metadata };
+      }
+      if (normalizedToolName.startsWith("computer_")) {
+        return hasNativeDesktopGuiIntent(taskText) || ctx.taskDomain === "operations"
+          ? { decision: "allow", metadata }
+          : { decision: "defer", reason: "computer_use_intent_missing", metadata };
+      }
       return SYSTEM_INTENT_PATTERN.test(taskText) || ctx.taskDomain === "operations"
         ? { decision: "allow", metadata }
         : { decision: "defer", reason: "system_intent_missing", metadata };
@@ -349,6 +408,11 @@ const ALWAYS_MUTATING = new Set([
   "domain_dns_delete",
   "x402_fetch",
   "execute_code",
+  "computer_click",
+  "computer_type",
+  "computer_key",
+  "computer_move_mouse",
+  "computer_screenshot",
 ]);
 
 const MUTATING_PREFIXES = [

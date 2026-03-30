@@ -1,6 +1,7 @@
 import type { AgentRole, AgentCapability } from "../../shared/types";
 import { LLMProviderFactory } from "../agent/llm/provider-factory";
 import type { LLMProvider } from "../agent/llm/types";
+import { recordLlmCallError, recordLlmCallSuccess } from "../agent/llm/usage-telemetry";
 
 /**
  * Keyword-based capability detection signals (used as fallback).
@@ -91,6 +92,15 @@ async function selectViaLLM(
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
     });
+    recordLlmCallSuccess(
+      {
+        sourceKind: "capability_matcher",
+        providerType: provider.type,
+        modelKey: model,
+        modelId: model,
+      },
+      response.usage,
+    );
 
     // Extract text from response
     const text = response.content
@@ -122,6 +132,15 @@ async function selectViaLLM(
 
     return { memberIds: validMembers, leaderId };
   } catch (err) {
+    recordLlmCallError(
+      {
+        sourceKind: "capability_matcher",
+        providerType: provider.type,
+        modelKey: model,
+        modelId: model,
+      },
+      err,
+    );
     console.error("[capabilityMatcher] LLM selection failed, falling back:", err);
     return null;
   }

@@ -508,6 +508,7 @@ export class TelegramAdapter implements ChannelAdapter {
     const updateId = ctx.update.update_id;
 
     if (!this.shouldProcessUpdate(updateId)) return;
+    if (!this.shouldRouteContext(ctx)) return;
 
     // Feature 3: Text fragment assembly - buffer split messages
     const fragmentKey = `${msg.chat.id}:${msg.from!.id}`;
@@ -571,6 +572,7 @@ export class TelegramAdapter implements ChannelAdapter {
   private async handleNonTextMessage(ctx: Context): Promise<void> {
     const updateId = ctx.update.update_id;
     if (!this.shouldProcessUpdate(updateId)) return;
+    if (!this.shouldRouteContext(ctx)) return;
 
     const msg = ctx.message as Any;
     if (!msg) return;
@@ -588,6 +590,49 @@ export class TelegramAdapter implements ChannelAdapter {
     if (!hasMedia) return;
 
     await this.processMessage(ctx);
+  }
+
+  private shouldRouteContext(ctx: Context): boolean {
+    const msg = ctx.message as Any;
+    const chat = msg?.chat;
+    if (!chat || chat.type === "private") {
+      return true;
+    }
+
+    const allowedGroupChatIds = Array.isArray(this.config.allowedGroupChatIds)
+      ? this.config.allowedGroupChatIds.map((value) => String(value))
+      : [];
+    if (allowedGroupChatIds.length > 0 && !allowedGroupChatIds.includes(String(chat.id))) {
+      return false;
+    }
+
+    const mode = this.config.groupRoutingMode ?? "mentionsOrCommands";
+    if (mode === "all") {
+      return true;
+    }
+
+    const text = typeof msg?.text === "string" ? msg.text : typeof msg?.caption === "string" ? msg.caption : "";
+    const trimmed = String(text || "").trim();
+    const botUsername = (this._botUsername || "").replace(/^@/, "").toLowerCase();
+    const normalizedText = trimmed.toLowerCase();
+    const isReplyToBot =
+      botUsername.length > 0 &&
+      String(msg?.reply_to_message?.from?.username || "")
+        .replace(/^@/, "")
+        .toLowerCase() === botUsername;
+    const isMentioned =
+      botUsername.length > 0 && normalizedText.includes(`@${botUsername}`);
+    const isSlashCommand = trimmed.startsWith("/");
+
+    switch (mode) {
+      case "mentionsOnly":
+        return isMentioned || isReplyToBot;
+      case "commandsOnly":
+        return isSlashCommand;
+      case "mentionsOrCommands":
+      default:
+        return isMentioned || isReplyToBot || isSlashCommand;
+    }
   }
 
   /**

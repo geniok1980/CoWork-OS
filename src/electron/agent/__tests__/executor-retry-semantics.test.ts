@@ -113,3 +113,102 @@ describe("TaskExecutor executeUnlocked retry semantics", () => {
     ).toHaveLength(1);
   });
 });
+
+describe("TaskExecutor provider failover retry semantics", () => {
+  it("switches to the next configured provider when a retryable LLM error occurs", async () => {
+    const executor = createRetryExecutor();
+    executor.llmCallSequence = 0;
+    executor.providerRetryV2Enabled = false;
+    executor.recordObservedOutputThroughput = vi.fn();
+    executor.provider = { type: "openai", createMessage: vi.fn() };
+    executor.modelId = "gpt-4o-mini";
+    executor.modelKey = "gpt-4o-mini";
+    executor.llmProfileUsed = "cheap";
+    executor.resolvedModelKey = "gpt-4o-mini";
+    executor.providerFailoverIndex = 0;
+    executor.providerFailoverSelections = [
+      {
+        providerType: "openai",
+        modelId: "gpt-4o-mini",
+        modelKey: "gpt-4o-mini",
+        llmProfileUsed: "cheap",
+        resolvedModelKey: "gpt-4o-mini",
+        modelSource: "provider_default",
+        warnings: [],
+      },
+      {
+        providerType: "anthropic",
+        modelId: "claude-sonnet-4-5-20250514",
+        modelKey: "sonnet-4-5",
+        llmProfileUsed: "cheap",
+        resolvedModelKey: "sonnet-4-5",
+        modelSource: "provider_default",
+        warnings: [],
+      },
+    ];
+    executor.lastRoutingState = {
+      currentProvider: "openai",
+      currentModel: "gpt-4o-mini",
+      activeProvider: "openai",
+      activeModel: "gpt-4o-mini",
+      routeReason: "automatic_execution",
+      fallbackChain: [],
+      fallbackOccurred: false,
+      manualOverride: false,
+      updatedAt: Date.now(),
+    };
+    executor.emitRoutingState = vi.fn((overrides?: Any) => {
+      executor.lastRoutingState = {
+        currentProvider: "openai",
+        currentModel: "gpt-4o-mini",
+        activeProvider: executor.provider.type,
+        activeModel: executor.modelId,
+        routeReason: overrides?.routeReason || "automatic_execution",
+        fallbackChain: overrides?.fallbackChain || [],
+        fallbackOccurred: overrides?.fallbackOccurred ?? false,
+        manualOverride: overrides?.manualOverride ?? false,
+        updatedAt: Date.now(),
+      };
+    });
+    executor.applyResolvedProviderSelection = vi.fn((selection: Any) => {
+      executor.provider = { type: selection.providerType, createMessage: vi.fn() };
+      executor.modelId = selection.modelId;
+      executor.modelKey = selection.modelKey;
+      executor.llmProfileUsed = selection.llmProfileUsed;
+      executor.resolvedModelKey = selection.resolvedModelKey;
+    });
+
+    const requestFn = vi.fn(async () => {
+      if (executor.provider.type === "openai") {
+        const error = new Error("rate limit exceeded");
+        (error as Any).status = 429;
+        throw error;
+      }
+      return {
+        content: [],
+        stopReason: "end_turn",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      };
+    });
+
+    const response = await (executor as Any).callLLMWithRetry(requestFn, "provider failover");
+
+    expect(response.stopReason).toBe("end_turn");
+    expect(requestFn).toHaveBeenCalledTimes(2);
+    expect(executor.provider.type).toBe("anthropic");
+    expect(executor.providerFailoverIndex).toBe(1);
+    expect(executor.lastRoutingState?.fallbackOccurred).toBe(true);
+    expect(executor.lastRoutingState?.fallbackChain).toEqual([
+      expect.objectContaining({
+        providerType: "openai",
+        modelKey: "gpt-4o-mini",
+        success: false,
+      }),
+      expect.objectContaining({
+        providerType: "anthropic",
+        modelKey: "sonnet-4-5",
+        success: true,
+      }),
+    ]);
+  });
+});

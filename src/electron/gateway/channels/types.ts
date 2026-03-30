@@ -23,6 +23,8 @@ export const CHANNEL_TYPES = [
   "email",
   "teams",
   "googlechat",
+  "feishu",
+  "wecom",
   "x",
 ] as const;
 
@@ -183,6 +185,16 @@ export interface TelegramConfig extends ChannelConfig {
   botToken: string;
   /** Webhook URL (optional, uses polling if not set) */
   webhookUrl?: string;
+  /**
+   * Group routing policy:
+   * - all: route every group message
+   * - mentionsOnly: route only @mentions / replies to the bot
+   * - mentionsOrCommands: route mentions or slash commands
+   * - commandsOnly: route only slash commands
+   */
+  groupRoutingMode?: "all" | "mentionsOnly" | "mentionsOrCommands" | "commandsOnly";
+  /** Optional allowlist of Telegram group chat IDs that may route to the agent */
+  allowedGroupChatIds?: string[];
   /** Chat IDs (groups/channels) designated as research link-dump channels */
   researchChatIds?: string[];
   /** Agent role ID for research tasks (default: uses channel defaultAgentRoleId) */
@@ -605,6 +617,56 @@ export interface GoogleChatConfig extends ChannelConfig {
   maxReconnectAttempts?: number;
   /** Pub/Sub subscription name (alternative to webhook) */
   pubsubSubscription?: string;
+}
+
+/**
+ * Feishu / Lark-specific configuration
+ */
+export interface FeishuConfig extends ChannelConfig {
+  /** Custom app ID */
+  appId: string;
+  /** Custom app secret */
+  appSecret: string;
+  /** Verification token for callback validation */
+  verificationToken?: string;
+  /** Encrypt key for callback signature validation and payload decryption */
+  encryptKey?: string;
+  /** Webhook port to listen on (default: 3980) */
+  webhookPort?: number;
+  /** Webhook path (default: /feishu/webhook) */
+  webhookPath?: string;
+  /** Bot display name */
+  displayName?: string;
+  /** Response prefix for bot replies */
+  responsePrefix?: string;
+  /** Enable message deduplication (default: true) */
+  deduplicationEnabled?: boolean;
+}
+
+/**
+ * WeCom-specific configuration
+ */
+export interface WeComConfig extends ChannelConfig {
+  /** Enterprise corp ID */
+  corpId: string;
+  /** Application agent ID */
+  agentId: number;
+  /** Application secret */
+  secret: string;
+  /** Callback token */
+  token: string;
+  /** Optional encoding AES key for encrypted callbacks */
+  encodingAESKey?: string;
+  /** Webhook port to listen on (default: 3981) */
+  webhookPort?: number;
+  /** Webhook path (default: /wecom/webhook) */
+  webhookPath?: string;
+  /** Bot display name */
+  displayName?: string;
+  /** Response prefix for bot replies */
+  responsePrefix?: string;
+  /** Enable message deduplication (default: true) */
+  deduplicationEnabled?: boolean;
 }
 
 /**

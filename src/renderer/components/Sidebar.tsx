@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback, Fragment } from "react";
-import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Server, Workflow, HeartPulse, Lightbulb, Inbox } from "lucide-react";
+import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, Bell, HardDrive, Rows3, Server, Workflow, HeartPulse, Lightbulb, Inbox, Users } from "lucide-react";
 import { resolveTwinIcon } from "../utils/twin-icons";
 import { stripAllEmojis } from "../utils/emoji-replacer";
 import { Task, Workspace, UiDensity, InfraStatus } from "../../shared/types";
@@ -35,6 +35,7 @@ interface SidebarProps {
   isHomeActive?: boolean;
   isIdeasActive?: boolean;
   isInboxAgentActive?: boolean;
+  isMissionControlActive?: boolean;
   isHealthActive?: boolean;
   completionAttentionTaskIds?: string[];
   onSelectTask: (id: string | null) => void;
@@ -241,6 +242,7 @@ export function Sidebar({
   isHomeActive = false,
   isIdeasActive = false,
   isInboxAgentActive = false,
+  isMissionControlActive = false,
   isHealthActive = false,
   completionAttentionTaskIds = [],
   onSelectTask,
@@ -1264,27 +1266,6 @@ export function Sidebar({
           </button>
 
           <button
-            className="new-task-btn cli-new-task-btn cli-action-btn cli-mission-control-btn"
-            onClick={onOpenMissionControl}
-            title="Mission Control"
-          >
-            <span className="terminal-only">
-              <span className="cli-btn-bracket">[</span>
-              <span className="cli-btn-accent">MC</span>
-              <span className="cli-btn-bracket">]</span>
-            </span>
-            <span className="cli-btn-text">
-              <span className="terminal-only">mission_control</span>
-              <span className="modern-only cli-new-task-modern-label">
-                <span className="sidebar-home-btn-icon" aria-hidden="true">
-                  <span className="cli-btn-accent" style={{ fontSize: '12px' }}>MC</span>
-                </span>
-                <span>Mission Control</span>
-              </span>
-            </span>
-          </button>
-
-          <button
             type="button"
             className={`new-task-btn cli-new-task-btn cli-action-btn sidebar-home-btn ${isHomeActive ? "active" : ""}`}
             onClick={onOpenHome}
@@ -1337,6 +1318,24 @@ export function Sidebar({
                   <Inbox size={16} strokeWidth={2} style={{ display: 'block' }} />
                 </span>
                 <span>Inbox</span>
+              </span>
+            </span>
+          </button>
+
+          <button
+            type="button"
+            className={`new-task-btn cli-new-task-btn cli-action-btn sidebar-home-btn ${isMissionControlActive ? "active" : ""}`}
+            onClick={onOpenMissionControl}
+            aria-pressed={isMissionControlActive}
+            title="Mission Control"
+          >
+            <span className="cli-btn-text">
+              <span className="terminal-only">mission_control</span>
+              <span className="modern-only cli-new-task-modern-label">
+                <span className="sidebar-home-btn-icon" aria-hidden="true" style={{ display: "flex" }}>
+                  <Users size={16} strokeWidth={2} style={{ display: "block" }} />
+                </span>
+                <span>Mission Control</span>
               </span>
             </span>
           </button>

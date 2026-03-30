@@ -1,6 +1,6 @@
 {
   "name": "cowork-os",
-  "version": "0.5.18",
+  "version": "0.5.19",
   "description": "CoWork OS - Local-first AI operating system for macOS and Windows",
   "overrides": {
     "@whiskeysockets/baileys": {
@@ -162,6 +162,7 @@
     "react-dom": "^19.2.4",
     "react-i18next": "^16.5.4",
     "react-markdown": "^10.1.0",
+    "recharts": "^2.15.4",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "uuid": "^13.0.0",

@@ -7,13 +7,14 @@
  *
  * Access levels:
  *  - full_control: mouse clicks, keyboard input, screenshots
+ *  - click_only:   screenshots, mouse movement, clicks/drag/scroll — no typing or key combos
  *  - view_only:    screenshots and mouse movement only (no clicks or typing)
  *  - denied:       no interaction allowed
  */
 
 import { EventEmitter } from "events";
 
-export type AppAccessLevel = "full_control" | "view_only" | "denied";
+export type AppAccessLevel = "full_control" | "click_only" | "view_only" | "denied";
 
 export interface AppPermission {
   appName: string;
@@ -34,9 +35,12 @@ export interface AppPermissionRequest {
  * Tools that are allowed under each access level.
  * "view_only" apps may only be screenshotted and hovered — no input actions.
  */
-const VIEW_ONLY_ALLOWED_TOOLS = new Set([
+const VIEW_ONLY_ALLOWED_TOOLS = new Set(["computer_screenshot", "computer_move_mouse"]);
+
+const CLICK_ONLY_ALLOWED_TOOLS = new Set([
   "computer_screenshot",
   "computer_move_mouse",
+  "computer_click",
 ]);
 
 const FULL_CONTROL_TOOLS = new Set([
@@ -46,6 +50,28 @@ const FULL_CONTROL_TOOLS = new Set([
   "computer_type",
   "computer_key",
 ]);
+
+function levelRank(level: AppAccessLevel): number {
+  switch (level) {
+    case "denied":
+      return 0;
+    case "view_only":
+      return 1;
+    case "click_only":
+      return 2;
+    case "full_control":
+      return 3;
+    default:
+      return 0;
+  }
+}
+
+/** True if `granted` satisfies at least `needed` privilege. */
+export function accessLevelSatisfies(granted: AppAccessLevel, needed: AppAccessLevel): boolean {
+  if (needed === "denied") return true;
+  if (granted === "denied") return false;
+  return levelRank(granted) >= levelRank(needed);
+}
 
 export class AppPermissionManager extends EventEmitter {
   private permissions = new Map<string, AppPermission>();
@@ -90,6 +116,10 @@ export class AppPermissionManager extends EventEmitter {
       return VIEW_ONLY_ALLOWED_TOOLS.has(toolName);
     }
 
+    if (perm.accessLevel === "click_only") {
+      return CLICK_ONLY_ALLOWED_TOOLS.has(toolName);
+    }
+
     // full_control
     return FULL_CONTROL_TOOLS.has(toolName);
   }
@@ -107,15 +137,14 @@ export class AppPermissionManager extends EventEmitter {
   ): Promise<AppAccessLevel> {
     const key = this.permissionKey(appName, bundleId);
 
-    // Already granted at the requested level or higher?
     const existing = this.permissions.get(key);
-    if (existing) {
-      if (existing.accessLevel === "full_control") return "full_control";
-      if (existing.accessLevel === requestedLevel) return requestedLevel;
-      // If existing is view_only and full_control requested, ask again
+    if (existing && existing.accessLevel !== "denied") {
+      if (accessLevelSatisfies(existing.accessLevel, requestedLevel)) {
+        return existing.accessLevel;
+      }
+      // Need upgrade (e.g. view_only -> full_control)
     }
 
-    // Prompt user
     let granted: AppAccessLevel = "denied";
     if (this.onPermissionRequest) {
       granted = await this.onPermissionRequest({

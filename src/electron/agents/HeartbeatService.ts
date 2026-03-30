@@ -166,24 +166,12 @@ function isUsableWorkspaceId(value?: string): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function parseSoulJson(agent: AgentRole): Record<string, unknown> {
-  if (!agent.soul) return {};
-  try {
-    const parsed = JSON.parse(agent.soul);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
+function getProactiveTasks(agent: AgentRole): ProactiveTaskDefinition[] {
+  return agent.heartbeatPolicy?.proactiveTasks || [];
 }
 
-function getProactiveTasks(agent: AgentRole): ProactiveTaskDefinition[] {
-  const soul = parseSoulJson(agent);
-  const cognitiveOffload =
-    soul.cognitiveOffload && typeof soul.cognitiveOffload === "object"
-      ? (soul.cognitiveOffload as Record<string, unknown>)
-      : undefined;
-  const tasks = cognitiveOffload?.proactiveTasks;
-  return Array.isArray(tasks) ? (tasks as ProactiveTaskDefinition[]) : [];
+function getHeartbeatPolicy(agent: AgentRole) {
+  return agent.heartbeatPolicy;
 }
 
 
@@ -206,12 +194,13 @@ function getTimeParts(timeZone?: string): { hour: number; weekday: number } {
 }
 
 function isWithinActiveHours(agent: AgentRole): boolean {
-  if (!agent.activeHours) return true;
-  const { hour, weekday } = getTimeParts(agent.activeHours.timezone);
-  if (Array.isArray(agent.activeHours.weekdays) && agent.activeHours.weekdays.length > 0) {
-    if (!agent.activeHours.weekdays.includes(weekday)) return false;
+  const activeHours = getHeartbeatPolicy(agent)?.activeHours || agent.activeHours;
+  if (!activeHours) return true;
+  const { hour, weekday } = getTimeParts(activeHours.timezone);
+  if (Array.isArray(activeHours.weekdays) && activeHours.weekdays.length > 0) {
+    if (!activeHours.weekdays.includes(weekday)) return false;
   }
-  const { startHour, endHour } = agent.activeHours;
+  const { startHour, endHour } = activeHours;
   if (startHour === endHour) return true;
   if (startHour < endHour) {
     return hour >= startHour && hour < endHour;
@@ -369,7 +358,7 @@ export class HeartbeatService extends EventEmitter {
   updateAgentConfig(agentRoleId: string, _config: HeartbeatConfig): void {
     this.cancelHeartbeat(agentRoleId);
     const agent = this.deps.agentRoleRepo.findById(agentRoleId);
-    if (agent?.heartbeatEnabled) this.scheduleHeartbeat(agent);
+    if (agent?.heartbeatPolicy?.enabled || agent?.heartbeatEnabled) this.scheduleHeartbeat(agent);
   }
 
   cancelHeartbeat(agentRoleId: string): void {
@@ -405,11 +394,12 @@ export class HeartbeatService extends EventEmitter {
     const dueChecklistItems = this.getDueChecklistItems(agent);
     const dueProactiveTasks = this.getDueProactiveTasks(agent, signals);
     const dispatchesToday = this.getDispatchesToday(agent.id);
-    const maxDispatchesPerDay = agent.maxDispatchesPerDay || 6;
+    const maxDispatchesPerDay =
+      agent.heartbeatPolicy?.maxDispatchesPerDay || agent.maxDispatchesPerDay || 6;
     return {
       agentRoleId: agent.id,
       agentName: agent.displayName,
-      heartbeatEnabled: agent.heartbeatEnabled || false,
+      heartbeatEnabled: agent.heartbeatPolicy?.enabled || agent.heartbeatEnabled || false,
       heartbeatStatus: agent.heartbeatStatus || "idle",
       lastHeartbeatAt: agent.lastHeartbeatAt,
       nextHeartbeatAt: this.getNextHeartbeatTime(agent),
@@ -426,17 +416,17 @@ export class HeartbeatService extends EventEmitter {
   }
 
   private scheduleHeartbeat(agent: AgentRole): void {
-    if (!this.started || !agent.heartbeatEnabled) return;
+    if (!this.started || !(agent.heartbeatPolicy?.enabled || agent.heartbeatEnabled)) return;
     const existing = this.timers.get(agent.id);
     if (existing) clearTimeout(existing);
     const nextHeartbeatAt = this.getNextHeartbeatTime(agent) || Date.now() + 30_000;
     const delay = Math.max(1_000, nextHeartbeatAt - Date.now());
     const timer = setTimeout(async () => {
       const liveAgent = this.deps.agentRoleRepo.findById(agent.id);
-      if (liveAgent?.heartbeatEnabled) {
+      if (liveAgent?.heartbeatPolicy?.enabled || liveAgent?.heartbeatEnabled) {
         await this.executePulse(liveAgent, false);
         const refreshed = this.deps.agentRoleRepo.findById(agent.id);
-        if (refreshed?.heartbeatEnabled) this.scheduleHeartbeat(refreshed);
+        if (refreshed?.heartbeatPolicy?.enabled || refreshed?.heartbeatEnabled) this.scheduleHeartbeat(refreshed);
       }
     }, delay);
     this.timers.set(agent.id, timer);
@@ -528,7 +518,8 @@ export class HeartbeatService extends EventEmitter {
           dueProactiveTasks,
           cooldownUntil: this.getDispatchCooldownUntil(agent),
           dispatchesToday,
-          maxDispatchesPerDay: agent.maxDispatchesPerDay || 6,
+          maxDispatchesPerDay:
+            agent.heartbeatPolicy?.maxDispatchesPerDay || agent.maxDispatchesPerDay || 6,
           hasInFlightDispatch: this.runRepo.hasInFlightDispatch(agent.id, workspaceId),
         });
 
@@ -547,7 +538,8 @@ export class HeartbeatService extends EventEmitter {
           dueProactiveCount: decision.dueProactiveCount,
           checklistDueCount: decision.dueChecklistCount,
           dispatchesToday,
-          maxDispatchesPerDay: agent.maxDispatchesPerDay || 6,
+          maxDispatchesPerDay:
+            agent.heartbeatPolicy?.maxDispatchesPerDay || agent.maxDispatchesPerDay || 6,
         };
 
       if (decision.kind === "deferred") {
@@ -765,15 +757,15 @@ export class HeartbeatService extends EventEmitter {
       this.running.delete(agent.id);
       this.runningPromises.delete(agent.id);
       const refreshed = this.deps.agentRoleRepo.findById(agent.id);
-      if (this.pendingManualOverrides.has(agent.id) && refreshed?.heartbeatEnabled) {
+      if (this.pendingManualOverrides.has(agent.id) && (refreshed?.heartbeatPolicy?.enabled || refreshed?.heartbeatEnabled)) {
         this.pendingManualOverrides.delete(agent.id);
         queueMicrotask(() => {
           const replayAgent = this.deps.agentRoleRepo.findById(agent.id);
-          if (replayAgent?.heartbeatEnabled) {
+          if (replayAgent?.heartbeatPolicy?.enabled || replayAgent?.heartbeatEnabled) {
             void this.executePulse(replayAgent, true);
           }
         });
-      } else if (this.started && refreshed?.heartbeatEnabled && !this.timers.has(agent.id)) {
+      } else if (this.started && (refreshed?.heartbeatPolicy?.enabled || refreshed?.heartbeatEnabled) && !this.timers.has(agent.id)) {
         this.scheduleHeartbeat(refreshed);
       }
       }
@@ -807,7 +799,10 @@ export class HeartbeatService extends EventEmitter {
   private getDispatchCooldownUntil(agent: AgentRole): number | undefined {
     const latestDispatch = this.runRepo.getLatestRun(agent.id, "dispatch");
     if (!latestDispatch?.completedAt) return undefined;
-    const cooldownMs = (agent.dispatchCooldownMinutes || 120) * 60 * 1000;
+    const cooldownMs =
+      (agent.heartbeatPolicy?.dispatchCooldownMinutes || agent.dispatchCooldownMinutes || 120) *
+      60 *
+      1000;
     if (latestDispatch.status === "failed") {
       return latestDispatch.completedAt + Math.min(cooldownMs / 4, 15 * 60 * 1000);
     }
@@ -815,9 +810,18 @@ export class HeartbeatService extends EventEmitter {
   }
 
   private getNextHeartbeatTime(agent: AgentRole): number | undefined {
-    if (!agent.heartbeatEnabled) return undefined;
-    const intervalMs = (agent.pulseEveryMinutes || agent.heartbeatIntervalMinutes || 15) * 60 * 1000;
-    const staggerMs = (agent.heartbeatStaggerOffset || 0) * 60 * 1000;
+    if (!(agent.heartbeatPolicy?.enabled || agent.heartbeatEnabled)) return undefined;
+    const intervalMs =
+      (agent.heartbeatPolicy?.cadenceMinutes ||
+        agent.pulseEveryMinutes ||
+        agent.heartbeatIntervalMinutes ||
+        15) *
+      60 *
+      1000;
+    const staggerMs =
+      (agent.heartbeatPolicy?.staggerOffsetMinutes || agent.heartbeatStaggerOffset || 0) *
+      60 *
+      1000;
     if (agent.lastPulseAt) {
       return agent.lastPulseAt + intervalMs;
     }
@@ -876,7 +880,7 @@ export class HeartbeatService extends EventEmitter {
   }
 
   private getDueChecklistItems(agent: AgentRole): HeartbeatChecklistItem[] {
-    if (agent.heartbeatProfile === "observer") return [];
+    if ((agent.heartbeatPolicy?.profile || agent.heartbeatProfile) === "observer") return [];
     const workspaces =
       this.deps.listWorkspaceContexts?.() ||
       (this.deps.getDefaultWorkspaceId() && this.deps.getDefaultWorkspacePath()
@@ -901,7 +905,7 @@ export class HeartbeatService extends EventEmitter {
   }
 
   private getDueProactiveTasks(agent: AgentRole, signals: HeartbeatSignal[]): ProactiveTaskDefinition[] {
-    if (agent.heartbeatProfile === "observer") return [];
+    if ((agent.heartbeatPolicy?.profile || agent.heartbeatProfile) === "observer") return [];
     const now = Date.now();
     const signalStrength = getSignalStrength(signals);
     return getProactiveTasks(agent).filter((task) => {

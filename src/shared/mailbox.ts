@@ -636,13 +636,24 @@ export interface MailboxApplyActionInput {
 /**
  * Remove junk left at the start of plain text when HTML was stripped (e.g. stray
  * `width="96"` attributes becoming "96 96" before the real sentence on the same line).
+ * Also strips invisible / soft-break HTML entities and codepoints common in marketing
+ * HTML (ZWNJ, soft hyphen, zero-width space) that leak into AI summaries as literal text.
  */
 export function stripMailboxSummaryHtmlArtifacts(text: string): string {
   let t = String(text || "").trim();
   if (!t) return t;
+  // Named / numeric entities for ZW* chars, soft hyphen, BOM (often pasted from HTML).
+  t = t.replace(
+    /&(?:#x?0*(?:200[bBcCdD]|8203|8204|8205|feff|ad|173)\b|zwnj|zwj|shy|ZeroWidthSpace);/gi,
+    "",
+  );
+  t = t.replace(/&nbsp;/gi, " ");
+  // Same characters if already decoded in the string.
+  t = t.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "");
   // `m`: line starts — strips "96 96 …" when junk is on the same line as real prose.
   t = t.replace(/^(\d{1,4})(\s+\d{1,4})+\s*/gm, "").trim();
-  return t;
+  t = t.replace(/[ \t]{2,}/g, " ");
+  return t.trim();
 }
 
 export function normalizeMailboxEmailAddress(value?: string | null): string {

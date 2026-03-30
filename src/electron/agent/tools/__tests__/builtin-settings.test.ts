@@ -153,6 +153,20 @@ describe("BuiltinToolsSettingsManager - webfetch category", () => {
       expect(toolsByCategory.search).toBeDefined();
       expect(toolsByCategory.search).toContain("web_search");
     });
+
+    it("should include computer_* tools in computer_use category", () => {
+      const toolsByCategory = BuiltinToolsSettingsManager.getToolsByCategory();
+
+      expect(toolsByCategory.computer_use).toBeDefined();
+      expect(toolsByCategory.computer_use).toContain("computer_screenshot");
+      expect(toolsByCategory.computer_use).toContain("computer_click");
+      expect(toolsByCategory.computer_use).toContain("computer_type");
+    });
+
+    it("should default-enable computer_use category", () => {
+      const defaults = BuiltinToolsSettingsManager.getDefaultSettings();
+      expect(defaults.categories.computer_use.enabled).toBe(true);
+    });
   });
 
   describe("priority comparison", () => {

@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.19] - 2026-03-30
+
+### Added
+- **App profiles**: isolated `userData` per profile with export/import bundles for migration and multi-environment use (`Settings → Profiles`).
+- **Feishu/Lark and WeCom channels**: enterprise messaging adapters, settings UI, and gateway registration with webhook and encrypted event handling.
+- **Gateway channel instances**: per-`channelId` adapter routing so multiple Slack workspaces, distinct channel configs, and correct reply routing coexist in one profile.
+- **Slack multi-workspace**: add more than one Slack channel entry; each workspace is a separate gateway instance.
+- **Telegram group controls**: routing modes and optional allowed group chat IDs.
+- **Discord guild allowlist**: ignore traffic from guilds not in the configured list.
+- **Signal and email policy alignment**: DM/group policies and exact sender or domain allowlists for email ingress.
+- **Exa web search**: new search provider in Settings with ordered fallback integration alongside Tavily, Brave, SerpAPI, Google, and DuckDuckGo.
+- **Ordered LLM fallback chain**: configure up to five ordered fallback providers/models for runtime failover.
+- **External skill directories**: optional read-only absolute skill folders with precedence `bundled < external < managed < workspace`; Settings UI and secure settings persistence.
+- **ACP task persistence**: `acp_tasks` SQLite table and handler persistence for restart-safe ACP task state.
+- **ACP remote invoker**: remote HTTP calls with endpoint validation, timeouts, HTTPS preference, loopback-only `http`, private IP rejection, and remote **task cancel**.
+- **ACP scoped access**: control-plane scope gates and stricter task/inbox visibility for non-operator clients.
+- **RuntimeVisibilityService**: consolidates runtime learning/recall visibility wiring (replaces legacy internal parity helper).
+- **Computer use (macOS)**: session manager, permissions/risk helpers, settings and approval UI; see [Computer use (macOS)](computer-use.md).
+- **Usage Insights LLM section**: model/provider-oriented usage reporting with shared helpers where applicable.
+- **MCP host**: `CoWorkHostProvider` and host server improvements; tests for MCP host behavior.
+- **Heartbeat policy repository**: persisted heartbeat policy hooks integrated with pulse/heartbeat services.
+- **Connector-backed Event Triggers**: MCP connector notifications and resource updates as trigger inputs with subscription sync (see docs).
+- **Per-phase workflow model routing**: workflow pipeline phases with LLM overrides or capability-based auto-selection.
+- **Federated ACP orchestration**: persisted remote agents and A2A-style invocation with orchestration targeting `acp_agent_id`.
+- **Usage Insights quality metrics**: persona breakdowns, retry metrics, and task-result satisfaction signals.
+- **Release notes for 0.5.19**: see [Release Notes 0.5.19](release-notes-0.5.19.md).
+
+### Changed
+- **Gateway router and IPC**: refactored for channel-instance maps, pending task metadata, and adapter lifecycle consistency.
+- **Video tools**: validate reference media paths before provider calls.
+- **Secure settings categories**: `skills` and `acp` categories for new persistence.
+- **Documentation**: README, docs home, getting started, features, channels, providers, architecture, ACP, enterprise connectors, security, skill store, showcase, GTM, and related pages updated for 17 channels, profiles, Exa, fallback chains, and ACP hardening.
+- **Automated tests**: suite now **4,583+ passing tests** across **331+ test files** (`npm run test`; 68 tests skipped in default run).
+
+### Fixed
+- **ACP Vitest stability**: handler tests use an in-memory DB fake to avoid `better-sqlite3` native ABI mismatches in Node test runners.
+- **Gateway edge cases**: router/channel fixes (e.g. `channelId` on pending maps, stricter typing and allowlist behavior) and related adapter tests.
+
+### Removed
+- **Legacy Hermes-named parity helper**: removed in favor of `RuntimeVisibilityService` and updated tests.
+
+## [0.5.18] - 2026-03-30
+
+### Fixed
+- **macOS CI release pipeline**: explicitly install Electron binary after `npm ci` to prevent silent postinstall failures that blocked the macOS release job.
+- **Shell session manager test portability**: resolve temp directory symlinks at creation time to avoid `/var` vs `/private/var` mismatches on macOS.
+- **Completion hardening**: verified evidence and entropy sweeps wired into execution, step intent alignment scoring, and LLM fallback for oversized workflow steps.
+
 ## [0.5.17] - 2026-03-30
 
 ### Added
@@ -802,7 +850,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | 0.1.0 | 2025-01-24 | First public release with core features |
 | 0.0.1 | 2025-01-20 | Initial development setup |
 
-[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.17...HEAD
+[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.19...HEAD
+[0.5.19]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.19
+[0.5.18]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.18
 [0.5.17]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.17
 [0.5.16]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.16
 [0.5.15]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.15

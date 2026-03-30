@@ -8,8 +8,8 @@ describe("ShellSessionManager", () => {
   let workspaceDir: string;
 
   beforeEach(() => {
-    userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "cowork-shell-session-"));
-    workspaceDir = fs.mkdtempSync(path.join(userDataDir, "workspace-"));
+    userDataDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cowork-shell-session-")));
+    workspaceDir = fs.realpathSync(fs.mkdtempSync(path.join(userDataDir, "workspace-")));
     fs.mkdirSync(path.join(workspaceDir, "subdir"), { recursive: true });
     process.env.COWORK_USER_DATA_DIR = userDataDir;
     vi.resetModules();
@@ -23,7 +23,6 @@ describe("ShellSessionManager", () => {
   it("preserves cwd across commands and resets session state", async () => {
     const { ShellSessionManager } = await import("../tools/shell-session-manager");
     const manager = ShellSessionManager.getInstance();
-    const realWorkspaceDir = fs.realpathSync(workspaceDir);
 
     const commonRequest = {
       taskId: "task-1",
@@ -45,7 +44,7 @@ describe("ShellSessionManager", () => {
     });
     expect(first.usedPersistentSession).toBe(true);
     expect(first.success).toBe(true);
-    expect(first.stdout.trim()).toContain(realWorkspaceDir);
+    expect(first.stdout.trim()).toContain(workspaceDir);
 
     const second = await manager.runCommand({
       ...commonRequest,
@@ -53,21 +52,21 @@ describe("ShellSessionManager", () => {
     });
     expect(second.usedPersistentSession).toBe(true);
     expect(second.success).toBe(true);
-    expect(second.stdout.trim()).toContain(path.join(realWorkspaceDir, "subdir"));
+    expect(second.stdout.trim()).toContain(path.join(workspaceDir, "subdir"));
 
     const session = manager.getSessionInfo("task-1", "workspace-1");
     expect(session?.commandCount).toBe(2);
-    expect(session?.cwd).toBe(path.join(realWorkspaceDir, "subdir"));
+    expect(session?.cwd).toBe(path.join(workspaceDir, "subdir"));
     expect(session?.status).toBe("active");
 
     const listed = manager.listSessions("task-1", "workspace-1");
     expect(listed).toHaveLength(1);
-    expect(listed[0]?.cwd).toBe(path.join(realWorkspaceDir, "subdir"));
+    expect(listed[0]?.cwd).toBe(path.join(workspaceDir, "subdir"));
 
     const reset = await manager.resetSession("task-1", "workspace-1");
     expect(reset?.status).toBe("inactive");
     expect(reset?.commandCount).toBe(0);
-    expect(reset?.cwd).toBe(path.join(realWorkspaceDir, "subdir"));
+    expect(reset?.cwd).toBe(path.join(workspaceDir, "subdir"));
 
     const closed = await manager.closeSession("task-1", "workspace-1");
     expect(closed?.status).toBe("ended");
@@ -134,6 +133,6 @@ describe("ShellSessionManager", () => {
     });
 
     expect(next.success).toBe(true);
-    expect(next.stdout.trim()).toContain(fs.realpathSync(workspaceDir));
+    expect(next.stdout.trim()).toContain(workspaceDir);
   });
 });

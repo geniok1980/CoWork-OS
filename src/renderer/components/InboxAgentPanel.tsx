@@ -121,6 +121,8 @@ function formatChannelLabel(channelType: string): string {
   if (channelType === "whatsapp") return "WhatsApp";
   if (channelType === "imessage") return "iMessage";
   if (channelType === "signal") return "Signal";
+  if (channelType === "feishu") return "Feishu / Lark";
+  if (channelType === "wecom") return "WeCom";
   return channelType.charAt(0).toUpperCase() + channelType.slice(1);
 }
 
@@ -185,12 +187,10 @@ function sanitizeEmailHtml(raw: string): string {
     .replace(/<link\b[^>]*>/gi, "")
     // Remove <meta http-equiv="Content-Security-Policy" ...> to avoid parse errors
     .replace(/<meta\b[^>]*http-equiv\s*=\s*["']?Content-Security-Policy["']?[^>]*>/gi, "")
-    // Replace <img> with a styled placeholder showing alt text (avoids CSP image blocks)
+    // Keep <img> so HTTPS previews load (renderer CSP allows img-src https:). Strip event handlers.
     .replace(/<img\b([^>]*)>/gi, (_match, attrs: string) => {
-      const altMatch = attrs.match(/alt\s*=\s*["']([^"']*?)["']/i);
-      const alt = altMatch?.[1];
-      if (!alt) return "";
-      return `<span style="display:inline-block;color:#888;font-size:12px;">[${alt}]</span>`;
+      const clean = attrs.replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "");
+      return `<img${clean}>`;
     })
     // Remove any remaining external resource references in <style> blocks (@import, url() pointing to http)
     .replace(/@import\s+url\([^)]*\)\s*;?/gi, "")
@@ -216,31 +216,15 @@ function EmailHtmlBody({ html }: { html: string }) {
     return `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
-  html, body { margin: 0; padding: 0; width: 100%; max-width: 100%; overflow-x: hidden; }
+  /* Prevent newsletter CSS (height:100%, min-height:100vh) from stretching the document to the iframe height — that inflates scrollHeight and leaves a huge blank band under the message. */
+  html, body { margin: 0; padding: 0; width: 100%; max-width: 100%; overflow-x: hidden; height: auto !important; min-height: 0 !important; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #1a1a2e; word-wrap: break-word; overflow-wrap: break-word; }
   #cowork-email-viewport { width: 100%; max-width: 100%; overflow: hidden; }
   #cowork-email-root { display: block; width: 100%; max-width: 100%; transform-origin: top left; }
-  img { max-width: 100%; height: auto; }
+  /* Shrink wide images without collapsing table column widths (min-width:0 on td broke marketing layouts). */
+  img { max-width: 100% !important; height: auto !important; }
   a { color: #7c5cbf; }
-  pre, code { white-space: pre-wrap; word-break: break-word; }
-  /* Keep email layouts from widening the app pane. */
-  table, div, td, th, center, [class] {
-    max-width: 100% !important;
-    min-width: 0 !important;
-  }
-  /* Stretch the outer email wrapper so every message uses the same center pane width. */
-  #cowork-email-root > table,
-  #cowork-email-root > div,
-  #cowork-email-root > center,
-  body > table,
-  body > div,
-  body > center {
-    width: 100% !important;
-    max-width: 100% !important;
-    margin-left: 0 !important;
-    margin-right: 0 !important;
-  }
-  td, th { word-break: break-word; }
+  pre, code { white-space: pre-wrap; overflow-wrap: break-word; }
 </style>
 </head><body><div id="cowork-email-viewport"><div id="cowork-email-root">${clean}</div></div></body></html>`;
   }, [html]);
@@ -258,7 +242,6 @@ function EmailHtmlBody({ html }: { html: string }) {
 
     const availableWidth = iframe.clientWidth;
     const contentWidth = Math.max(root.scrollWidth, doc.body.scrollWidth, docEl.scrollWidth);
-    const contentHeight = Math.max(root.scrollHeight, doc.body.scrollHeight, docEl.scrollHeight);
 
     let scale = 1;
     if (availableWidth > 0 && contentWidth > availableWidth) {
@@ -275,8 +258,11 @@ function EmailHtmlBody({ html }: { html: string }) {
       root.style.transform = "none";
     }
 
-    if (contentHeight > 0) {
-      setHeight(Math.ceil(contentHeight * scale) + 16);
+    // scrollHeight on html/body is often wrong here (100%/100vh email CSS, transform doesn't shrink layout size). Use the root's painted box — includes scale().
+    void root.offsetHeight;
+    const visualHeight = root.getBoundingClientRect().height;
+    if (visualHeight > 0) {
+      setHeight(Math.ceil(visualHeight) + 16);
     }
   }, []);
 

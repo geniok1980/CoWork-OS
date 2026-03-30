@@ -17,6 +17,14 @@ import * as os from "os";
 const execAsync = promisify(exec);
 const TIMEOUT_MS = 10_000;
 
+export interface WindowIsolationOptions {
+  /**
+   * When false (default for CUA sessions), do not force CoWork/Electron to stay visible —
+   * the main app window may be hidden separately by the session manager.
+   */
+  keepHostProcessesVisible?: boolean;
+}
+
 export class WindowIsolation {
   private hiddenApps: string[] = [];
   private _active = false;
@@ -29,7 +37,7 @@ export class WindowIsolation {
    * Hide all app windows except the approved ones.
    * @param approvedApps — app process names to keep visible (e.g. ["Finder", "Google Chrome"])
    */
-  async isolate(approvedApps: string[]): Promise<void> {
+  async isolate(approvedApps: string[], options?: WindowIsolationOptions): Promise<void> {
     if (os.platform() !== "darwin") {
       throw new Error("Window isolation is only supported on macOS");
     }
@@ -40,9 +48,11 @@ export class WindowIsolation {
     this._active = true;
     const approved = new Set(approvedApps.map((a) => a.toLowerCase()));
 
-    // Always keep CoWork OS itself and Electron visible
-    approved.add("cowork");
-    approved.add("electron");
+    const keepHost = options?.keepHostProcessesVisible !== false;
+    if (keepHost) {
+      approved.add("cowork");
+      approved.add("electron");
+    }
 
     try {
       // Get all visible application processes
@@ -61,7 +71,7 @@ export class WindowIsolation {
         if (!approved.has(app.toLowerCase())) {
           try {
             await execAsync(
-              `osascript -e 'tell application "System Events" to set visible of process "${app}" to false'`,
+              `osascript -e 'tell application "System Events" to set visible of process "${app.replace(/"/g, '\\"')}" to false'`,
               { timeout: TIMEOUT_MS },
             );
             this.hiddenApps.push(app);
@@ -86,7 +96,7 @@ export class WindowIsolation {
     for (const app of this.hiddenApps) {
       try {
         await execAsync(
-          `osascript -e 'tell application "System Events" to set visible of process "${app}" to true'`,
+          `osascript -e 'tell application "System Events" to set visible of process "${app.replace(/"/g, '\\"')}" to true'`,
           { timeout: TIMEOUT_MS },
         );
       } catch {

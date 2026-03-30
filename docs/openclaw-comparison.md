@@ -47,10 +47,6 @@ Choose OpenClaw when you want to experiment quickly with agent architecture and 
 
 Choose CoWork OS when you need to run agents continuously with security controls, approvals, and multi-channel delivery.
 
-## Related
-
-- [OpenClaw vs Hermes vs CoWork OS](./openclaw-hermes-cowork-comparison.md) — three-way positioning table (with visual)
-
 ## Evidence in This Repo
 
 - [Repository README](https://github.com/CoWork-OS/CoWork-OS/blob/main/README.md) for core product claims and security posture

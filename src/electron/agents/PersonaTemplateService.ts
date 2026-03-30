@@ -217,6 +217,9 @@ export class PersonaTemplateService {
     // Build CreateAgentRoleRequest
     const createRequest: CreateAgentRoleRequest = {
       name: roleName,
+      roleKind: "persona_template",
+      sourceTemplateId: template.id,
+      sourceTemplateVersion: template.version,
       companyId: customization.companyId,
       displayName: customization.displayName || template.name + " Twin",
       description: template.description,
@@ -230,12 +233,22 @@ export class PersonaTemplateService {
       toolRestrictions: template.role.toolRestrictions,
       autonomyLevel: template.role.autonomyLevel,
       soul: soulJson,
-      heartbeatEnabled: template.heartbeat.enabled,
-      heartbeatIntervalMinutes:
-        customization.heartbeatIntervalMinutes || template.heartbeat.intervalMinutes,
-      pulseEveryMinutes: customization.heartbeatIntervalMinutes || template.heartbeat.intervalMinutes,
-      heartbeatStaggerOffset: template.heartbeat.staggerOffset,
-      heartbeatProfile: template.role.autonomyLevel === "lead" ? "dispatcher" : "operator",
+      heartbeatPolicy: {
+        enabled: template.heartbeat.enabled,
+        cadenceMinutes:
+          customization.heartbeatIntervalMinutes || template.heartbeat.intervalMinutes,
+        staggerOffsetMinutes: template.heartbeat.staggerOffset,
+        dispatchCooldownMinutes: template.role.autonomyLevel === "lead" ? 60 : 120,
+        maxDispatchesPerDay: template.role.autonomyLevel === "lead" ? 12 : 4,
+        profile: template.role.autonomyLevel === "lead" ? "dispatcher" : "operator",
+        primaryCategories: template.cognitiveOffload.primaryCategories,
+        proactiveTasks: template.cognitiveOffload.proactiveTasks.map((task) => ({
+          ...task,
+          enabled: customization.enabledProactiveTasks
+            ? customization.enabledProactiveTasks.includes(task.id)
+            : task.enabled,
+        })),
+      },
     };
 
     // Create the agent role
@@ -273,11 +286,11 @@ export class PersonaTemplateService {
   }
 
   /**
-   * Build the soul JSON data with cognitive offload config
+   * Build the soul JSON data with template provenance only.
    */
   private buildSoulData(
     template: PersonaTemplate,
-    enabledProactiveTasks?: string[],
+    _enabledProactiveTasks?: string[],
   ): Record<string, unknown> {
     // Parse the template's base soul JSON
     let baseSoul: Record<string, unknown> = {};
@@ -288,18 +301,8 @@ export class PersonaTemplateService {
       baseSoul = { name: template.role.soul };
     }
 
-    // Merge cognitive offload config into soul
-    const proactiveTasks = template.cognitiveOffload.proactiveTasks.map((task) => ({
-      ...task,
-      enabled: enabledProactiveTasks ? enabledProactiveTasks.includes(task.id) : task.enabled,
-    }));
-
     return {
       ...baseSoul,
-      cognitiveOffload: {
-        primaryCategories: template.cognitiveOffload.primaryCategories,
-        proactiveTasks,
-      },
       sourceTemplateId: template.id,
       sourceTemplateVersion: template.version,
     };

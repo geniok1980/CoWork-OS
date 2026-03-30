@@ -9,7 +9,7 @@ CoWork OS is a **security-first personal AI assistant platform** with multi-chan
 - **Personal AI Gateway**: Connect your AI assistant to WhatsApp, Telegram, Discord, Slack, and iMessage
 - **Managed Device Control Surface**: Run and inspect work across local and remote CoWork machines from a dedicated Devices tab
 - **Automation Operating Surface**: Task Queue, Self-Improve, Scheduled Tasks, Webhooks, Event Triggers, and Daily Briefing are grouped under Automations
-- **Security-First Design**: 4000+ tests, configurable guardrails, approval workflows
+- **Security-First Design**: 4,500+ automated tests, configurable guardrails, approval workflows
 - **Multi-Provider Support**: 30+ LLM providers including free local models via Ollama
 - **Local-First Architecture**: Your data stays on your machine, BYOK model
 
@@ -550,7 +550,7 @@ Expected behavior:
 **CoWork OS is a production-ready, security-first personal AI assistant platform:**
 
 ### Core Strengths
-- **Security**: 4000+ tests, configurable guardrails, approval workflows, brute-force protection
+- **Security**: 4,500+ automated tests, configurable guardrails, approval workflows, brute-force protection
 - **Multi-Channel**: WhatsApp, Telegram, Discord, Slack, iMessage integration
 - **Multi-Provider**: 30+ LLM providers and compatible gateways, including Claude, GPT, Gemini, Bedrock, OpenRouter, and Ollama
 - **Local-First**: Your data stays on your machine, BYOK model

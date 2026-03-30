@@ -6,7 +6,7 @@
  */
 
 // Transport types supported by MCP
-export type MCPTransportType = "stdio" | "sse" | "websocket";
+export type MCPTransportType = "stdio" | "sse" | "websocket" | "streamable-http";
 
 // Connection status for MCP servers
 export type MCPConnectionStatus =
@@ -152,6 +152,15 @@ export interface MCPResourceContent {
     blob?: string; // Base64 encoded
     mimeType?: string;
   };
+}
+
+export interface MCPResourceReadResult {
+  contents: Array<{
+    uri: string;
+    text?: string;
+    blob?: string;
+    mimeType?: string;
+  }>;
 }
 
 export type MCPContent = MCPTextContent | MCPImageContent | MCPResourceContent;

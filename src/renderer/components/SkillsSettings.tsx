@@ -9,6 +9,8 @@ interface SkillsSettingsProps {
 
 export function SkillsSettings({ onSkillSelect }: SkillsSettingsProps) {
   const [skills, setSkills] = useState<CustomSkill[]>([]);
+  const [externalSkillDirectories, setExternalSkillDirectories] = useState<string[]>([]);
+  const [externalSkillDirectoryInput, setExternalSkillDirectoryInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [editingSkill, setEditingSkill] = useState<CustomSkill | null>(null);
   const [isCreating, setIsCreating] = useState(false);
@@ -22,8 +24,12 @@ export function SkillsSettings({ onSkillSelect }: SkillsSettingsProps) {
   const loadSkills = async () => {
     try {
       setLoading(true);
-      const loadedSkills = await window.electronAPI.listCustomSkills();
+      const [loadedSkills, settings] = await Promise.all([
+        window.electronAPI.listCustomSkills(),
+        window.electronAPI.getCustomSkillSettings(),
+      ]);
       setSkills(loadedSkills);
+      setExternalSkillDirectories(settings.externalSkillDirectories || []);
       setError(null);
     } catch (err) {
       setError("Failed to load skills");
@@ -45,6 +51,43 @@ export function SkillsSettings({ onSkillSelect }: SkillsSettingsProps) {
 
   const handleOpenFolder = async () => {
     await window.electronAPI.openCustomSkillsFolder();
+  };
+
+  const handleAddExternalDirectory = async () => {
+    const nextDir = externalSkillDirectoryInput.trim();
+    if (!nextDir) return;
+
+    try {
+      const settings = await window.electronAPI.setExternalSkillDirectories([
+        ...externalSkillDirectories,
+        nextDir,
+      ]);
+      setExternalSkillDirectories(settings.externalSkillDirectories || []);
+      setExternalSkillDirectoryInput("");
+      await loadSkills();
+    } catch (err: Any) {
+      setError(err?.message || "Failed to add external skill directory");
+    }
+  };
+
+  const handleRemoveExternalDirectory = async (dir: string) => {
+    try {
+      const settings = await window.electronAPI.setExternalSkillDirectories(
+        externalSkillDirectories.filter((entry) => entry !== dir),
+      );
+      setExternalSkillDirectories(settings.externalSkillDirectories || []);
+      await loadSkills();
+    } catch (err: Any) {
+      setError(err?.message || "Failed to remove external skill directory");
+    }
+  };
+
+  const handleOpenExternalDirectory = async (dir: string) => {
+    try {
+      await window.electronAPI.openExternalSkillFolder(dir);
+    } catch (err: Any) {
+      setError(err?.message || "Failed to open external skill directory");
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -154,6 +197,51 @@ export function SkillsSettings({ onSkillSelect }: SkillsSettingsProps) {
           Create custom prompt templates for things we do often. Skills are stored as JSON files and
           can be shared or version controlled.
         </p>
+        <div className="form-group">
+          <label>External Skill Directories</label>
+          <div className="settings-section-actions">
+            <input
+              type="text"
+              value={externalSkillDirectoryInput}
+              onChange={(e) => setExternalSkillDirectoryInput(e.target.value)}
+              placeholder="/absolute/path/to/shared/skills"
+            />
+            <button className="btn-secondary btn-sm" onClick={handleAddExternalDirectory}>
+              Add Directory
+            </button>
+          </div>
+          <p className="form-hint">
+            External directories are loaded read-only. Managed installs still go to the main CoWork
+            skills folder and take precedence over these shared paths.
+          </p>
+          {externalSkillDirectories.length > 0 && (
+            <div className="parameters-list">
+              {externalSkillDirectories.map((dir) => (
+                <div key={dir} className="parameter-item">
+                  <div className="parameter-main">
+                    <div className="parameter-row">
+                      <input type="text" value={dir} readOnly />
+                    </div>
+                  </div>
+                  <div className="parameter-actions">
+                    <button
+                      className="btn-secondary btn-xs"
+                      onClick={() => handleOpenExternalDirectory(dir)}
+                    >
+                      Open
+                    </button>
+                    <button
+                      className="btn-danger btn-xs"
+                      onClick={() => handleRemoveExternalDirectory(dir)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {error && <div className="settings-error">{error}</div>}
@@ -187,13 +275,18 @@ export function SkillsSettings({ onSkillSelect }: SkillsSettingsProps) {
                       <div className="skill-info">
                         <span className="skill-name">
                           {skill.name}
+                          {skill.source && (
+                            <span className="skill-type-badge">{skill.source}</span>
+                          )}
                           {skill.type === "guideline" && (
                             <span className="skill-type-badge">Behavior</span>
                           )}
                         </span>
                         <span className="skill-description">{skill.description}</span>
                       </div>
-                      {skill.type === "guideline" && (
+                      {skill.type === "guideline" &&
+                        skill.source !== "bundled" &&
+                        skill.source !== "external" && (
                         <label className="settings-toggle">
                           <input
                             type="checkbox"
@@ -222,12 +315,16 @@ export function SkillsSettings({ onSkillSelect }: SkillsSettingsProps) {
                           Use
                         </button>
                       )}
-                      <button className="btn-secondary btn-xs" onClick={() => handleEdit(skill)}>
-                        Edit
-                      </button>
-                      <button className="btn-danger btn-xs" onClick={() => handleDelete(skill.id)}>
-                        Delete
-                      </button>
+                      {skill.source !== "bundled" && skill.source !== "external" && (
+                        <button className="btn-secondary btn-xs" onClick={() => handleEdit(skill)}>
+                          Edit
+                        </button>
+                      )}
+                      {skill.source !== "bundled" && skill.source !== "external" && (
+                        <button className="btn-danger btn-xs" onClick={() => handleDelete(skill.id)}>
+                          Delete
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}

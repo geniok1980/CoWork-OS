@@ -1292,6 +1292,12 @@ export class ArtifactRepository {
     return rows.map((row) => this.mapRowToArtifact(row));
   }
 
+  findById(id: string): Artifact | undefined {
+    const stmt = this.db.prepare("SELECT * FROM artifacts WHERE id = ?");
+    const row = stmt.get(id) as Any;
+    return row ? this.mapRowToArtifact(row) : undefined;
+  }
+
   findLatestByPath(artifactPath: string): Artifact | undefined {
     const stmt = this.db.prepare(
       "SELECT * FROM artifacts WHERE path = ? ORDER BY created_at DESC LIMIT 1",
@@ -1838,6 +1844,12 @@ export class ChannelRepository {
     const stmt = this.db.prepare("SELECT * FROM channels WHERE type = ?");
     const row = stmt.get(type) as Record<string, unknown> | undefined;
     return row ? this.mapRowToChannel(row) : undefined;
+  }
+
+  findAllByType(type: string): Channel[] {
+    const stmt = this.db.prepare("SELECT * FROM channels WHERE type = ? ORDER BY created_at ASC");
+    const rows = stmt.all(type) as Record<string, unknown>[];
+    return rows.map((row) => this.mapRowToChannel(row));
   }
 
   findAll(): Channel[] {

@@ -1,6 +1,6 @@
 # Channel Integrations
 
-CoWork OS supports 15 messaging channels. All channels share these common features:
+CoWork OS supports 17 messaging channels. All channels share these common features:
 
 - Security modes (pairing, allowlist, open)
 - Brute-force protection
@@ -10,6 +10,7 @@ CoWork OS supports 15 messaging channels. All channels share these common featur
 - Chat commands: `/simplify`, `/batch`, `/schedule`, `/digest`, `/followups`, `/brief`
 - **Ambient mode**: Passively ingest all messages without responding; enable per-channel in settings
 - **Self-message capture**: Capture your own outgoing messages as context (`captureSelfMessages` on WhatsApp, iMessage, BlueBubbles)
+- **Per-channel routing policy**: Channels can restrict who can talk to the agent, which workspaces/roles they route into, and how group/server traffic is filtered
 
 ### Common Bot Commands
 
@@ -76,6 +77,14 @@ Bot commands, streaming responses, workspace selection via grammY.
 3. Enter your bot token and click **Add Telegram Channel**
 4. Test and enable the channel
 
+### Group Routing Controls
+
+Telegram group behavior can now be tightened without writing custom bot logic:
+
+- **Routing mode**: choose `all`, `mentionsOnly`, `mentionsOrCommands`, or `commandsOnly`
+- **Allowed group chat IDs**: optionally restrict routing to a known set of Telegram groups
+- **Research channels**: keep using dedicated research groups separately from normal task-routing groups
+
 ### Additional Commands
 
 | Command | Description |
@@ -99,6 +108,10 @@ Slash commands, DM support, guild integration, embeds, polls, select menus, and 
 3. Enable **Message Content Intent** in Privileged Gateway Intents
 4. Invite bot with `bot` and `applications.commands` scopes
 5. Configure in **Settings** > **Channels**
+
+### Guild Filtering
+
+If you only want the bot active in certain Discord servers, add allowed **Guild IDs** in the channel settings. Incoming messages and interactions from other guilds are ignored even if the bot is installed there.
 
 ### Additional Commands
 
@@ -140,6 +153,52 @@ Socket Mode integration with channel mentions and file uploads.
 4. Subscribe to events: `app_mention`, `message.im`
 5. Install to workspace and copy Bot Token (`xoxb-...`)
 6. Configure in **Settings** > **Channels** > **Slack**
+
+### Multiple Workspaces
+
+CoWork can now keep more than one Slack installation active in the same profile:
+
+- add each Slack workspace as its own Slack channel entry
+- select the workspace inside Slack settings to test, toggle, revoke, or remove it
+- reply routing stays pinned to the originating Slack workspace so follow-ups go back to the correct installation
+
+---
+
+## Feishu / Lark
+
+Webhook-based enterprise messaging integration for Feishu and Lark.
+
+### Setup
+
+1. Create a Feishu/Lark app and enable bot + event subscriptions
+2. Copy the App ID, App Secret, verification token, and encryption key
+3. Configure the channel in **Settings** > **Channels** > **Feishu / Lark**
+4. Set the callback URL shown by CoWork in the Feishu/Lark developer console
+5. Enable and test
+
+### Notes
+
+- Supports secure webhook verification and encrypted event handling
+- Best fit for a dedicated tenant/app pairing rather than many installs in one profile
+
+---
+
+## WeCom
+
+Enterprise WeCom gateway integration with signed/encrypted event handling.
+
+### Setup
+
+1. Create a WeCom app in your WeCom admin console
+2. Copy the Corp ID, Agent ID, Secret, token, and EncodingAESKey
+3. Configure the channel in **Settings** > **Channels** > **WeCom**
+4. Set the callback URL shown by CoWork in WeCom
+5. Enable and test
+
+### Notes
+
+- Supports encrypted webhook/event payloads
+- Good fit for internal enterprise operations and alert/task routing
 
 ---
 
@@ -274,6 +333,14 @@ End-to-end encrypted messaging via `signal-cli`.
 
 > **Important:** Registering signal-cli will deregister any existing Signal app using that phone number.
 
+### Sender Policies
+
+Signal settings can now distinguish DM and group behavior:
+
+- `dmPolicy`: `open`, `allowlist`, `pairing`, or `disabled`
+- `groupPolicy`: `open`, `allowlist`, or `disabled`
+- `allowedNumbers`: explicit allowlist applied consistently for both direct and group senders
+
 ---
 
 ## Mattermost
@@ -392,13 +459,13 @@ For personal Microsoft mailboxes, the Client ID field is not enough by itself. C
 
 ### Filtering Options
 
-- **Allowed Senders**: Comma-separated email addresses to accept
+- **Allowed Senders**: Comma-separated exact email addresses or domains (for example `alice@example.com` or `example.com`)
 - **Subject Filter**: Only process emails containing specific text (e.g., `[CoWork]`)
 
 ### Features
 
 - Reply threading via In-Reply-To headers
-- Subject filtering and sender allowlist
+- Subject filtering and exact sender/domain allowlist matching
 - Universal: works with any IMAP/SMTP provider
 - **[LOOM protocol](https://github.com/AlmarionAI/loom-mvn)**: Dual-protocol email system (LOOM for agents, IMAP/SMTP for legacy)
 

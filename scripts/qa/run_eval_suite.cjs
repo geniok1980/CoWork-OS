@@ -16,6 +16,7 @@ function parseArgs(argv) {
     suite: 'reliability-regressions',
     mode: 'deterministic',
     timeoutMs: 6 * 60 * 1000,
+    allowEmpty: process.env.COWORK_EVAL_ALLOW_EMPTY === '1',
   };
 
   for (let i = 2; i < argv.length; i += 1) {
@@ -26,6 +27,10 @@ function parseArgs(argv) {
     }
     if (arg === '--mode' && argv[i + 1]) {
       args.mode = String(argv[++i] || args.mode);
+      continue;
+    }
+    if (arg === '--allow-empty') {
+      args.allowEmpty = true;
       continue;
     }
     if (arg === '--timeout-ms' && argv[i + 1]) {
@@ -442,7 +447,7 @@ async function main() {
 
   const executedCount = passCount + failCount;
   const completedAt = Date.now();
-  const runStatus = failCount > 0 || executedCount === 0 ? 'failed' : 'completed';
+  const runStatus = failCount > 0 || (executedCount === 0 && !args.allowEmpty) ? 'failed' : 'completed';
 
   sqlExec(
     `UPDATE eval_runs
@@ -462,7 +467,11 @@ async function main() {
   console.log(`- executed: ${executedCount}`);
   console.log(`- status: ${runStatus}`);
   if (executedCount === 0) {
-    console.log('- reason: no eval cases were executed (all skipped or suite empty)');
+    console.log(
+      args.allowEmpty
+        ? '- reason: no eval cases were executed (all skipped or suite empty, allowed by configuration)'
+        : '- reason: no eval cases were executed (all skipped or suite empty)',
+    );
   }
 
   if (runStatus === 'failed') {

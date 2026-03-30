@@ -110,6 +110,8 @@ import {
   isArtifactGenerationToolName as isArtifactGenerationToolNameUtil,
 } from "../tool-semantics";
 import { writeKitFileWithSnapshot } from "../../context/kit-revisions";
+import { getACPRegistry } from "../../acp";
+import { RemoteAgentInvoker } from "../../acp/remote-invoker";
 
 function sanitizeFilename(raw: string, maxLen = 120): string {
   const base = path.basename(String(raw || "").trim() || "artifact");
@@ -1899,9 +1901,25 @@ System Tools:
 - show_in_folder: Reveal file in Finder/Explorer
 - get_env: Read environment variable
 - get_app_paths: Get system paths (home, downloads, etc.)
-- run_applescript: Execute AppleScript on macOS (control apps, automate tasks)
+- run_applescript: Execute exact AppleScript on macOS (explicit AppleScript requests or low-level fallback only)
 - search_memories: Search workspace memories, .cowork/ knowledge files, and imported conversations for past context
 - memory_save: Save an observation, decision, insight, or error to workspace memory for future recall
+${hasAnyVisibleTools(
+  "computer_screenshot",
+  "computer_click",
+  "computer_type",
+  "computer_key",
+  "computer_move_mouse",
+)
+  ? `
+
+Computer Use Tools (macOS native GUI, preferred over run_applescript for normal app interaction):
+- computer_screenshot: Inspect the visible screen in a native app or simulator before acting
+- computer_click: Click/drag/scroll visible UI in native apps like Calculator, Notes, Finder, System Settings, Xcode, and Simulator
+- computer_type: Type into the focused native app field using real keyboard input
+- computer_key: Press Return, Escape, Cmd shortcuts, and other keys in a native app
+- computer_move_mouse: Hover or position the cursor before other computer_* actions`
+  : ""}
 
 Scheduling:
 - schedule_task: Schedule tasks to run at specific times or intervals
@@ -2664,6 +2682,9 @@ ${skillDescriptions}`;
     }
 
     // Sub-Agent / Parallel Agent tools
+    if (name === "acp_discover") {
+      return await this.acpDiscover(input);
+    }
     if (name === "spawn_agent") {
       return await this.spawnAgent(input);
     }
@@ -7533,11 +7554,112 @@ ${skillDescriptions}`;
   /**
    * Spawn a child agent to work on a subtask
    */
+  private async acpDiscover(input: {
+    capability?: string;
+    query?: string;
+    origin?: "local" | "remote";
+    status?: "available" | "busy" | "offline";
+  }): Promise<{
+    success: boolean;
+    agents: Array<{
+      id: string;
+      name: string;
+      origin: "local" | "remote";
+      status: string;
+      endpoint?: string;
+      capabilities: string[];
+    }>;
+    message: string;
+  }> {
+    const registry = getACPRegistry();
+    const agents = registry.discover(
+      {
+        capability: input.capability,
+        query: input.query,
+        origin: input.origin,
+        status: input.status,
+      },
+      this.daemon.getActiveAgentRoles(),
+    );
+    return {
+      success: true,
+      agents: agents.map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        origin: agent.origin,
+        status: agent.status,
+        endpoint: agent.endpoint,
+        capabilities: agent.capabilities.map((capability) => capability.id),
+      })),
+      message: `Found ${agents.length} ACP agent${agents.length === 1 ? "" : "s"}`,
+    };
+  }
+
+  private async waitForRemoteAgent(
+    invoker: RemoteAgentInvoker,
+    acpAgentId: string,
+    remoteTaskId: string,
+    timeoutSeconds: number,
+  ): Promise<{
+    success: boolean;
+    status: string;
+    message: string;
+    resultSummary?: string;
+    error?: string;
+  }> {
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    while (Date.now() < deadline) {
+      const agent = getACPRegistry().getAgent(acpAgentId, this.daemon.getActiveAgentRoles());
+      if (!agent || agent.origin !== "remote" || !agent.endpoint) {
+        return {
+          success: false,
+          status: "not_found",
+          message: `ACP agent ${acpAgentId} is unavailable`,
+          error: "ACP_AGENT_UNAVAILABLE",
+        };
+      }
+      try {
+        const result = await invoker.pollStatus(agent, remoteTaskId);
+        if (result.status === "completed") {
+          return {
+            success: true,
+            status: "completed",
+            message: "Remote ACP agent completed successfully",
+            resultSummary: result.result,
+          };
+        }
+        if (result.status === "failed" || result.status === "cancelled") {
+          return {
+            success: false,
+            status: result.status,
+            message: `Remote ACP agent ${result.status}`,
+            error: result.error,
+          };
+        }
+      } catch (error: Any) {
+        return {
+          success: false,
+          status: "failed",
+          message: `Remote ACP agent failed: ${error.message}`,
+          error: error.message,
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    return {
+      success: false,
+      status: "timeout",
+      message: `Timeout waiting for remote ACP agent (${timeoutSeconds}s)`,
+      error: "TIMEOUT",
+    };
+  }
+
   private async spawnAgent(input: {
     prompt: string;
     title?: string;
     model_preference?: string;
     capability_hint?: string;
+    acp_agent_id?: string;
     personality?: string;
     runtime?: SpawnAgentRuntimeMode;
     runtime_agent?: SpawnAgentRuntimeAgent;
@@ -7556,6 +7678,7 @@ ${skillDescriptions}`;
       title,
       model_preference,
       capability_hint,
+      acp_agent_id,
       personality,
       runtime,
       runtime_agent,
@@ -7672,6 +7795,66 @@ ${skillDescriptions}`;
     const taskTitle =
       title || `Sub-task: ${prompt.substring(0, 50)}${prompt.length > 50 ? "..." : ""}`;
 
+    if (typeof acp_agent_id === "string" && acp_agent_id.trim()) {
+      const acpAgentId = acp_agent_id.trim();
+      const agent = getACPRegistry().getAgent(acpAgentId, this.daemon.getActiveAgentRoles());
+      if (!agent) {
+        return {
+          success: false,
+          message: `ACP agent ${acpAgentId} not found`,
+          error: "ACP_AGENT_NOT_FOUND",
+        };
+      }
+      if (agent.origin === "remote" && agent.endpoint) {
+        const invoker = new RemoteAgentInvoker();
+        try {
+          const remoteResult = await invoker.invoke(agent, {
+            assigneeId: acpAgentId,
+            title: taskTitle,
+            prompt: contractedPrompt,
+            workspaceId: this.workspace.id,
+          });
+          if (wait && remoteResult.remoteTaskId) {
+            const waited = await this.waitForRemoteAgent(
+              invoker,
+              acpAgentId,
+              remoteResult.remoteTaskId,
+              300,
+            );
+            return {
+              success: waited.success,
+              task_id: remoteResult.remoteTaskId,
+              title: taskTitle,
+              message: waited.message,
+              result: waited.resultSummary,
+              error: waited.error,
+            };
+          }
+          return {
+            success: remoteResult.status !== "failed" && remoteResult.status !== "cancelled",
+            task_id: remoteResult.remoteTaskId,
+            title: taskTitle,
+            message:
+              remoteResult.status === "completed"
+                ? "Remote ACP agent completed successfully."
+                : `Remote ACP agent invoked via ${agent.name}.`,
+            result: remoteResult.result,
+            error: remoteResult.error,
+          };
+        } catch (error: Any) {
+          return {
+            success: false,
+            title: taskTitle,
+            message: `Failed to invoke remote ACP agent: ${error.message}`,
+            error: error.message,
+          };
+        }
+      }
+      if (agent.origin === "local" && agent.localRoleId) {
+        // Fall through to the local child-task path below.
+      }
+    }
+
     // Log spawn attempt
     this.daemon.logEvent(this.taskId, "agent_spawned", {
       childTaskTitle: taskTitle,
@@ -7700,6 +7883,9 @@ ${skillDescriptions}`;
         workspaceId: this.workspace.id,
         parentTaskId: this.taskId,
         agentType: "sub",
+        ...(typeof acp_agent_id === "string" && acp_agent_id.startsWith("local:")
+          ? { assignedAgentRoleId: getACPRegistry().getAgent(acp_agent_id, this.daemon.getActiveAgentRoles())?.localRoleId }
+          : {}),
         agentConfig,
         depth: currentDepth + 1,
       });
@@ -7851,7 +8037,13 @@ ${skillDescriptions}`;
    * Orchestrate multiple agents in parallel: spawn all, wait for all, return combined results.
    */
   private async orchestrateAgents(input: {
-    tasks: Array<{ prompt: string; title?: string; model_preference?: string; capability_hint?: string }>;
+    tasks: Array<{
+      prompt: string;
+      title?: string;
+      model_preference?: string;
+      capability_hint?: string;
+      acp_agent_id?: string;
+    }>;
     timeout_seconds?: number;
   }): Promise<{
     success: boolean;
@@ -7883,6 +8075,7 @@ ${skillDescriptions}`;
         title: task.title,
         model_preference: task.model_preference,
         capability_hint: task.capability_hint,
+        acp_agent_id: task.acp_agent_id,
         wait: false,
         max_turns: 20,
       });
@@ -9158,6 +9351,34 @@ ${skillDescriptions}`;
       ...DocumentParserTools.getToolDefinitions(),
       // Sub-Agent / Parallel Agent tools
       {
+        name: "acp_discover",
+        description:
+          "Discover ACP/A2A agents that CoWork can delegate work to. Use this before selecting acp_agent_id for spawn_agent or orchestrate_agents.",
+        input_schema: {
+          type: "object",
+          properties: {
+            capability: {
+              type: "string",
+              description: "Optional capability filter such as code, research, or design.",
+            },
+            query: {
+              type: "string",
+              description: "Optional text search over agent names, descriptions, and skills.",
+            },
+            origin: {
+              type: "string",
+              enum: ["local", "remote"],
+              description: "Filter to local or remote ACP agents.",
+            },
+            status: {
+              type: "string",
+              enum: ["available", "busy", "offline"],
+              description: "Optional agent availability filter.",
+            },
+          },
+        },
+      },
+      {
         name: "spawn_agent",
         description:
           "Spawn a new agent (sub-task) to work on a specific task independently. Use this to delegate work, " +
@@ -9189,6 +9410,11 @@ ${skillDescriptions}`;
               description:
                 "Route to a model suited for this capability type. Used when model_preference is absent. " +
                 '"code"/"fast" → Haiku, "research"/"math"/"vision"/"long_context" → Sonnet.',
+            },
+            acp_agent_id: {
+              type: "string",
+              description:
+                "Optional ACP agent ID returned by acp_discover. When provided, CoWork routes the task to that ACP/A2A agent instead of picking a generic sub-agent.",
             },
             personality: {
               type: "string",
@@ -9254,6 +9480,11 @@ ${skillDescriptions}`;
                     type: "string",
                     enum: ["code", "math", "research", "vision", "fast", "long_context"],
                     description: "Route to a capability-suited model when model_preference is absent.",
+                  },
+                  acp_agent_id: {
+                    type: "string",
+                    description:
+                      "Optional ACP agent ID returned by acp_discover for this orchestration node.",
                   },
                 },
                 required: ["prompt"],

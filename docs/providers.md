@@ -53,6 +53,20 @@ CoWork OS is **free and open source**. To run tasks, configure your own model cr
 
 ---
 
+## Ordered LLM Fallback Chains
+
+CoWork OS can route a task through an explicit provider/model fallback chain instead of relying on a single primary provider.
+
+Configure this in **Settings > LLM**:
+
+- choose your primary provider/model
+- add fallback providers in order
+- optionally choose capability-based routing for workflow phases or specialized tasks
+
+Fallback chains are used when a provider is unavailable, rate-limited, rejected by policy, or lacks the required capability for the task. Runtime surfaces in the app and Mission Control show the active provider, routing reason, and whether a fallback occurred.
+
+---
+
 ## Azure Anthropic
 
 Use Azure-hosted Claude models through your Azure subscription.
@@ -149,10 +163,11 @@ Multi-provider web search for research tasks with automatic retry and fallback. 
 |----------|-------|---------|----------|
 | **DuckDuckGo** | Web | Not required (built-in) | Zero-config free fallback |
 | **Tavily** | Web, News | Required | AI-optimized results (recommended) |
+| **Exa** | Web, News | Required | Semantic search and research-heavy retrieval |
 | **Brave Search** | Web, News, Images | Required | Privacy-focused |
 | **SerpAPI** | Web, News, Images | Required | Google results |
 | **Google Custom Search** | Web, Images | Required | Direct Google integration |
 
-DuckDuckGo is always available as the last-resort fallback. When paid providers are configured, they are tried first in the configured order, with DuckDuckGo only used if all others fail.
+DuckDuckGo is always available as the last-resort fallback. When paid providers are configured, they are tried first in the configured order, with DuckDuckGo only used if all others fail. Search settings also support explicit primary/fallback ordering and provider cooldown behavior after repeated failures.
 
 Configure paid providers in **Settings** > **Web Search**.

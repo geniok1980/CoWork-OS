@@ -12,7 +12,7 @@ export function MCOverviewTab({ data }: MCOverviewTabProps) {
     commandCenterSummary, commandCenterReviewQueue,
     selectedCompany, plannerConfig, plannerRuns,
     feedItems, setActiveTab, setOpsSubTab, getAgentStatus,
-    agentContext, formatRelativeTime,
+    agentContext, formatRelativeTime, isAllWorkspacesSelected,
   } = data;
 
   const reviewCount = commandCenterReviewQueue.length;
@@ -122,6 +122,9 @@ export function MCOverviewTab({ data }: MCOverviewTabProps) {
             <div key={item.id} className="mc-v2-card-item">
               <span className="mc-v2-card-item-label" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 <strong>{item.agentName}</strong> {item.content.slice(0, 50)}
+                {isAllWorkspacesSelected && item.workspaceName ? (
+                  <span className="mc-v2-workspace-tag">{item.workspaceName}</span>
+                ) : null}
               </span>
               <span style={{ fontSize: 10, color: "var(--color-text-muted)", flexShrink: 0 }}>
                 {formatRelativeTime(item.timestamp)}

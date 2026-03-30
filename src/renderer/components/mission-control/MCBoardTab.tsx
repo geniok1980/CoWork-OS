@@ -9,7 +9,7 @@ export function MCBoardTab({ data }: MCBoardTabProps) {
   const {
     getTasksByColumn, getAgent, detailPanel, setDetailPanel,
     handleMoveTask, dragOverColumn, setDragOverColumn,
-    formatRelativeTime, agentContext,
+    formatRelativeTime, agentContext, isAllWorkspacesSelected, getWorkspaceName,
   } = data;
 
   const selectedTaskId = detailPanel?.kind === "task" ? detailPanel.taskId : null;
@@ -52,6 +52,9 @@ export function MCBoardTab({ data }: MCBoardTabProps) {
                       onClick={() => setDetailPanel({ kind: "task", taskId: task.id })}
                     >
                       <div className="mc-v2-task-title">{task.title}</div>
+                      {isAllWorkspacesSelected && (
+                        <div className="mc-v2-task-workspace">{getWorkspaceName(task.workspaceId)}</div>
+                      )}
                       {assignedAgent && (
                         <div className="mc-v2-task-assignee">
                           <span className="mc-v2-task-assignee-avatar" style={{ backgroundColor: assignedAgent.color }}>

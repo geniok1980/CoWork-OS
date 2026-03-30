@@ -110,4 +110,32 @@ describeWithSqlite("PersonaTemplateService company assignment", () => {
     expect(betaResult.agentRole.companyId).toBe(companyB.id);
     expect(acmeResult.agentRole.name).not.toBe(betaResult.agentRole.name);
   });
+
+  it("creates explicit heartbeat policy data separate from soul", async () => {
+    const resourcesDir = path.join(process.cwd(), "resources", "persona-templates");
+    const { PersonaTemplateService } = await import("../PersonaTemplateService");
+    const service = new PersonaTemplateService(agentRoleRepo, {
+      bundledTemplatesDir: resourcesDir,
+    });
+    await service.initialize();
+
+    const result = service.activate({
+      templateId: "company-planner",
+    });
+
+    expect(result.agentRole.roleKind).toBe("persona_template");
+    expect(result.agentRole.sourceTemplateId).toBe("company-planner");
+    expect(result.agentRole.sourceTemplateVersion).toBeTruthy();
+    expect(result.agentRole.heartbeatPolicy?.enabled).toBe(true);
+    expect((result.agentRole.heartbeatPolicy?.proactiveTasks.length || 0) > 0).toBe(true);
+
+    const persisted = agentRoleRepo.findById(result.agentRole.id);
+    expect(persisted?.heartbeatPolicy?.agentRoleId).toBe(result.agentRole.id);
+    expect(persisted?.heartbeatPolicy?.profile).toBe(result.agentRole.heartbeatPolicy?.profile);
+
+    const soul = JSON.parse(result.agentRole.soul || "{}") as Record<string, unknown>;
+    expect(soul.sourceTemplateId).toBe("company-planner");
+    expect(soul.sourceTemplateVersion).toBe(result.agentRole.sourceTemplateVersion);
+    expect("cognitiveOffload" in soul).toBe(false);
+  });
 });

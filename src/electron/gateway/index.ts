@@ -64,13 +64,17 @@ import {
   type ChannelMessageContext,
 } from "../../shared/channelMessages";
 import { DEFAULT_QUIRKS } from "../../shared/types";
+import { getUnsupportedManualEmailSetupMessage } from "../../shared/email-provider-support";
+import { MICROSOFT_EMAIL_DEFAULT_TENANT } from "../../shared/microsoft-email";
 import { createLogger } from "../utils/logger";
+import { refreshMicrosoftEmailAccessToken } from "../utils/microsoft-email-oauth";
 import {
   registerChannelLiveFetchProvider,
   unregisterChannelLiveFetchProvider,
   type DiscordMessage,
   type DiscordDownloadedAttachment,
 } from "./channel-live-fetch";
+import { DiscordSupervisorService } from "../supervisor/DiscordSupervisorService";
 
 export interface GatewayConfig {
   /** Router configuration */
@@ -105,6 +109,7 @@ export class ChannelGateway {
   private hookIngress: HookAgentIngress | null = null;
   private daemonListeners: Array<{ event: string; handler: (...args: Any[]) => void }> = [];
   private pendingCleanupInterval: ReturnType<typeof setInterval> | null = null;
+  private discordSupervisorService?: DiscordSupervisorService;
 
   constructor(db: Database.Database, config: GatewayConfig = {}) {
     this.db = db;
@@ -123,6 +128,7 @@ export class ChannelGateway {
     if (config.agentDaemon) {
       this.agentDaemon = config.agentDaemon;
       this.setupAgentDaemonListeners(config.agentDaemon);
+      // discordSupervisorService is lazy-initialized on first access via getDiscordSupervisorService()
     }
   }
 
@@ -575,6 +581,18 @@ export class ChannelGateway {
     this.router.setMainWindow(window);
   }
 
+  getDiscordSupervisorService(): DiscordSupervisorService | undefined {
+    if (!this.discordSupervisorService && this.agentDaemon) {
+      this.discordSupervisorService = new DiscordSupervisorService(
+        this.db,
+        this.agentDaemon,
+        () => this.router.getMainWindow(),
+        () => this.router.getAdapter("discord") as DiscordAdapter | undefined,
+      );
+    }
+    return this.discordSupervisorService;
+  }
+
   /**
    * Shutdown the gateway
    */
@@ -724,6 +742,7 @@ export class ChannelGateway {
     botToken: string,
     applicationId: string,
     guildIds?: string[],
+    supervisor?: _DiscordConfig["supervisor"],
     securityMode: "open" | "allowlist" | "pairing" = "pairing",
   ): Promise<Channel> {
     // Check if Discord channel already exists
@@ -737,7 +756,7 @@ export class ChannelGateway {
       type: "discord",
       name,
       enabled: false, // Don't enable until tested
-      config: { botToken, applicationId, guildIds },
+      config: { botToken, applicationId, guildIds, supervisor },
       securityConfig: {
         mode: securityMode,
         pairingCodeTTL: 300, // 5 minutes
@@ -1176,6 +1195,15 @@ export class ChannelGateway {
     securityMode: "open" | "allowlist" | "pairing" = "pairing",
     options?: {
       protocol?: "imap-smtp" | "loom";
+      authMethod?: "password" | "oauth";
+      oauthProvider?: "microsoft";
+      oauthClientId?: string;
+      oauthClientSecret?: string;
+      oauthTenant?: string;
+      accessToken?: string;
+      refreshToken?: string;
+      tokenExpiresAt?: number;
+      scopes?: string[];
       imapPort?: number;
       smtpPort?: number;
       loomBaseUrl?: string;
@@ -1192,6 +1220,18 @@ export class ChannelGateway {
     }
 
     const protocol = options?.protocol === "loom" ? "loom" : "imap-smtp";
+    const authMethod = options?.authMethod === "oauth" ? "oauth" : "password";
+
+    if (protocol === "imap-smtp" && authMethod === "password") {
+      const unsupportedSetupMessage = getUnsupportedManualEmailSetupMessage({
+        email,
+        imapHost,
+        smtpHost,
+      });
+      if (unsupportedSetupMessage) {
+        throw new Error(unsupportedSetupMessage);
+      }
+    }
 
     const config =
       protocol === "loom"
@@ -1206,6 +1246,15 @@ export class ChannelGateway {
           }
         : {
             protocol: "imap-smtp",
+            authMethod,
+            oauthProvider: options?.oauthProvider,
+            oauthClientId: options?.oauthClientId,
+            oauthClientSecret: options?.oauthClientSecret,
+            oauthTenant: options?.oauthTenant,
+            accessToken: options?.accessToken,
+            refreshToken: options?.refreshToken,
+            tokenExpiresAt: options?.tokenExpiresAt,
+            scopes: options?.scopes,
             email,
             password,
             imapHost,
@@ -1291,6 +1340,7 @@ export class ChannelGateway {
 
     const channel = this.channelRepo.findById(channelId);
     if (!channel) return;
+    this.assertChannelConfigAvailable(channel);
 
     const adapter = this.router.getAdapter(channel.type as ChannelType);
     if (adapter?.updateConfig) {
@@ -1311,6 +1361,7 @@ export class ChannelGateway {
     let adapter = this.router.getAdapter(channel.type as ChannelType);
     if (!adapter) {
       adapter = this.createAdapterForChannel(channel);
+      this.attachDiscordSupervisorHandler(adapter);
       this.router.registerAdapter(adapter);
     }
 
@@ -1352,6 +1403,7 @@ export class ChannelGateway {
     let adapter = this.router.getAdapter("whatsapp") as WhatsAppAdapter | undefined;
     if (!adapter) {
       adapter = this.createAdapterForChannel(channel) as WhatsAppAdapter;
+      this.attachDiscordSupervisorHandler(adapter);
       this.router.registerAdapter(adapter);
     }
 
@@ -1688,6 +1740,7 @@ export class ChannelGateway {
     for (const channel of channels) {
       try {
         const adapter = this.createAdapterForChannel(channel);
+        this.attachDiscordSupervisorHandler(adapter);
         this.router.registerAdapter(adapter);
       } catch (error) {
         console.error(`Failed to create adapter for channel ${channel.type}:`, error);
@@ -1695,10 +1748,70 @@ export class ChannelGateway {
     }
   }
 
+  private attachDiscordSupervisorHandler(adapter: ChannelAdapter): void {
+    if (!(adapter instanceof DiscordAdapter) || !this.discordSupervisorService) {
+      return;
+    }
+    adapter.onMessage(async (message) => {
+      await this.discordSupervisorService?.handleIncomingDiscordMessage(adapter, message);
+    });
+  }
+
+  private async getEmailOAuthAccessToken(channelId: string): Promise<string> {
+    const channel = this.channelRepo.findById(channelId);
+    if (!channel || channel.type !== "email") {
+      throw new Error("Email channel not found");
+    }
+
+    if ((channel.config.authMethod as string | undefined) !== "oauth") {
+      throw new Error("Email channel is not configured for OAuth");
+    }
+
+    const accessToken = channel.config.accessToken as string | undefined;
+    const tokenExpiresAt = channel.config.tokenExpiresAt as number | undefined;
+    const now = Date.now();
+    if (accessToken && (!tokenExpiresAt || now < tokenExpiresAt - 2 * 60 * 1000)) {
+      return accessToken;
+    }
+
+    if ((channel.config.oauthProvider as string | undefined) !== "microsoft") {
+      throw new Error("Unsupported email OAuth provider");
+    }
+
+    const oauthClientId = channel.config.oauthClientId as string | undefined;
+    const refreshToken = channel.config.refreshToken as string | undefined;
+    if (!oauthClientId || !refreshToken) {
+      if (accessToken) {
+        return accessToken;
+      }
+      throw new Error("Email OAuth refresh token is required");
+    }
+
+    const refreshed = await refreshMicrosoftEmailAccessToken({
+      clientId: oauthClientId,
+      clientSecret: channel.config.oauthClientSecret as string | undefined,
+      refreshToken,
+      tenant: (channel.config.oauthTenant as string | undefined) || MICROSOFT_EMAIL_DEFAULT_TENANT,
+    });
+
+    const nextConfig = {
+      ...channel.config,
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken || refreshToken,
+      tokenExpiresAt: refreshed.expiresIn ? Date.now() + refreshed.expiresIn * 1000 : tokenExpiresAt,
+      scopes: refreshed.scopes || (channel.config.scopes as string[] | undefined),
+    };
+
+    this.channelRepo.update(channelId, { config: nextConfig });
+    return refreshed.accessToken;
+  }
+
   /**
    * Create an adapter for a channel
    */
   private createAdapterForChannel(channel: Channel): ChannelAdapter {
+    this.assertChannelConfigAvailable(channel);
+
     switch (channel.type) {
       case "telegram":
         return createTelegramAdapter({
@@ -1713,6 +1826,7 @@ export class ChannelGateway {
           botToken: channel.config.botToken as string,
           applicationId: channel.config.applicationId as string,
           guildIds: channel.config.guildIds as string[] | undefined,
+          supervisor: channel.config.supervisor as _DiscordConfig["supervisor"],
         });
 
       case "slack":
@@ -1838,6 +1952,16 @@ export class ChannelGateway {
         return createEmailAdapter({
           enabled: channel.enabled,
           protocol: channel.config.protocol as "imap-smtp" | "loom" | undefined,
+          authMethod: channel.config.authMethod as "password" | "oauth" | undefined,
+          oauthProvider: channel.config.oauthProvider as "microsoft" | undefined,
+          oauthClientId: channel.config.oauthClientId as string | undefined,
+          oauthClientSecret: channel.config.oauthClientSecret as string | undefined,
+          oauthTenant: channel.config.oauthTenant as string | undefined,
+          accessToken: channel.config.accessToken as string | undefined,
+          refreshToken: channel.config.refreshToken as string | undefined,
+          tokenExpiresAt: channel.config.tokenExpiresAt as number | undefined,
+          scopes: channel.config.scopes as string[] | undefined,
+          oauthAccessTokenProvider: async () => this.getEmailOAuthAccessToken(channel.id),
           imapHost: channel.config.imapHost as string,
           imapPort: channel.config.imapPort as number | undefined,
           imapSecure: channel.config.imapSecure as boolean | undefined,
@@ -1888,6 +2012,12 @@ export class ChannelGateway {
 
       default:
         throw new Error(`Unsupported channel type: ${channel.type}`);
+    }
+  }
+
+  private assertChannelConfigAvailable(channel: Channel): void {
+    if (channel.configReadError) {
+      throw new Error(channel.configReadError);
     }
   }
 

@@ -6,7 +6,11 @@
  */
 
 import { EventEmitter } from "events";
-import { WorkflowPhase } from "./WorkflowDecomposer";
+import { resolveModelPreferenceToModelKey } from "../../../shared/agent-preferences";
+import {
+  WorkflowPhase,
+  workflowPhaseTypeToCapability,
+} from "./WorkflowDecomposer";
 
 export interface WorkflowPipelineDeps {
   createChildTask: (params: {
@@ -105,8 +109,19 @@ export class WorkflowPipeline extends EventEmitter {
           workspaceId: this.state.workspaceId,
           parentTaskId: this.state.rootTaskId,
           agentConfig: {
+            ...(phase.llmOverride?.providerType ? { providerType: phase.llmOverride.providerType } : {}),
+            ...(phase.llmOverride?.modelKey
+              ? { modelKey: phase.llmOverride.modelKey }
+              : phase.llmOverride?.modelPreference
+                ? { modelKey: resolveModelPreferenceToModelKey(phase.llmOverride.modelPreference) }
+                : {}),
+            ...(phase.llmOverride?.llmProfile ? { llmProfile: phase.llmOverride.llmProfile } : {}),
+            ...(phase.autoSelectModel !== false
+              ? { capabilityHint: workflowPhaseTypeToCapability(phase.phaseType) }
+              : {}),
             retainMemory: false,
             bypassQueue: false,
+            useWorkflowPipeline: false,
             workflowPhaseId: phase.id,
             workflowPhaseType: phase.phaseType,
           },

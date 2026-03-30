@@ -315,6 +315,12 @@ export async function migrateEnvToSettings(): Promise<MigrationResult> {
       searchChanged = true;
     }
 
+    if (env.EXA_API_KEY && !searchSettings.exa?.apiKey) {
+      searchSettings.exa = { apiKey: env.EXA_API_KEY };
+      migratedKeys.push("Exa API Key");
+      searchChanged = true;
+    }
+
     if (env.BRAVE_API_KEY && !searchSettings.brave?.apiKey) {
       searchSettings.brave = { apiKey: env.BRAVE_API_KEY };
       migratedKeys.push("Brave Search API Key");
@@ -521,6 +527,13 @@ export async function importProcessEnvToSettings(
     if (shouldWriteValue(searchSettings?.tavily?.apiKey, tavilyApiKey, mode)) {
       searchSettings.tavily = { ...searchSettings.tavily, apiKey: tavilyApiKey };
       migratedKeys.push("Tavily API Key");
+      searchChanged = true;
+    }
+
+    const exaApiKey = normalizeEnvValue(process.env.EXA_API_KEY);
+    if (shouldWriteValue(searchSettings?.exa?.apiKey, exaApiKey, mode)) {
+      searchSettings.exa = { ...searchSettings.exa, apiKey: exaApiKey };
+      migratedKeys.push("Exa API Key");
       searchChanged = true;
     }
 

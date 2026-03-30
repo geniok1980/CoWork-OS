@@ -1,3 +1,5 @@
+import { ALL_WORKSPACES_ID } from "./useMissionControlData";
+import { isTempWorkspaceId } from "../../../shared/types";
 import type { MissionControlData, MCTab } from "./useMissionControlData";
 
 interface MCTopBarProps {
@@ -18,10 +20,12 @@ export function MCTopBar({ data }: MCTopBarProps) {
     companies, selectedCompanyId, setSelectedCompanyId,
     activeAgentsCount, totalTasksInQueue, pendingMentionsCount,
     isRefreshing, handleManualRefresh, selectedWorkspace,
-    standupOpen: _, setStandupOpen, setTeamsOpen, setReviewsOpen,
+    setStandupOpen, setTeamsOpen, setReviewsOpen,
     activeTab, setActiveTab, selectedCompany,
     currentTime, agentContext,
   } = data;
+  const supportsWorkspaceReports =
+    !!selectedWorkspace && !isTempWorkspaceId(selectedWorkspace.id);
 
   return (
     <>
@@ -32,6 +36,7 @@ export function MCTopBar({ data }: MCTopBarProps) {
           <div className="mc-v2-selector">
             <span className="mc-v2-selector-label">{agentContext.getUiCopy("mcWorkspaceLabel")}</span>
             <select value={selectedWorkspaceId || ""} onChange={(e) => setSelectedWorkspaceId(e.target.value)}>
+              <option value={ALL_WORKSPACES_ID}>All Workspaces</option>
               {workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
             </select>
           </div>
@@ -58,8 +63,20 @@ export function MCTopBar({ data }: MCTopBarProps) {
             {isRefreshing ? "Refreshing..." : "Refresh"}
           </button>
           <button className="mc-v2-icon-btn" onClick={() => setTeamsOpen(true)} disabled={!selectedWorkspace}>Teams</button>
-          <button className="mc-v2-icon-btn" onClick={() => setReviewsOpen(true)} disabled={!selectedWorkspace}>Reviews</button>
-          <button className="mc-v2-icon-btn" onClick={() => setStandupOpen(true)} disabled={!selectedWorkspace}>{agentContext.getUiCopy("mcStandupButton")}</button>
+          <button
+            className="mc-v2-icon-btn"
+            onClick={() => setReviewsOpen(true)}
+            disabled={!supportsWorkspaceReports}
+          >
+            Reviews
+          </button>
+          <button
+            className="mc-v2-icon-btn"
+            onClick={() => setStandupOpen(true)}
+            disabled={!supportsWorkspaceReports}
+          >
+            {agentContext.getUiCopy("mcStandupButton")}
+          </button>
           <span style={{ fontSize: 13, fontWeight: 500, fontFamily: "var(--font-mono)", color: "var(--color-text-primary)" }}>
             {currentTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
           </span>

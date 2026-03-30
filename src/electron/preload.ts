@@ -11,6 +11,8 @@ import type {
   AgentThought,
   AgentPerformanceReview,
   AgentReviewGenerateRequest,
+  AppProfileSummary,
+  ProfileExportResult,
   EvalBaselineMetrics,
   EvalCase,
   EvalRun,
@@ -481,6 +483,11 @@ const IPC_CHANNELS = {
   SHAREPOINT_SAVE_SETTINGS: "sharepoint:saveSettings",
   SHAREPOINT_TEST_CONNECTION: "sharepoint:testConnection",
   SHAREPOINT_GET_STATUS: "sharepoint:getStatus",
+  PROFILE_LIST: "profile:list",
+  PROFILE_CREATE: "profile:create",
+  PROFILE_SWITCH: "profile:switch",
+  PROFILE_EXPORT: "profile:export",
+  PROFILE_IMPORT: "profile:import",
   HEALTH_GET_DASHBOARD: "health:getDashboard",
   HEALTH_LIST_SOURCES: "health:listSources",
   HEALTH_UPSERT_SOURCE: "health:upsertSource",
@@ -544,6 +551,9 @@ const IPC_CHANNELS = {
   CUSTOM_SKILL_DELETE: "customSkill:delete",
   CUSTOM_SKILL_RELOAD: "customSkill:reload",
   CUSTOM_SKILL_OPEN_FOLDER: "customSkill:openFolder",
+  CUSTOM_SKILL_GET_SETTINGS: "customSkill:getSettings",
+  CUSTOM_SKILL_SET_EXTERNAL_DIRS: "customSkill:setExternalDirs",
+  CUSTOM_SKILL_OPEN_EXTERNAL_FOLDER: "customSkill:openExternalFolder",
   // Skill Registry (SkillHub)
   SKILL_REGISTRY_SEARCH: "skillRegistry:search",
   SKILL_REGISTRY_CLAWHUB_SEARCH: "skillRegistry:clawhubSearch",
@@ -605,6 +615,11 @@ const IPC_CHANNELS = {
   BUILTIN_TOOLS_GET_SETTINGS: "builtinTools:getSettings",
   BUILTIN_TOOLS_SAVE_SETTINGS: "builtinTools:saveSettings",
   BUILTIN_TOOLS_GET_CATEGORIES: "builtinTools:getCategories",
+  COMPUTER_USE_GET_STATUS: "computerUse:getStatus",
+  COMPUTER_USE_END_SESSION: "computerUse:endSession",
+  COMPUTER_USE_OPEN_ACCESSIBILITY: "computerUse:openAccessibility",
+  COMPUTER_USE_OPEN_SCREEN_RECORDING: "computerUse:openScreenRecording",
+  COMPUTER_USE_EVENT: "computerUse:event",
   // Tray (Menu Bar)
   TRAY_GET_SETTINGS: "tray:getSettings",
   TRAY_SAVE_SETTINGS: "tray:saveSettings",
@@ -1024,6 +1039,7 @@ const IPC_CHANNELS = {
   COMPARISON_GET_RESULT: "comparison:getResult",
   // Usage Insights
   USAGE_INSIGHTS_GET: "usageInsights:get",
+  USAGE_INSIGHTS_EARLIEST: "usageInsights:earliest",
   // Daily Briefing
   DAILY_BRIEFING_GENERATE: "dailyBriefing:generate",
   // Proactive Suggestions
@@ -1101,7 +1117,7 @@ interface SkillParameter {
   options?: string[];
 }
 
-type SkillSource = "bundled" | "managed" | "workspace";
+type SkillSource = "bundled" | "managed" | "external" | "workspace";
 
 interface SkillRequirements {
   tools?: string[];
@@ -1186,6 +1202,7 @@ interface SkillStatusReport {
   workspaceDir: string;
   managedSkillsDir: string;
   bundledSkillsDir: string;
+  externalSkillDirs: string[];
   skills: SkillStatusEntry[];
   summary: {
     total: number;
@@ -1193,6 +1210,16 @@ interface SkillStatusReport {
     disabled: number;
     missingRequirements: number;
   };
+}
+
+interface SkillsConfig {
+  skillsDirectory: string;
+  externalSkillDirectories?: string[];
+  enabledSkillIds: string[];
+  registryUrl?: string;
+  autoUpdate?: boolean;
+  allowlist?: string[];
+  denylist?: string[];
 }
 
 // MCP types (inlined for sandboxed preload)
@@ -1327,6 +1354,8 @@ interface ToolCategoryConfig {
 
 interface BuiltinToolsSettings {
   categories: {
+    code: ToolCategoryConfig;
+    webfetch: ToolCategoryConfig;
     browser: ToolCategoryConfig;
     search: ToolCategoryConfig;
     system: ToolCategoryConfig;
@@ -1334,6 +1363,7 @@ interface BuiltinToolsSettings {
     skill: ToolCategoryConfig;
     shell: ToolCategoryConfig;
     image: ToolCategoryConfig;
+    computer_use: ToolCategoryConfig;
   };
   toolOverrides: Record<string, { enabled: boolean; priority?: "high" | "normal" | "low" }>;
   toolTimeouts: Record<string, number>;
@@ -2082,6 +2112,9 @@ type AgentAutonomyLevel = "intern" | "specialist" | "lead";
 interface AgentRoleData {
   id: string;
   name: string;
+  roleKind?: import("../shared/types").AgentRoleKind;
+  sourceTemplateId?: string;
+  sourceTemplateVersion?: string;
   companyId?: string;
   displayName: string;
   description?: string;
@@ -2098,9 +2131,10 @@ interface AgentRoleData {
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
-  // Mission Control fields
+  // Automation fields
   autonomyLevel?: AgentAutonomyLevel;
   soul?: string;
+  heartbeatPolicy?: import("../shared/types").HeartbeatPolicy;
   heartbeatEnabled?: boolean;
   heartbeatIntervalMinutes?: number;
   heartbeatStaggerOffset?: number;
@@ -2124,6 +2158,9 @@ interface AgentRoleData {
 
 interface CreateAgentRoleRequest {
   name: string;
+  roleKind?: import("../shared/types").AgentRoleKind;
+  sourceTemplateId?: string;
+  sourceTemplateVersion?: string;
   companyId?: string;
   displayName: string;
   description?: string;
@@ -2135,9 +2172,10 @@ interface CreateAgentRoleRequest {
   systemPrompt?: string;
   capabilities: AgentCapability[];
   toolRestrictions?: AgentToolRestrictions;
-  // Mission Control fields
+  // Automation fields
   autonomyLevel?: AgentAutonomyLevel;
   soul?: string;
+  heartbeatPolicy?: import("../shared/types").HeartbeatPolicyInput;
   heartbeatEnabled?: boolean;
   heartbeatIntervalMinutes?: number;
   heartbeatStaggerOffset?: number;
@@ -2157,6 +2195,9 @@ interface CreateAgentRoleRequest {
 
 interface UpdateAgentRoleRequest {
   id: string;
+  roleKind?: import("../shared/types").AgentRoleKind;
+  sourceTemplateId?: string | null;
+  sourceTemplateVersion?: string | null;
   companyId?: string | null;
   displayName?: string;
   description?: string;
@@ -2170,9 +2211,10 @@ interface UpdateAgentRoleRequest {
   toolRestrictions?: AgentToolRestrictions;
   isActive?: boolean;
   sortOrder?: number;
-  // Mission Control fields
+  // Automation fields
   autonomyLevel?: AgentAutonomyLevel;
   soul?: string;
+  heartbeatPolicy?: import("../shared/types").HeartbeatPolicyInput;
   heartbeatEnabled?: boolean;
   heartbeatIntervalMinutes?: number;
   heartbeatStaggerOffset?: number;
@@ -2856,6 +2898,24 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getSearchConfigStatus: () => ipcRenderer.invoke(IPC_CHANNELS.SEARCH_GET_CONFIG_STATUS),
   testSearchProvider: (providerType: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.SEARCH_TEST_PROVIDER, providerType),
+  listProfiles: () => ipcRenderer.invoke(IPC_CHANNELS.PROFILE_LIST) as Promise<AppProfileSummary[]>,
+  createProfile: (name: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PROFILE_CREATE, name) as Promise<AppProfileSummary>,
+  switchProfile: (profileId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PROFILE_SWITCH, profileId) as Promise<{
+      success: true;
+      relaunching: true;
+    }>,
+  exportProfile: (profileId: string, destinationRoot: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PROFILE_EXPORT, {
+      profileId,
+      destinationRoot,
+    }) as Promise<ProfileExportResult>,
+  importProfile: (sourcePath: string, profileName?: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.PROFILE_IMPORT, {
+      sourcePath,
+      profileName,
+    }) as Promise<AppProfileSummary>,
 
   // X/Twitter Settings APIs
   getXSettings: () => ipcRenderer.invoke(IPC_CHANNELS.X_GET_SETTINGS),
@@ -3035,6 +3095,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   deleteCustomSkill: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.CUSTOM_SKILL_DELETE, id),
   reloadCustomSkills: () => ipcRenderer.invoke(IPC_CHANNELS.CUSTOM_SKILL_RELOAD),
   openCustomSkillsFolder: () => ipcRenderer.invoke(IPC_CHANNELS.CUSTOM_SKILL_OPEN_FOLDER),
+  getCustomSkillSettings: () => ipcRenderer.invoke(IPC_CHANNELS.CUSTOM_SKILL_GET_SETTINGS),
+  setExternalSkillDirectories: (dirs: string[]) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CUSTOM_SKILL_SET_EXTERNAL_DIRS, dirs),
+  openExternalSkillFolder: (dir: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.CUSTOM_SKILL_OPEN_EXTERNAL_FOLDER, dir),
 
   // Skill Registry (SkillHub) APIs
   searchSkillRegistry: (query: string, options?: { page?: number; pageSize?: number }) =>
@@ -3158,6 +3223,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
   saveBuiltinToolsSettings: (settings: BuiltinToolsSettings) =>
     ipcRenderer.invoke(IPC_CHANNELS.BUILTIN_TOOLS_SAVE_SETTINGS, settings),
   getBuiltinToolsCategories: () => ipcRenderer.invoke(IPC_CHANNELS.BUILTIN_TOOLS_GET_CATEGORIES),
+
+  getComputerUseStatus: () => ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_USE_GET_STATUS),
+  endComputerUseSession: () => ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_USE_END_SESSION),
+  openComputerUseAccessibilitySettings: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_USE_OPEN_ACCESSIBILITY),
+  openComputerUseScreenRecordingSettings: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.COMPUTER_USE_OPEN_SCREEN_RECORDING),
+  onComputerUseEvent: (callback: (event: Any) => void) => {
+    const channel = IPC_CHANNELS.COMPUTER_USE_EVENT;
+    const listener = (_e: Any, payload: Any) => callback(payload);
+    ipcRenderer.on(channel, listener);
+    return () => ipcRenderer.removeListener(channel, listener);
+  },
 
   // Tray (Menu Bar) APIs
   getTraySettings: () => ipcRenderer.invoke(IPC_CHANNELS.TRAY_GET_SETTINGS),
@@ -3577,10 +3655,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.KIT_RESET_ADAPTIVE_STYLE) as Promise<void>,
   submitMessageFeedback: (payload: {
     taskId: string;
-    messageId: string;
+    messageId?: string;
     decision: "accepted" | "rejected";
     reason?: string;
     note?: string;
+    kind?: "message" | "task";
   }) => ipcRenderer.invoke(IPC_CHANNELS.KIT_SUBMIT_MESSAGE_FEEDBACK, payload) as Promise<void>,
 
   // ChatGPT Import APIs
@@ -4136,6 +4215,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getUsageInsights: (workspaceId: string, periodDays?: number) =>
     ipcRenderer.invoke(IPC_CHANNELS.USAGE_INSIGHTS_GET, workspaceId, periodDays),
 
+  getUsageInsightsEarliest: (workspaceId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.USAGE_INSIGHTS_EARLIEST, workspaceId),
+
   // Daily Briefing
   generateDailyBriefing: (workspaceId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.DAILY_BRIEFING_GENERATE, workspaceId),
@@ -4674,6 +4756,11 @@ export interface ElectronAPI {
     isConfigured: boolean;
   }>;
   testSearchProvider: (providerType: string) => Promise<{ success: boolean; error?: string }>;
+  listProfiles: () => Promise<AppProfileSummary[]>;
+  createProfile: (name: string) => Promise<AppProfileSummary>;
+  switchProfile: (profileId: string) => Promise<{ success: true; relaunching: true }>;
+  exportProfile: (profileId: string, destinationRoot: string) => Promise<ProfileExportResult>;
+  importProfile: (sourcePath: string, profileName?: string) => Promise<AppProfileSummary>;
   // X/Twitter Settings
   getXSettings: () => Promise<{
     enabled: boolean;
@@ -5176,6 +5263,9 @@ export interface ElectronAPI {
   deleteCustomSkill: (id: string) => Promise<boolean>;
   reloadCustomSkills: () => Promise<CustomSkill[]>;
   openCustomSkillsFolder: () => Promise<void>;
+  getCustomSkillSettings: () => Promise<SkillsConfig>;
+  setExternalSkillDirectories: (dirs: string[]) => Promise<SkillsConfig>;
+  openExternalSkillFolder: (dir: string) => Promise<void>;
   // Skill Registry (SkillHub) APIs
   searchSkillRegistry: (
     query: string,
@@ -5318,6 +5408,16 @@ export interface ElectronAPI {
   getBuiltinToolsSettings: () => Promise<BuiltinToolsSettings>;
   saveBuiltinToolsSettings: (settings: BuiltinToolsSettings) => Promise<{ success: boolean }>;
   getBuiltinToolsCategories: () => Promise<Record<string, string[]>>;
+  getComputerUseStatus: () => Promise<{
+    activeTaskId: string | null;
+    accessibilityTrusted: boolean;
+    screenCaptureStatus: string;
+    approvedApps: Array<{ appName: string; bundleId?: string; accessLevel: string }>;
+  }>;
+  endComputerUseSession: () => Promise<{ success: boolean }>;
+  openComputerUseAccessibilitySettings: () => Promise<{ success: boolean }>;
+  openComputerUseScreenRecordingSettings: () => Promise<{ success: boolean }>;
+  onComputerUseEvent: (callback: (event: Any) => void) => () => void;
   // Tray (Menu Bar)
   getTraySettings: () => Promise<TraySettings>;
   saveTraySettings: (settings: Partial<TraySettings>) => Promise<{ success: boolean }>;
@@ -5660,10 +5760,11 @@ export interface ElectronAPI {
   resetAdaptiveStyle: () => Promise<void>;
   submitMessageFeedback: (payload: {
     taskId: string;
-    messageId: string;
+    messageId?: string;
     decision: "accepted" | "rejected";
     reason?: string;
     note?: string;
+    kind?: "message" | "task";
   }) => Promise<void>;
 
   // ChatGPT Import
@@ -6260,6 +6361,7 @@ export interface ElectronAPI {
 
   // Usage Insights
   getUsageInsights: (workspaceId: string, periodDays?: number) => Promise<Any>;
+  getUsageInsightsEarliest: (workspaceId: string) => Promise<number | null>;
 
   // Daily Briefing
   generateDailyBriefing: (workspaceId: string) => Promise<Any>;

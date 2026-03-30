@@ -2,6 +2,9 @@ import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 import { getUserDataDir } from "../utils/user-data-dir";
+import { createLogger } from "../utils/logger";
+
+const schemaLogger = createLogger("DatabaseManager");
 
 export class DatabaseManager {
   private static instance: DatabaseManager | null = null;
@@ -9,12 +12,14 @@ export class DatabaseManager {
 
   constructor() {
     const userDataPath = getUserDataDir();
+    this.ensureRestrictedDirectory(userDataPath);
 
     // Run migration from old cowork-oss directory before opening database
     this.migrateFromLegacyDirectory(userDataPath);
 
     const dbPath = path.join(userDataPath, "cowork-os.db");
     this.db = new Database(dbPath);
+    this.ensureRestrictedFile(dbPath);
     this.initializeSchema();
 
     // Store as singleton instance
@@ -189,6 +194,34 @@ export class DatabaseManager {
 
     if (!migrationSuccessful) {
       console.warn("[DatabaseManager] Migration incomplete - will retry on next startup");
+    }
+  }
+
+  /**
+   * Restrict directory permissions so mailbox and settings data are not
+   * accessible to other local users by default.
+   */
+  private ensureRestrictedDirectory(dirPath: string): void {
+    try {
+      if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+      }
+      fs.chmodSync(dirPath, 0o700);
+    } catch (error) {
+      schemaLogger.warn("Failed to restrict userData directory permissions:", error);
+    }
+  }
+
+  /**
+   * Restrict file permissions for the main SQLite database file.
+   */
+  private ensureRestrictedFile(filePath: string): void {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.chmodSync(filePath, 0o600);
+      }
+    } catch (error) {
+      schemaLogger.warn("Failed to restrict database file permissions:", error);
     }
   }
 
@@ -932,6 +965,7 @@ export class DatabaseManager {
         stale_followup INTEGER NOT NULL DEFAULT 0,
         cleanup_candidate INTEGER NOT NULL DEFAULT 0,
         handled INTEGER NOT NULL DEFAULT 0,
+        local_inbox_hidden INTEGER NOT NULL DEFAULT 0,
         unread_count INTEGER NOT NULL DEFAULT 0,
         message_count INTEGER NOT NULL DEFAULT 0,
         last_message_at INTEGER NOT NULL,
@@ -1601,6 +1635,69 @@ export class DatabaseManager {
         CREATE INDEX IF NOT EXISTS idx_mentions_to_agent ON agent_mentions(to_agent_role_id, status);
         CREATE INDEX IF NOT EXISTS idx_mentions_task ON agent_mentions(task_id);
         CREATE INDEX IF NOT EXISTS idx_mentions_workspace ON agent_mentions(workspace_id, created_at DESC);
+      `);
+    } catch {
+      // Table already exists, ignore
+    }
+
+    // Migration: Create supervisor exchange tables for Discord supervisor protocol
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS supervisor_exchanges (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          coordination_channel_id TEXT NOT NULL,
+          source_channel_id TEXT,
+          source_message_id TEXT,
+          source_peer_user_id TEXT,
+          worker_agent_role_id TEXT,
+          supervisor_agent_role_id TEXT,
+          linked_task_id TEXT,
+          escalation_target TEXT,
+          status TEXT NOT NULL,
+          last_intent TEXT,
+          turn_count INTEGER NOT NULL DEFAULT 0,
+          terminal_reason TEXT,
+          evidence_refs_json TEXT,
+          human_resolution TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          closed_at INTEGER,
+          FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+          FOREIGN KEY (worker_agent_role_id) REFERENCES agent_roles(id),
+          FOREIGN KEY (supervisor_agent_role_id) REFERENCES agent_roles(id),
+          FOREIGN KEY (linked_task_id) REFERENCES tasks(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_supervisor_exchanges_workspace
+          ON supervisor_exchanges(workspace_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_supervisor_exchanges_status
+          ON supervisor_exchanges(status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_supervisor_exchanges_source
+          ON supervisor_exchanges(source_message_id);
+      `);
+    } catch {
+      // Table already exists, ignore
+    }
+
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS supervisor_exchange_messages (
+          id TEXT PRIMARY KEY,
+          exchange_id TEXT NOT NULL REFERENCES supervisor_exchanges(id) ON DELETE CASCADE,
+          discord_message_id TEXT NOT NULL UNIQUE,
+          channel_id TEXT NOT NULL,
+          author_user_id TEXT,
+          actor_kind TEXT NOT NULL,
+          intent TEXT NOT NULL,
+          raw_content TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_supervisor_exchange_messages_exchange
+          ON supervisor_exchange_messages(exchange_id, created_at ASC);
+        CREATE INDEX IF NOT EXISTS idx_supervisor_exchange_messages_channel
+          ON supervisor_exchange_messages(channel_id, created_at DESC);
       `);
     } catch {
       // Table already exists, ignore
@@ -2892,6 +2989,7 @@ export class DatabaseManager {
       // Column already exists, ignore
     }
     const mailboxThreadMigrations = [
+      "ALTER TABLE mailbox_threads ADD COLUMN local_inbox_hidden INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE mailbox_threads ADD COLUMN classification_state TEXT NOT NULL DEFAULT 'pending'",
       "ALTER TABLE mailbox_threads ADD COLUMN classification_fingerprint TEXT",
       "ALTER TABLE mailbox_threads ADD COLUMN classification_model_key TEXT",

@@ -75,6 +75,213 @@ function getSystemCA(): string[] {
   return _cachedSystemCA;
 }
 
+type DecodedMimeEntity = {
+  plainText?: string;
+  html?: string;
+};
+
+function normalizeMimeLineEndings(value: string): string {
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+/** Strip CR and LF from a value before it is placed in an RFC 2822 header field. */
+function sanitizeHeaderValue(value: string): string {
+  return value.replace(/[\r\n]/g, "");
+}
+
+function parseHeaderBlock(headerText: string): Map<string, string> {
+  const headers = new Map<string, string>();
+  const normalized = normalizeMimeLineEndings(headerText);
+  const headerLines = normalized.split(/\n(?=[^\s])/);
+
+  for (const line of headerLines) {
+    const colonIndex = line.indexOf(":");
+    if (colonIndex <= 0) continue;
+    const key = line.substring(0, colonIndex).trim().toLowerCase();
+    const value = line
+      .substring(colonIndex + 1)
+      .replace(/\n\s+/g, " ")
+      .trim();
+    headers.set(key, value);
+  }
+
+  return headers;
+}
+
+function unquoteMimeParam(value: string): string {
+  const trimmed = value.trim();
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function parseContentTypeHeader(header: string | undefined): {
+  mimeType: string;
+  boundary?: string;
+  charset?: string;
+} {
+  const normalized = header?.trim() || "text/plain";
+  const [rawMimeType, ...params] = normalized.split(";");
+  const mimeType = rawMimeType.trim().toLowerCase() || "text/plain";
+  const result: { mimeType: string; boundary?: string; charset?: string } = { mimeType };
+
+  for (const param of params) {
+    const equalsIndex = param.indexOf("=");
+    if (equalsIndex <= 0) continue;
+    const key = param.substring(0, equalsIndex).trim().toLowerCase();
+    const value = unquoteMimeParam(param.substring(equalsIndex + 1));
+    if (key === "boundary" && value) result.boundary = value;
+    if (key === "charset" && value) result.charset = value.toLowerCase();
+  }
+
+  return result;
+}
+
+function splitMultipartBody(body: string, boundary: string): string[] {
+  const normalized = normalizeMimeLineEndings(body);
+  const delimiter = `--${boundary}`;
+  const closingDelimiter = `--${boundary}--`;
+  const parts: string[] = [];
+  let current: string[] | null = null;
+
+  for (const line of normalized.split("\n")) {
+    if (line === delimiter) {
+      if (current) {
+        const part = current.join("\n").trim();
+        if (part) parts.push(part);
+      }
+      current = [];
+      continue;
+    }
+
+    if (line === closingDelimiter) {
+      if (current) {
+        const part = current.join("\n").trim();
+        if (part) parts.push(part);
+      }
+      break;
+    }
+
+    if (current) {
+      current.push(line);
+    }
+  }
+
+  // Flush any trailing part if the closing delimiter was absent (malformed body)
+  if (current) {
+    const part = current.join("\n").trim();
+    if (part) parts.push(part);
+  }
+
+  return parts;
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function decodeQuotedPrintable(text: string): Buffer {
+  const normalized = text.replace(/=\r?\n/g, "");
+  const bytes: number[] = [];
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    if (char === "=" && /^[0-9A-F]{2}$/i.test(normalized.slice(index + 1, index + 3))) {
+      bytes.push(parseInt(normalized.slice(index + 1, index + 3), 16));
+      index += 2;
+      continue;
+    }
+    bytes.push(normalized.charCodeAt(index));
+  }
+
+  return Buffer.from(bytes);
+}
+
+function countUtf8MojibakeHints(text: string): number {
+  const matches = text.match(/(?:Ã.|Â.|â.|ð.)/g);
+  return matches?.length || 0;
+}
+
+function repairUtf8Mojibake(text: string): string {
+  const hintCount = countUtf8MojibakeHints(text);
+  if (!text || hintCount === 0) return text;
+
+  try {
+    const repaired = Buffer.from(text, "latin1").toString("utf8");
+    if (!repaired || repaired.includes("\uFFFD")) {
+      return text;
+    }
+
+    return countUtf8MojibakeHints(repaired) < hintCount ? repaired : text;
+  } catch {
+    return text;
+  }
+}
+
+function decodeMimeBuffer(buffer: Buffer, charset?: string): string {
+  const normalizedCharset = (charset || "utf-8").toLowerCase();
+
+  if (normalizedCharset === "utf-8" || normalizedCharset === "utf8") {
+    return repairUtf8Mojibake(buffer.toString("utf8"));
+  }
+
+  if (
+    normalizedCharset === "us-ascii" ||
+    normalizedCharset === "ascii" ||
+    normalizedCharset === "iso-8859-1" ||
+    normalizedCharset === "latin1" ||
+    normalizedCharset === "windows-1252" ||
+    normalizedCharset === "cp1252"
+  ) {
+    return repairUtf8Mojibake(buffer.toString("latin1"));
+  }
+
+  try {
+    return repairUtf8Mojibake(buffer.toString("utf8"));
+  } catch {
+    return repairUtf8Mojibake(buffer.toString("latin1"));
+  }
+}
+
+function extractImapLiteral(response: string, section: "HEADER" | "TEXT"): string {
+  const marker = `BODY[${section}]`;
+  const startIndex = response.indexOf(marker);
+  if (startIndex === -1) return "";
+
+  const literalMatch = response.slice(startIndex).match(/^BODY\[(?:HEADER|TEXT)\]\s*\{(\d+)\}\r\n/i);
+  if (!literalMatch) return "";
+
+  const literalLength = Number.parseInt(literalMatch[1] || "0", 10);
+  if (!Number.isFinite(literalLength) || literalLength < 0) return "";
+
+  const literalStart = startIndex + literalMatch[0].length;
+  const byteStart = Buffer.byteLength(response.slice(0, literalStart), "utf8");
+  const buffer = Buffer.from(response, "utf8");
+  return buffer.subarray(byteStart, byteStart + literalLength).toString("utf8");
+}
+
 /**
  * Email message
  */
@@ -131,6 +338,12 @@ export interface EmailAttachment {
  * Email client options
  */
 export interface EmailClientOptions {
+  /** Authentication mode */
+  authMethod?: "password" | "oauth";
+  /** OAuth access token */
+  accessToken?: string;
+  /** Runtime token provider for OAuth refresh */
+  oauthAccessTokenProvider?: () => Promise<string>;
   /** IMAP host */
   imapHost: string;
   /** IMAP port */
@@ -146,7 +359,7 @@ export interface EmailClientOptions {
   /** Email address */
   email: string;
   /** Password */
-  password: string;
+  password?: string;
   /** Display name */
   displayName?: string;
   /** Mailbox to monitor */
@@ -177,7 +390,48 @@ export class EmailClient extends EventEmitter {
 
   constructor(options: EmailClientOptions) {
     super();
-    this.options = options;
+    this.options = {
+      ...options,
+      authMethod: options.authMethod ?? "password",
+    };
+  }
+
+  private async resolveAccessToken(): Promise<string> {
+    if (this.options.oauthAccessTokenProvider) {
+      const accessToken = await this.options.oauthAccessTokenProvider();
+      this.options.accessToken = accessToken;
+      return accessToken;
+    }
+    if (this.options.accessToken) {
+      return this.options.accessToken;
+    }
+    throw new Error("OAuth access token is required");
+  }
+
+  private async getImapAuthCommand(): Promise<string> {
+    if (this.options.authMethod === "oauth") {
+      const accessToken = await this.resolveAccessToken();
+      const xoauth2 = Buffer.from(
+        `user=${this.options.email}\x01auth=Bearer ${accessToken}\x01\x01`,
+        "utf8",
+      ).toString("base64");
+      return `AUTHENTICATE XOAUTH2 ${xoauth2}`;
+    }
+
+    return `LOGIN "${this.options.email}" "${this.options.password}"`;
+  }
+
+  private async getSmtpAuthCommand(): Promise<string> {
+    if (this.options.authMethod === "oauth") {
+      const accessToken = await this.resolveAccessToken();
+      const xoauth2 = Buffer.from(
+        `user=${this.options.email}\x01auth=Bearer ${accessToken}\x01\x01`,
+        "utf8",
+      ).toString("base64");
+      return `AUTH XOAUTH2 ${xoauth2}\r\n`;
+    }
+
+    return `AUTH PLAIN ${Buffer.from(`\0${this.options.email}\0${this.options.password}`).toString("base64")}\r\n`;
   }
 
   /**
@@ -259,7 +513,8 @@ export class EmailClient extends EventEmitter {
             await this.waitForResponse("OK");
 
             // Login
-            await this.imapCommand(`LOGIN "${this.options.email}" "${this.options.password}"`);
+            const authCommand = await this.getImapAuthCommand();
+            await this.imapCommand(authCommand);
             clearTimeout(timeout);
             resolve();
           } catch (error) {
@@ -503,44 +758,65 @@ export class EmailClient extends EventEmitter {
     }
   }
 
+  async fetchRecentEmails(limit: number): Promise<EmailMessage[]> {
+    const safeLimit = Math.min(Math.max(Number.isFinite(limit) ? limit : 20, 1), 50);
+
+    await this.connectImap();
+    try {
+      await this.selectMailbox();
+
+      const response = await this.imapCommand("UID SEARCH ALL");
+      const uidMatch = response.match(/SEARCH\s+([\d\s]+)/i);
+      const uids = uidMatch
+        ? uidMatch[1]
+            .trim()
+            .split(/\s+/)
+            .filter((u) => u)
+            .map((u) => parseInt(u, 10))
+            .filter((u) => Number.isFinite(u))
+        : [];
+
+      if (uids.length === 0) return [];
+
+      const selected = uids.slice(-safeLimit).reverse();
+
+      const emails: EmailMessage[] = [];
+      for (const uid of selected) {
+        const email = await this.fetchEmail(uid);
+        if (email) emails.push(email);
+      }
+      return emails;
+    } finally {
+      await this.disconnectImap();
+    }
+  }
+
   /**
    * Parse email from IMAP response (simplified)
    */
   private parseEmailResponse(response: string, uid: number): EmailMessage | null {
-    const headers = new Map<string, string>();
+    let headers = new Map<string, string>();
 
-    // Extract headers (simplified parsing)
-    const headerMatch = response.match(/BODY\[HEADER\]\s*\{(\d+)\}\r\n([\s\S]*?)\r\n\r\n/i);
-    if (headerMatch) {
-      const headerText = headerMatch[2];
-      const headerLines = headerText.split(/\r\n(?=[^\s])/);
-
-      for (const line of headerLines) {
-        const colonIndex = line.indexOf(":");
-        if (colonIndex > 0) {
-          const key = line.substring(0, colonIndex).trim().toLowerCase();
-          const value = line
-            .substring(colonIndex + 1)
-            .replace(/\r\n\s+/g, " ")
-            .trim();
-          headers.set(key, value);
-        }
-      }
+    // Extract headers
+    const headerLiteral = extractImapLiteral(response, "HEADER");
+    if (headerLiteral) {
+      headers = parseHeaderBlock(headerLiteral);
     }
 
-    // Extract text body (simplified)
-    let text = "";
-    const textMatch = response.match(/BODY\[TEXT\]\s*\{(\d+)\}\r\n([\s\S]*?)(?=\)|\*)/i);
-    if (textMatch) {
-      text = textMatch[2].trim();
-    }
+    // Extract raw MIME body.
+    const rawBody = extractImapLiteral(response, "TEXT").trim();
+    const decodedBody = this.decodeMimeBody(
+      rawBody,
+      headers.get("content-type"),
+      headers.get("content-transfer-encoding"),
+    );
 
     // Parse From address
-    const fromHeader = headers.get("from") || "";
+    const fromHeader = this.decodeHeader(headers.get("from") || "");
     const from = this.parseEmailAddress(fromHeader);
 
     // Parse To addresses
-    const toHeader = headers.get("to") || "";
+    const toHeader = this.decodeHeader(headers.get("to") || "");
     const to = this.parseEmailAddresses(toHeader);
 
     // Parse Message-ID
@@ -559,7 +835,8 @@ export class EmailClient extends EventEmitter {
       from,
       to,
       subject: this.decodeHeader(headers.get("subject") || "(No Subject)"),
-      text: this.decodeBody(text),
+      text: decodedBody.plainText || (decodedBody.html ? stripHtml(decodedBody.html) : ""),
+      html: decodedBody.html,
       date,
       inReplyTo: headers.get("in-reply-to")?.replace(/[<>]/g, ""),
       references: headers
@@ -575,6 +852,9 @@ export class EmailClient extends EventEmitter {
    * Parse single email address
    */
   private parseEmailAddress(header: string): EmailAddress {
+    const raw = header.trim();
+    if (!raw) return { address: "" };
+
     const match = header.match(/^(?:"?([^"]*)"?\s+)?<?([^>]+)>?$/);
     if (match) {
       return {
@@ -589,7 +869,11 @@ export class EmailClient extends EventEmitter {
    * Parse multiple email addresses
    */
   private parseEmailAddresses(header: string): EmailAddress[] {
-    return header.split(",").map((addr) => this.parseEmailAddress(addr.trim()));
+    if (!header.trim()) return [];
+    return header
+      .split(",")
+      .map((addr) => this.parseEmailAddress(addr.trim()))
+      .filter((address) => address.address);
   }
 
   /**
@@ -597,20 +881,18 @@ export class EmailClient extends EventEmitter {
    */
   private decodeHeader(header: string): string {
     // Handle =?charset?encoding?text?= format
-    return header.replace(
+    const decoded = header.replace(
       /=\?([^?]+)\?([BQ])\?([^?]+)\?=/gi,
       (_: string, charset: string, encoding: string, text: string) => {
         if (encoding.toUpperCase() === "B") {
-          return Buffer.from(text, "base64").toString("utf8");
-        } else {
-          return text
-            .replace(/_/g, " ")
-            .replace(/=([0-9A-F]{2})/gi, (__: string, hex: string) =>
-              String.fromCharCode(parseInt(hex, 16)),
-            );
+          return decodeMimeBuffer(Buffer.from(text, "base64"), charset);
         }
+
+        return decodeMimeBuffer(decodeQuotedPrintable(text.replace(/_/g, " ")), charset);
       },
     );
+
+    return repairUtf8Mojibake(decoded);
   }
 
   /**
@@ -621,6 +903,90 @@ export class EmailClient extends EventEmitter {
     return text
       .replace(/=\r?\n/g, "")
       .replace(/=([0-9A-F]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+  }
+
+  private decodeMimeBody(
+    raw: string,
+    contentTypeHeader?: string,
+    transferEncodingHeader?: string,
+  ): DecodedMimeEntity {
+    const normalized = normalizeMimeLineEndings(raw).trim();
+    if (!normalized) return {};
+
+    let entityHeaders = new Map<string, string>();
+    let body = normalized;
+
+    const headerSeparator = normalized.indexOf("\n\n");
+    if (headerSeparator !== -1) {
+      const maybeHeaderBlock = normalized.slice(0, headerSeparator);
+      const firstLine = maybeHeaderBlock.split("\n", 1)[0]?.trim() || "";
+      if (!firstLine.startsWith("--") && /^[!-9;-~]+:/.test(firstLine)) {
+        const parsedHeaders = parseHeaderBlock(maybeHeaderBlock);
+        if (
+          parsedHeaders.has("content-type") ||
+          parsedHeaders.has("content-transfer-encoding") ||
+          parsedHeaders.has("content-disposition") ||
+          parsedHeaders.has("mime-version")
+        ) {
+          entityHeaders = parsedHeaders;
+          body = normalized.slice(headerSeparator + 2);
+        }
+      }
+    }
+
+    const contentType = parseContentTypeHeader(
+      entityHeaders.get("content-type") || contentTypeHeader || "text/plain",
+    );
+    const transferEncoding =
+      (entityHeaders.get("content-transfer-encoding") || transferEncodingHeader || "").toLowerCase();
+
+    if (contentType.mimeType.startsWith("multipart/") && contentType.boundary) {
+      const parts = splitMultipartBody(body, contentType.boundary);
+      let plainText: string | undefined;
+      let html: string | undefined;
+
+      for (const part of parts) {
+        const decoded = this.decodeMimeBody(part);
+        if (!plainText && decoded.plainText) plainText = decoded.plainText;
+        if (!html && decoded.html) html = decoded.html;
+      }
+
+      return { plainText, html };
+    }
+
+    if (contentType.mimeType === "text/html") {
+      const html = this.decodeMimeText(body, transferEncoding, contentType.charset);
+      return { html };
+    }
+
+    if (contentType.mimeType.startsWith("text/") || !contentType.mimeType) {
+      return {
+        plainText: this.decodeMimeText(body, transferEncoding, contentType.charset),
+      };
+    }
+
+    return {};
+  }
+
+  private decodeMimeText(body: string, transferEncoding: string, charset?: string): string {
+    if (transferEncoding === "base64") {
+      try {
+        const compact = body.replace(/\s+/g, "");
+        return decodeMimeBuffer(Buffer.from(compact, "base64"), charset).trim();
+      } catch {
+        return body.trim();
+      }
+    }
+
+    if (transferEncoding === "quoted-printable") {
+      try {
+        return decodeMimeBuffer(decodeQuotedPrintable(body), charset).trim();
+      } catch {
+        return repairUtf8Mojibake(this.decodeBody(body).trim());
+      }
+    }
+
+    return repairUtf8Mojibake(body.trim());
   }
 
   /**
@@ -663,15 +1029,23 @@ export class EmailClient extends EventEmitter {
     inReplyTo?: string;
     references?: string[];
   }): Promise<string> {
+    const authCommand = await this.getSmtpAuthCommand();
+
     return new Promise((resolve, reject) => {
-      const toAddresses = Array.isArray(options.to) ? options.to : [options.to];
+      const toAddresses = (Array.isArray(options.to) ? options.to : [options.to]).map(
+        sanitizeHeaderValue,
+      );
       const messageId = `<${Date.now()}.${Math.random().toString(36).substring(2)}@${this.options.smtpHost}>`;
 
       // Build email
+      const displayName = this.options.displayName
+        ? sanitizeHeaderValue(this.options.displayName)
+        : "";
+      const fromAddress = sanitizeHeaderValue(this.options.email);
       const headers = [
-        `From: ${this.options.displayName ? `"${this.options.displayName}" ` : ""}<${this.options.email}>`,
+        `From: ${displayName ? `"${displayName}" ` : ""}<${fromAddress}>`,
         `To: ${toAddresses.join(", ")}`,
-        `Subject: ${options.subject}`,
+        `Subject: ${sanitizeHeaderValue(options.subject)}`,
         `Message-ID: ${messageId}`,
         `Date: ${new Date().toUTCString()}`,
         "MIME-Version: 1.0",
@@ -679,11 +1053,13 @@ export class EmailClient extends EventEmitter {
       ];
 
       if (options.inReplyTo) {
-        headers.push(`In-Reply-To: <${options.inReplyTo}>`);
+        headers.push(`In-Reply-To: <${sanitizeHeaderValue(options.inReplyTo)}>`);
       }
 
       if (options.references && options.references.length > 0) {
-        headers.push(`References: ${options.references.map((r) => `<${r}>`).join(" ")}`);
+        headers.push(
+          `References: ${options.references.map((r) => `<${sanitizeHeaderValue(r)}>`).join(" ")}`,
+        );
       }
 
       const body = options.text || "";
@@ -746,9 +1122,7 @@ export class EmailClient extends EventEmitter {
                 if (!this.options.smtpSecure && line.includes("STARTTLS")) {
                   socket.write("STARTTLS\r\n");
                 } else {
-                  socket.write(
-                    `AUTH PLAIN ${Buffer.from(`\0${this.options.email}\0${this.options.password}`).toString("base64")}\r\n`,
-                  );
+                  socket.write(authCommand);
                 }
                 break;
               case 3: // After STARTTLS or AUTH
@@ -767,6 +1141,11 @@ export class EmailClient extends EventEmitter {
                   socket = tlsSocket;
                   socket.write(`EHLO ${this.options.smtpHost}\r\n`);
                   step = 1;
+                } else if (code === 334 && this.options.authMethod === "oauth") {
+                  // Some SMTP servers still send a continuation challenge even when the
+                  // XOAUTH2 initial client response is included on the AUTH line.
+                  socket.write("\r\n");
+                  step = 2;
                 } else {
                   socket.write(`MAIL FROM:<${this.options.email}>\r\n`);
                 }

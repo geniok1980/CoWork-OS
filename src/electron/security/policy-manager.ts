@@ -414,6 +414,14 @@ export class SecurityPolicyManager {
       };
     }
 
+    if (toolName === "acp_remote") {
+      return {
+        layer: "tool_specific",
+        decision: "require_approval",
+        reason: "Remote ACP/A2A agent invocations require approval",
+      };
+    }
+
     return { layer: "tool_specific", decision: "pass" };
   }
 
@@ -434,6 +442,8 @@ export class SecurityPolicyManager {
     for (const tool of Object.keys(TOOL_RISK_LEVELS)) {
       tools.add(tool);
     }
+
+    tools.add("acp_remote");
 
     return Array.from(tools);
   }

@@ -10,7 +10,10 @@ import { IPC_CHANNELS } from "../../shared/types";
 import { EventTriggerService } from "../triggers/EventTriggerService";
 import { EventTrigger } from "../triggers/types";
 
-export function setupTriggerHandlers(triggerService: EventTriggerService): void {
+export function setupTriggerHandlers(
+  triggerService: EventTriggerService,
+  onMutation?: () => Promise<void> | void,
+): void {
   ipcMain.handle(
     IPC_CHANNELS.TRIGGER_LIST,
     async (_, workspaceId: string): Promise<EventTrigger[]> => {
@@ -24,7 +27,9 @@ export function setupTriggerHandlers(triggerService: EventTriggerService): void 
       _,
       trigger: Omit<EventTrigger, "id" | "createdAt" | "updatedAt" | "fireCount" | "lastFiredAt">,
     ): Promise<EventTrigger> => {
-      return triggerService.addTrigger(trigger);
+      const created = triggerService.addTrigger(trigger);
+      await onMutation?.();
+      return created;
     },
   );
 
@@ -32,11 +37,13 @@ export function setupTriggerHandlers(triggerService: EventTriggerService): void 
     IPC_CHANNELS.TRIGGER_UPDATE,
     async (_, data: { id: string; updates: Partial<EventTrigger> }): Promise<void> => {
       triggerService.updateTrigger(data.id, data.updates);
+      await onMutation?.();
     },
   );
 
   ipcMain.handle(IPC_CHANNELS.TRIGGER_REMOVE, async (_, triggerId: string): Promise<void> => {
     triggerService.removeTrigger(triggerId);
+    await onMutation?.();
   });
 
   ipcMain.handle(IPC_CHANNELS.TRIGGER_HISTORY, async (_, triggerId: string): Promise<Any[]> => {

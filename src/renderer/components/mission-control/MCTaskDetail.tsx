@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { ArrowRight, Calendar, Tag, X, Zap } from "lucide-react";
 import { ActivityFeed } from "../ActivityFeed";
 import { MentionInput } from "../MentionInput";
 import { MentionList } from "../MentionList";
-import { BOARD_COLUMNS } from "./useMissionControlData";
+import { BOARD_COLUMNS, TASK_PRIORITY_OPTIONS } from "./useMissionControlData";
 import type { MissionControlData } from "./useMissionControlData";
 import type {
   EvidenceRef,
@@ -25,6 +26,18 @@ const UNIFIED_RECALL_SOURCES: Array<{ value: UnifiedRecallSourceType; label: str
   { value: "knowledge_graph", label: "Knowledge graph" },
 ];
 
+const ESTIMATE_OPTIONS = [
+  { value: "", label: "No estimate" },
+  { value: "15", label: "15 min" },
+  { value: "30", label: "30 min" },
+  { value: "60", label: "1 hour" },
+  { value: "120", label: "2 hours" },
+  { value: "240", label: "4 hours" },
+  { value: "480", label: "1 day" },
+  { value: "960", label: "2 days" },
+  { value: "2400", label: "1 week" },
+];
+
 function statusTone(status: string): string {
   return `status-${status.replace(/[^a-z0-9_-]/gi, "-")}`;
 }
@@ -38,10 +51,26 @@ export function MCTaskDetail({ data, taskId }: MCTaskDetailProps) {
   const {
     tasks,
     agents,
+    taskLabels,
     selectedWorkspaceId,
     handleAssignTask,
     handleMoveTask,
+    handleSetTaskPriority,
+    handleSetTaskDueDate,
+    handleSetTaskEstimate,
+    handleAddTaskLabel,
+    handleRemoveTaskLabel,
+    handleTriggerHeartbeat,
     getMissionColumnForTask,
+    getTaskLabels,
+    getTaskAttentionReason,
+    getTaskNextMissionColumn,
+    getTaskDueInfo,
+    getTaskPriorityMeta,
+    getAgentStatus,
+    formatTaskEstimate,
+    isTaskStale,
+    isTaskTerminal,
     commentText,
     setCommentText,
     postingComment,
@@ -61,6 +90,7 @@ export function MCTaskDetail({ data, taskId }: MCTaskDetailProps) {
   const [recallResults, setRecallResults] = useState<UnifiedRecallResult[]>([]);
   const [recallLoading, setRecallLoading] = useState(false);
   const [recallError, setRecallError] = useState<string | null>(null);
+  const [labelToAdd, setLabelToAdd] = useState("");
 
   const taskWorkspaceId = task?.workspaceId || selectedWorkspaceId || undefined;
 
@@ -111,6 +141,10 @@ export function MCTaskDetail({ data, taskId }: MCTaskDetailProps) {
   }, [loadLearningProgress]);
 
   useEffect(() => {
+    setLabelToAdd("");
+  }, [taskId]);
+
+  useEffect(() => {
     if (!window.electronAPI?.onTaskLearningEvent || !task?.id) return;
 
     const unsubscribe = window.electronAPI.onTaskLearningEvent((event) => {
@@ -127,10 +161,21 @@ export function MCTaskDetail({ data, taskId }: MCTaskDetailProps) {
 
   if (!task) return <div className="mc-v2-empty">{agentContext.getUiCopy("mcTaskEmpty")}</div>;
 
-  const visibleLearningProgress = useMemo(
-    () => [...learningProgress].sort((a, b) => b.completedAt - a.completedAt),
-    [learningProgress],
-  );
+  const visibleLearningProgress = [...learningProgress].sort((a, b) => b.completedAt - a.completedAt);
+  const assignedAgent = task.assignedAgentRoleId
+    ? agents.find((agent) => agent.id === task.assignedAgentRoleId) || null
+    : null;
+  const currentLabels = getTaskLabels(task);
+  const availableLabels = taskLabels.filter((label) => !task.labels?.includes(label.id));
+  const attentionReason = getTaskAttentionReason(task);
+  const dueInfo = getTaskDueInfo(task.dueDate);
+  const priority = getTaskPriorityMeta(task.priority);
+  const estimate = formatTaskEstimate(task.estimatedMinutes);
+  const stale = isTaskStale(task);
+  const terminal = isTaskTerminal(task);
+  const nextMissionColumn = getTaskNextMissionColumn(task);
+  const nextMissionLabel = BOARD_COLUMNS.find((column) => column.id === nextMissionColumn)?.label || "DONE";
+  const ownerStatus = assignedAgent ? getAgentStatus(assignedAgent.id) : "offline";
 
   return (
     <>
@@ -145,9 +190,66 @@ export function MCTaskDetail({ data, taskId }: MCTaskDetailProps) {
         <div className="mc-v2-detail-updated">
           {agentContext.getUiCopy("mcTaskUpdatedAt", { time: formatRelativeTime(task.updatedAt) })}
         </div>
+        {attentionReason && <div className="mc-v2-task-reason">{attentionReason}</div>}
       </div>
 
-      <div className="mc-v2-detail-meta">
+      <div className="mc-v2-task-action-row">
+        {assignedAgent && !terminal && (
+          <button className="mc-v2-task-primary-action" onClick={() => handleTriggerHeartbeat(assignedAgent.id)}>
+            <Zap size={14} />
+            Wake owner
+          </button>
+        )}
+        {!terminal && getMissionColumnForTask(task) !== "done" && (
+          <button className="mc-v2-task-primary-action" onClick={() => handleMoveTask(task.id, nextMissionColumn)}>
+            <ArrowRight size={14} />
+            Move to {nextMissionLabel}
+          </button>
+        )}
+        {!terminal && (
+          <button
+            className="mc-v2-task-primary-action"
+            onClick={() => {
+              const dueDate = new Date();
+              dueDate.setHours(23, 59, 59, 999);
+              handleSetTaskDueDate(task.id, dueDate.getTime());
+            }}
+          >
+            <Calendar size={14} />
+            Due today
+          </button>
+        )}
+      </div>
+
+      <div className="mc-v2-task-summary-grid">
+        <div className="mc-v2-task-summary-item">
+          <span>Owner</span>
+          <strong>{assignedAgent ? assignedAgent.displayName : "Unassigned"}</strong>
+          {assignedAgent && <small className={`mc-v2-summary-status ${ownerStatus}`}>{ownerStatus}</small>}
+        </div>
+        <div className="mc-v2-task-summary-item">
+          <span>Priority</span>
+          <strong>{priority.label}</strong>
+        </div>
+        <div className="mc-v2-task-summary-item">
+          <span>Due</span>
+          <strong>{dueInfo?.label || "Not set"}</strong>
+        </div>
+        <div className="mc-v2-task-summary-item">
+          <span>Estimate</span>
+          <strong>{estimate || "Not set"}</strong>
+        </div>
+        <div className="mc-v2-task-summary-item">
+          <span>Health</span>
+          <strong>{stale ? "Stale" : terminal ? "Closed" : "Active"}</strong>
+        </div>
+        <div className="mc-v2-task-summary-item">
+          <span>Labels</span>
+          <strong>{currentLabels.length > 0 ? currentLabels.length : "None"}</strong>
+        </div>
+      </div>
+
+      <div className="mc-v2-detail-meta mc-v2-detail-meta-wide">
         <label>
           {agentContext.getUiCopy("mcTaskAssigneeLabel")}
           <select
@@ -155,7 +257,7 @@ export function MCTaskDetail({ data, taskId }: MCTaskDetailProps) {
             onChange={(e) => handleAssignTask(task.id, e.target.value || null)}
           >
             <option value="">{agentContext.getUiCopy("mcTaskUnassigned")}</option>
-            {agents.filter((a) => a.isActive).map((agent) => (
+            {agents.filter((agent) => agent.isActive).map((agent) => (
               <option key={agent.id} value={agent.id}>
                 {agent.displayName}
               </option>
@@ -165,13 +267,111 @@ export function MCTaskDetail({ data, taskId }: MCTaskDetailProps) {
         <label>
           {agentContext.getUiCopy("mcTaskStageLabel")}
           <select value={getMissionColumnForTask(task)} onChange={(e) => handleMoveTask(task.id, e.target.value)}>
-            {BOARD_COLUMNS.map((col) => (
-              <option key={col.id} value={col.id}>
-                {col.label}
+            {BOARD_COLUMNS.map((column) => (
+              <option key={column.id} value={column.id}>
+                {column.label}
               </option>
             ))}
           </select>
         </label>
+        <label>
+          Priority
+          <select
+            value={String(task.priority ?? 0)}
+            onChange={(e) => handleSetTaskPriority(task.id, Number(e.target.value))}
+          >
+            {TASK_PRIORITY_OPTIONS.map((option) => (
+              <option key={option.value} value={String(option.value)}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Estimate
+          <select
+            value={task.estimatedMinutes ? String(task.estimatedMinutes) : ""}
+            onChange={(e) => handleSetTaskEstimate(task.id, e.target.value ? Number(e.target.value) : null)}
+          >
+            {ESTIMATE_OPTIONS.map((option) => (
+              <option key={option.label} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Due date
+          <input
+            type="date"
+            value={task.dueDate ? new Date(task.dueDate).toISOString().slice(0, 10) : ""}
+            onChange={(e) => {
+              if (!e.target.value) {
+                handleSetTaskDueDate(task.id, null);
+                return;
+              }
+              const dueDate = new Date(e.target.value);
+              dueDate.setHours(23, 59, 59, 999);
+              handleSetTaskDueDate(task.id, dueDate.getTime());
+            }}
+          />
+        </label>
+        <label className="mc-v2-detail-label-manager">
+          <span>
+            <Tag size={12} />
+            Labels
+          </span>
+          <div className="mc-v2-detail-label-controls">
+            <select value={labelToAdd} onChange={(e) => setLabelToAdd(e.target.value)}>
+              <option value="">Add label</option>
+              {availableLabels.map((label) => (
+                <option key={label.id} value={label.id}>
+                  {label.name}
+                </option>
+              ))}
+            </select>
+            <button
+              className="mc-v2-task-secondary-btn"
+              onClick={() => {
+                if (!labelToAdd) return;
+                handleAddTaskLabel(task.id, labelToAdd);
+                setLabelToAdd("");
+              }}
+              disabled={!labelToAdd}
+            >
+              Add
+            </button>
+          </div>
+        </label>
+      </div>
+
+      <div className="mc-v2-detail-section">
+        <div className="mc-v2-section-header">
+          <h4>Task controls</h4>
+          <span className="mc-v2-section-hint">Move it forward without leaving the detail panel.</span>
+        </div>
+        <div className="mc-v2-label-list">
+          {currentLabels.length === 0 ? (
+            <span className="mc-v2-empty-inline">No labels yet.</span>
+          ) : (
+            currentLabels.map((label) => (
+              <span
+                key={label.id}
+                className="mc-v2-label-pill"
+                style={{ backgroundColor: `${label.color}22`, borderColor: `${label.color}44`, color: label.color }}
+              >
+                {label.name}
+                <button
+                  className="mc-v2-label-remove"
+                  onClick={() => handleRemoveTaskLabel(task.id, label.id)}
+                  title={`Remove ${label.name}`}
+                >
+                  <X size={10} />
+                </button>
+              </span>
+            ))
+          )}
+        </div>
       </div>
 
       <div className="mc-v2-detail-section">

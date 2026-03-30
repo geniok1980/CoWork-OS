@@ -52,6 +52,7 @@ import {
   isSecureOrLocalLoomUrl,
   normalizeEmailProtocol,
 } from "../utils/loom";
+import { getUnsupportedManualEmailSetupMessage } from "../../shared/email-provider-support";
 
 /**
  * Channel metadata for registration
@@ -1054,6 +1055,46 @@ export class ChannelRegistry extends EventEmitter {
               description: 'Transport protocol: "imap-smtp" (default) or "loom"',
               default: "imap-smtp",
             },
+            authMethod: {
+              type: "string",
+              description: 'IMAP/SMTP auth method: "password" (default) or "oauth"',
+              default: "password",
+            },
+            oauthProvider: {
+              type: "string",
+              description: 'OAuth provider for IMAP/SMTP mode (currently "microsoft")',
+            },
+            oauthClientId: {
+              type: "string",
+              description: "OAuth client ID for IMAP/SMTP OAuth mode",
+            },
+            oauthClientSecret: {
+              type: "string",
+              description: "OAuth client secret for IMAP/SMTP OAuth mode",
+              secret: true,
+            },
+            oauthTenant: {
+              type: "string",
+              description: "OAuth tenant/authority for IMAP/SMTP OAuth mode",
+            },
+            accessToken: {
+              type: "string",
+              description: "OAuth access token for IMAP/SMTP OAuth mode",
+              secret: true,
+            },
+            refreshToken: {
+              type: "string",
+              description: "OAuth refresh token for IMAP/SMTP OAuth mode",
+              secret: true,
+            },
+            tokenExpiresAt: {
+              type: "number",
+              description: "OAuth access token expiration timestamp in ms",
+            },
+            scopes: {
+              type: "array",
+              description: "OAuth scopes granted for IMAP/SMTP OAuth mode",
+            },
             imapHost: {
               type: "string",
               description: "IMAP server host (required for IMAP/SMTP mode)",
@@ -1377,10 +1418,24 @@ export class ChannelRegistry extends EventEmitter {
           }
         }
       } else {
+        const authMethod =
+          typeof config.authMethod === "string" && config.authMethod.trim()
+            ? config.authMethod.trim().toLowerCase()
+            : "password";
         if (!config.email) {
           errors.push("Missing required field: email");
         }
-        if (!config.password) {
+        if (authMethod === "oauth") {
+          if (!config.oauthProvider) {
+            errors.push("Missing required field: oauthProvider");
+          }
+          if (!config.oauthClientId) {
+            errors.push("Missing required field: oauthClientId");
+          }
+          if (!config.accessToken && !config.refreshToken) {
+            errors.push("Missing required field: accessToken");
+          }
+        } else if (!config.password) {
           errors.push("Missing required field: password");
         }
         if (!config.imapHost) {
@@ -1388,6 +1443,16 @@ export class ChannelRegistry extends EventEmitter {
         }
         if (!config.smtpHost) {
           errors.push("Missing required field: smtpHost");
+        }
+        if (authMethod !== "oauth") {
+          const unsupportedSetupMessage = getUnsupportedManualEmailSetupMessage({
+            email: typeof config.email === "string" ? config.email : undefined,
+            imapHost: typeof config.imapHost === "string" ? config.imapHost : undefined,
+            smtpHost: typeof config.smtpHost === "string" ? config.smtpHost : undefined,
+          });
+          if (unsupportedSetupMessage) {
+            errors.push(unsupportedSetupMessage);
+          }
         }
       }
     }

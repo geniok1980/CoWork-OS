@@ -1,9 +1,10 @@
 /**
- * NotificationOverlayWindow - Dynamic Island-style notification banner
+ * NotificationOverlayWindow — macOS-style top-right notification banner
  *
  * Creates frameless, transparent, always-on-top BrowserWindows that display
- * pill-shaped notification banners just below the CoWork OS tray icon.
- * Follows the same pattern as QuickInputWindow (data URL, console-message IPC).
+ * pill-shaped banners aligned to the top-right of the display work area (same
+ * region as system notifications). Follows the same pattern as QuickInputWindow
+ * (data URL, console-message IPC).
  */
 
 import { BrowserWindow, Rectangle, screen } from "electron";
@@ -27,6 +28,8 @@ const NOTIFICATION_WIDTH = 340;
 const NOTIFICATION_HEIGHT = 82;
 const GAP = 10;
 const MENU_BAR_GAP = 8;
+/** Inset from the work-area edge — matches typical macOS banner padding */
+const HORIZONTAL_MARGIN = 16;
 const DISMISS_TIMEOUT = 5000;
 const FADE_DURATION = 300;
 const MAX_VISIBLE = 5;
@@ -182,26 +185,22 @@ export class NotificationOverlayManager {
   }
 
   private getPosition(stackIndex: number): { x: number; y: number } {
-    const primaryDisplay = screen.getPrimaryDisplay();
-    const { bounds, workArea } = primaryDisplay;
-
-    // workArea.y is the menu bar height on macOS
-    const topY = workArea.y + MENU_BAR_GAP;
-
-    // Get fresh tray bounds via provider callback
     const trayBounds = this.anchorBoundsProvider
       ? this.anchorBoundsProvider()
       : null;
 
-    let centerX: number;
-    if (trayBounds) {
-      centerX = Math.round(trayBounds.x + trayBounds.width / 2);
-    } else {
-      // Fallback: right side of screen (typical tray icon area)
-      centerX = Math.round(bounds.x + bounds.width * 0.75);
-    }
+    // Use the display that contains the tray so multi-monitor setups get correct edges.
+    const display = trayBounds
+      ? screen.getDisplayMatching(trayBounds)
+      : screen.getPrimaryDisplay();
+    const { workArea } = display;
 
-    const x = Math.round(centerX - NOTIFICATION_WIDTH / 2);
+    // Top-right of the work area (standard macOS notification placement). Do not center on the
+    // tray icon — that clips the banner when the icon sits flush with the screen edge.
+    const maxLeft = workArea.x + workArea.width - NOTIFICATION_WIDTH - HORIZONTAL_MARGIN;
+    const x = Math.round(Math.max(workArea.x + HORIZONTAL_MARGIN, maxLeft));
+
+    const topY = workArea.y + MENU_BAR_GAP;
     const y = topY + stackIndex * (NOTIFICATION_HEIGHT + GAP);
 
     return { x, y };

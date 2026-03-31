@@ -6,7 +6,7 @@
  */
 
 export interface ModeSuggestion {
-  mode: "plan" | "analyze" | "verified" | "execute" | "collaborative";
+  mode: "plan" | "analyze" | "verified" | "execute" | "debug" | "collaborative";
   label: string;
   description: string;
   confidence: number;
@@ -93,6 +93,24 @@ const MODE_CONFIGS: ModeConfig[] = [
       /\bmigrat/i,
       /\bset up\b/i,
       /\binstall\b/i,
+    ],
+  },
+  {
+    mode: "debug",
+    label: "Debug Mode",
+    description: "Hypotheses, runtime evidence, targeted fix",
+    patterns: [
+      /\bbug\b/i,
+      /\bbugs\b/i,
+      /\bstack trace\b/i,
+      /\breproduc/i,
+      /\brac(e|ing) condition\b/i,
+      /\bintermittent\b/i,
+      /\broot cause\b/i,
+      /\bregression\b/i,
+      /\bflaky\b/i,
+      /\bthrows?\b/i,
+      /\bcrash(es|ed|ing)?\b/i,
     ],
   },
 ];

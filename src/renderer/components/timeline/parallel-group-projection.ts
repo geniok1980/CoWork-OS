@@ -246,7 +246,14 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
         typeof payload.message === "string" && payload.message.trim().length > 0
           ? payload.message.trim()
           : "";
-      if (message) lane.title = lane.title || message;
+      if (message) {
+        lane.title = message;
+      } else {
+        const finalName = lane.toolName || "";
+        if (finalName) {
+          lane.title = `${finalName} ${lane.status === "failed" ? "failed" : "done"}`;
+        }
+      }
       return;
     }
 
@@ -267,12 +274,20 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
       const toolName = typeof payload.tool === "string" ? payload.tool.trim() : "";
       if (toolName) {
         lane.toolName = toolName;
-        lane.title = lane.title || laneTitleForToolName(toolName);
+        if (!lane.title) lane.title = laneTitleForToolName(toolName);
       }
       const callIndex = getToolCallIndex(payload);
       if (callIndex) lane.toolCallIndex = callIndex;
       lane.finishedAt = event.timestamp;
       lane.status = "failed";
+      const finalName = toolName || lane.toolName || "";
+      if (finalName) {
+        // Only overwrite with the "failed" suffix if the lane has no descriptive
+        // title yet (or still holds the generic tool-name placeholder). A title
+        // set by a progress/step event is more informative and should be kept.
+        const isGenericOrEmpty = !lane.title || lane.title === laneTitleForToolName(finalName);
+        if (isGenericOrEmpty) lane.title = `${finalName} failed`;
+      }
       return;
     }
 
@@ -280,7 +295,7 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
       const toolName = typeof payload.tool === "string" ? payload.tool.trim() : "";
       if (toolName) {
         lane.toolName = toolName;
-        lane.title = lane.title || laneTitleForToolName(toolName);
+        if (!lane.title) lane.title = laneTitleForToolName(toolName);
       }
       const callIndex = getToolCallIndex(payload);
       if (callIndex) lane.toolCallIndex = callIndex;
@@ -288,8 +303,70 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
       if (lane.status !== "failed") {
         lane.status = "completed";
       }
+      const finalName = toolName || lane.toolName || "";
+      if (finalName) {
+        // Only overwrite with "done/failed" if the lane has no descriptive title
+        // yet. A title set by a progress/step event is more informative.
+        const suffix = lane.status === "failed" ? "failed" : "done";
+        const isGenericOrEmpty = !lane.title || lane.title === laneTitleForToolName(finalName);
+        if (isGenericOrEmpty) lane.title = `${finalName} ${suffix}`;
+      }
     }
   });
+
+  // Second pass: collect all lane toolUseIds so we can suppress orphaned
+  // tool_result / tool_error events that were emitted without a "tools:" groupId
+  // but whose callId matches a lane already captured inside a group.
+  const allLaneToolUseIds = new Set<string>();
+  for (const group of groupsById.values()) {
+    for (const lane of group.lanesByKey.values()) {
+      if (lane.toolUseId) allLaneToolUseIds.add(lane.toolUseId);
+    }
+  }
+
+  const orphanSuppressedIds = new Set<string>();
+  if (allLaneToolUseIds.size > 0) {
+    events.forEach((event) => {
+      const groupId = getEventGroupId(event);
+      if (isToolsParallelGroupId(groupId)) return; // already handled in first pass
+
+      const effectiveType = getEffectiveTaskEventType(event);
+      if (effectiveType !== "tool_result" && effectiveType !== "tool_error") return;
+
+      const payload = asObject(event.payload);
+      const callId = typeof payload.callId === "string" ? payload.callId.trim() : "";
+      if (!callId || !allLaneToolUseIds.has(callId)) return;
+
+      orphanSuppressedIds.add(event.id);
+
+      // Also update the matching lane with completion info
+      for (const group of groupsById.values()) {
+        for (const lane of group.lanesByKey.values()) {
+          if (lane.toolUseId !== callId) continue;
+          const toolName = typeof payload.tool === "string" ? payload.tool.trim() : "";
+          const finalName = toolName || lane.toolName || "";
+          if (effectiveType === "tool_result") {
+            lane.finishedAt = event.timestamp;
+            if (lane.status !== "failed") {
+              lane.status = "completed";
+              if (finalName) {
+                const isGenericOrEmpty = !lane.title || lane.title === laneTitleForToolName(finalName);
+                if (isGenericOrEmpty) lane.title = `${finalName} done`;
+              }
+            }
+          } else {
+            lane.finishedAt = event.timestamp;
+            lane.status = "failed";
+            if (finalName) {
+              const isGenericOrEmpty = !lane.title || lane.title === laneTitleForToolName(finalName);
+              if (isGenericOrEmpty) lane.title = `${finalName} failed`;
+            }
+          }
+          break;
+        }
+      }
+    });
+  }
 
   const groupsByAnchorEventId = new Map<string, ParallelGroupProjection>();
   const suppressedEventIds = new Set<string>();
@@ -334,6 +411,10 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
       ...(typeof finishedAt === "number" ? { finishedAt } : {}),
       lanes,
     });
+  }
+
+  for (const id of orphanSuppressedIds) {
+    suppressedEventIds.add(id);
   }
 
   return {

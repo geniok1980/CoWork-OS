@@ -101,6 +101,10 @@ export class TaskStrategyService {
       return "strong";
     }
 
+    if (strategy.executionMode === "debug") {
+      return "strong";
+    }
+
     if (strategy.executionMode !== "execute") {
       return "strong";
     }
@@ -393,7 +397,9 @@ export class TaskStrategyService {
     }
     if (!next.turnBudgetPolicy) {
       next.turnBudgetPolicy =
-        strategy.executionMode === "execute" || strategy.executionMode === "verified"
+        strategy.executionMode === "execute" ||
+        strategy.executionMode === "verified" ||
+        strategy.executionMode === "debug"
           ? "adaptive_unbounded"
           : "hard_window";
     }
@@ -438,7 +444,41 @@ export class TaskStrategyService {
     } else {
       delete next.llmProfileHint;
     }
+    TaskStrategyService.applyResearchWorkflowDefaults(next);
     return next;
+  }
+
+  /**
+   * When `researchWorkflow.enabled` is set, merge MVP defaults: critique loop, deep work,
+   * auto-report, journaling, and optional verification.
+   */
+  static applyResearchWorkflowDefaults(config: AgentConfig): void {
+    if (!config.researchWorkflow?.enabled) return;
+    const rw = config.researchWorkflow;
+    config.researchWorkflow = {
+      ...rw,
+      emitSemanticProgress: rw.emitSemanticProgress !== false,
+    };
+    if (!config.qualityPasses || config.qualityPasses < 3) {
+      config.qualityPasses = 3;
+    }
+    config.deepWorkMode = true;
+    config.autoReportEnabled = true;
+    config.progressJournalEnabled = true;
+    if (config.verificationAgent === undefined) {
+      config.verificationAgent = true;
+    }
+    config.taskDomain = "research";
+    if (!config.capabilityHint) {
+      config.capabilityHint = "research";
+    }
+    const researcher = rw.researcher;
+    if (researcher && !config.modelKey && researcher.modelKey) {
+      config.modelKey = researcher.modelKey;
+    }
+    if (researcher && !config.providerType && researcher.providerType) {
+      config.providerType = researcher.providerType;
+    }
   }
 
   static decoratePrompt(
@@ -508,14 +548,25 @@ export class TaskStrategyService {
       );
     }
 
-    if (strategy.executionMode !== "execute") {
+    if (
+      strategy.executionMode === "chat" ||
+      strategy.executionMode === "plan" ||
+      strategy.executionMode === "analyze"
+    ) {
       lines.push(
         "mode_contract:",
         strategy.executionMode === "chat"
           ? "- You are in chat mode: answer directly and do not use tools."
           : strategy.executionMode === "plan"
-          ? "- You are in plan mode: provide plans/options and avoid mutating tool calls."
-          : "- You are in analyze mode: stay read-only and provide analysis from available evidence.",
+            ? "- You are in plan mode: provide plans/options and avoid mutating tool calls."
+            : "- You are in analyze mode: stay read-only and provide analysis from available evidence.",
+      );
+    } else if (strategy.executionMode === "debug") {
+      lines.push(
+        "debug_contract:",
+        "- You are in debug mode: form hypotheses, add minimal instrumentation, collect runtime evidence before large speculative fixes.",
+        "- Prefer targeted edits; use request_user_input for structured reproduce/confirm checkpoints when needed.",
+        "- Remove temporary debug instrumentation (markers containing cowork-debug) before finishing.",
       );
     }
 

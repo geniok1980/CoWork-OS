@@ -564,11 +564,53 @@ export interface MailboxDigestSnapshot extends MailboxDigest {
   generatedAt: number;
 }
 
+export interface MailboxSnippetRecord {
+  id: string;
+  workspaceId: string;
+  shortcut: string;
+  body: string;
+  subjectHint?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MailboxSnippetInput {
+  shortcut: string;
+  body: string;
+  subjectHint?: string;
+}
+
+export interface MailboxSavedViewRecord {
+  id: string;
+  workspaceId: string;
+  name: string;
+  instructions: string;
+  seedThreadId?: string;
+  showInInbox: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MailboxSavedViewPreviewResult {
+  threadIds: string[];
+  rationale?: string;
+  /** Present when no model is configured or the preview call failed. */
+  error?: string;
+}
+
+export interface MailboxQuickReplySuggestionsResult {
+  suggestions: string[];
+  /** Present when no model is configured or generation failed. */
+  error?: string;
+}
+
 export interface MailboxListThreadsInput {
   accountId?: string;
   query?: string;
   category?: MailboxThreadCategory | "all";
   mailboxView?: MailboxThreadMailboxView;
+  /** When set, only threads linked to this saved view are returned. */
+  savedViewId?: string;
   unreadOnly?: boolean;
   needsReply?: boolean;
   hasSuggestedProposal?: boolean;

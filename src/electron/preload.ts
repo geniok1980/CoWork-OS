@@ -97,6 +97,10 @@ import type {
   MailboxMissionControlHandoffPreview,
   MailboxMissionControlHandoffRecord,
   MailboxMissionControlHandoffRequest,
+  MailboxQuickReplySuggestionsResult,
+  MailboxSavedViewPreviewResult,
+  MailboxSavedViewRecord,
+  MailboxSnippetRecord,
   MailboxReclassifyInput,
   MailboxReclassifyResult,
   MailboxResearchResult,
@@ -108,6 +112,7 @@ import type {
   RelationshipTimelineEvent,
   RelationshipTimelineQuery,
 } from "../shared/mailbox";
+import type { UiTimelineEvent } from "../shared/timeline-events";
 
 const ALLOWED_MESSAGE_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
 const ALLOWED_IMAGE_FILE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
@@ -304,6 +309,9 @@ function validateSendMessageAttachments(images?: ImageAttachment[]): ImageAttach
   }
 }
 
+// IMPORTANT: These string values must stay in sync with IPC_CHANNELS in src/shared/types.ts.
+// The preload cannot import from the main process, so this is a manual mirror.
+// When adding a new channel, update BOTH files.
 // IPC Channel names - inlined to avoid require() issues in sandboxed preload
 const IPC_CHANNELS = {
   TASK_CREATE: "task:create",
@@ -362,6 +370,15 @@ const IPC_CHANNELS = {
   MAILBOX_MC_HANDOFF_PREVIEW: "mailbox:missionControlHandoffPreview",
   MAILBOX_MC_HANDOFF_CREATE: "mailbox:missionControlHandoffCreate",
   MAILBOX_MC_HANDOFF_LIST: "mailbox:missionControlHandoffList",
+  MAILBOX_SNIPPETS_LIST: "mailbox:snippetsList",
+  MAILBOX_SNIPPET_UPSERT: "mailbox:snippetUpsert",
+  MAILBOX_SNIPPET_DELETE: "mailbox:snippetDelete",
+  MAILBOX_SAVED_VIEWS_LIST: "mailbox:savedViewsList",
+  MAILBOX_SAVED_VIEW_CREATE: "mailbox:savedViewCreate",
+  MAILBOX_SAVED_VIEW_DELETE: "mailbox:savedViewDelete",
+  MAILBOX_SAVED_VIEW_PREVIEW_SIMILAR: "mailbox:savedViewPreviewSimilar",
+  MAILBOX_QUICK_REPLY_SUGGESTIONS: "mailbox:quickReplySuggestions",
+  MAILBOX_SAVED_VIEW_REVIEW_SCHEDULE: "mailbox:savedViewReviewSchedule",
   MAILBOX_EVENT: "mailbox:event",
   TASK_EVENT: "task:event",
   TASK_EVENTS: "task:events",
@@ -2657,6 +2674,29 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_MC_HANDOFF_CREATE, request) as Promise<MailboxMissionControlHandoffRecord>,
   listMailboxMissionControlHandoffs: (threadId: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_MC_HANDOFF_LIST, { threadId }) as Promise<MailboxMissionControlHandoffRecord[]>,
+  listMailboxSnippets: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SNIPPETS_LIST) as Promise<MailboxSnippetRecord[]>,
+  upsertMailboxSnippet: (input: { id?: string; shortcut: string; body: string; subjectHint?: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SNIPPET_UPSERT, input) as Promise<MailboxSnippetRecord>,
+  deleteMailboxSnippet: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SNIPPET_DELETE, { id }) as Promise<boolean>,
+  listMailboxSavedViews: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SAVED_VIEWS_LIST) as Promise<MailboxSavedViewRecord[]>,
+  createMailboxSavedView: (input: {
+    name: string;
+    instructions: string;
+    seedThreadId?: string;
+    threadIds: string[];
+    showInInbox?: boolean;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SAVED_VIEW_CREATE, input) as Promise<MailboxSavedViewRecord>,
+  deleteMailboxSavedView: (id: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SAVED_VIEW_DELETE, { id }) as Promise<boolean>,
+  previewMailboxSavedViewSimilar: (input: { seedThreadId: string; name: string; instructions: string }) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SAVED_VIEW_PREVIEW_SIMILAR, input) as Promise<MailboxSavedViewPreviewResult>,
+  getMailboxQuickReplySuggestions: (threadId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_QUICK_REPLY_SUGGESTIONS, { threadId }) as Promise<MailboxQuickReplySuggestionsResult>,
+  createMailboxSavedViewReviewSchedule: (viewId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_SAVED_VIEW_REVIEW_SCHEDULE, { viewId }) as Promise<MailboxAutomationRecord>,
   applyMailboxAction: (input: MailboxApplyActionInput) =>
     ipcRenderer.invoke(IPC_CHANNELS.MAILBOX_APPLY_ACTION, input),
   updateMailboxCommitmentState: (
@@ -4494,6 +4534,30 @@ export interface ElectronAPI {
     request: MailboxMissionControlHandoffRequest,
   ) => Promise<MailboxMissionControlHandoffRecord>;
   listMailboxMissionControlHandoffs: (threadId: string) => Promise<MailboxMissionControlHandoffRecord[]>;
+  listMailboxSnippets: () => Promise<MailboxSnippetRecord[]>;
+  upsertMailboxSnippet: (input: {
+    id?: string;
+    shortcut: string;
+    body: string;
+    subjectHint?: string;
+  }) => Promise<MailboxSnippetRecord>;
+  deleteMailboxSnippet: (id: string) => Promise<boolean>;
+  listMailboxSavedViews: () => Promise<MailboxSavedViewRecord[]>;
+  createMailboxSavedView: (input: {
+    name: string;
+    instructions: string;
+    seedThreadId?: string;
+    threadIds: string[];
+    showInInbox?: boolean;
+  }) => Promise<MailboxSavedViewRecord>;
+  deleteMailboxSavedView: (id: string) => Promise<boolean>;
+  previewMailboxSavedViewSimilar: (input: {
+    seedThreadId: string;
+    name: string;
+    instructions: string;
+  }) => Promise<MailboxSavedViewPreviewResult>;
+  getMailboxQuickReplySuggestions: (threadId: string) => Promise<MailboxQuickReplySuggestionsResult>;
+  createMailboxSavedViewReviewSchedule: (viewId: string) => Promise<MailboxAutomationRecord>;
   applyMailboxAction: (input: MailboxApplyActionInput) => Promise<{
     success: boolean;
     action: string;
@@ -4537,6 +4601,8 @@ export interface ElectronAPI {
   onTaskEvent: (callback: (event: Any) => void) => () => void;
   onTaskLearningEvent: (callback: (event: TaskLearningProgress) => void) => () => void;
   getTaskEvents: (taskId: string) => Promise<Any[]>;
+  /** Normalized semantic timeline projection for a task */
+  getSemanticTimeline: (taskId: string) => Promise<UiTimelineEvent[]>;
   getTaskLearningProgress: (taskId: string) => Promise<TaskLearningProgress[]>;
   sendMessage: (taskId: string, message: string, images?: ImageAttachment[]) => Promise<void>;
   sendStepFeedback: (

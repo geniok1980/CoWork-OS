@@ -98,10 +98,71 @@ describe("parallel-group-projection", () => {
     expect(group?.status).toBe("completed");
     expect(group?.lanes.map((lane) => lane.toolUseId)).toEqual(["use-1", "use-2"]);
     expect(group?.lanes.map((lane) => lane.toolCallIndex)).toEqual([1, 2]);
+    expect(group?.lanes.map((lane) => lane.title)).toEqual(["Fetched page", "Search complete"]);
 
     expect(projection.suppressedEventIds.has("evt-1")).toBe(false);
     expect(projection.suppressedEventIds.has("evt-2")).toBe(true);
     expect(projection.suppressedEventIds.has("evt-5")).toBe(true);
     expect(projection.suppressedEventIds.has("evt-8")).toBe(true);
+  });
+
+  it("suppresses orphaned tool results that match a lane by toolUseId", () => {
+    const groupId = "tools:step:build:1";
+    const events: TaskEvent[] = [
+      makeEvent("timeline_group_started", "evt-1", {
+        groupId,
+        groupLabel: "Tool batch (1)",
+      }),
+      makeEvent("tool_call", "evt-2", {
+        groupId,
+        tool: "http_request",
+        toolUseId: "use-1",
+        toolCallIndex: 1,
+        input: { url: "https://api.github.com/repos/org/repo/releases" },
+      }),
+      makeEvent("timeline_group_finished", "evt-3", {
+        groupId,
+        groupLabel: "Tool batch (1)",
+        status: "completed",
+      }),
+      makeEvent("tool_result", "evt-4", {
+        tool: "http_request",
+        toolUseId: "use-1",
+        result: {
+          success: true,
+          url: "https://api.github.com/repos/org/repo/releases",
+        },
+      }),
+    ];
+
+    const projection = buildParallelGroupProjection(events);
+    const group = projection.groupsByAnchorEventId.get("evt-1");
+    expect(group?.lanes[0]?.title).toContain("api.github.com/repos/org/repo/releases");
+    expect(projection.suppressedEventIds.has("evt-4")).toBe(true);
+  });
+
+  it("suppresses orphaned tool calls that match a lane by toolUseId", () => {
+    const groupId = "tools:step:build:1";
+    const events: TaskEvent[] = [
+      makeEvent("timeline_group_started", "evt-1", {
+        groupId,
+        groupLabel: "Tool batch (1)",
+      }),
+      makeEvent("timeline_step_started", "evt-2", {
+        groupId,
+        step: { id: "tool_lane:step:use-1", description: "Running http_request" },
+        status: "in_progress",
+      }),
+      makeEvent("tool_call", "evt-3", {
+        tool: "http_request",
+        toolUseId: "use-1",
+        input: { url: "https://api.github.com/repos/foo/bar/contents/src/electron" },
+      }),
+    ];
+
+    const projection = buildParallelGroupProjection(events);
+    const group = projection.groupsByAnchorEventId.get("evt-1");
+    expect(group?.lanes[0]?.title).toContain("api.github.com/repos/foo/bar/contents/src/electron");
+    expect(projection.suppressedEventIds.has("evt-3")).toBe(true);
   });
 });

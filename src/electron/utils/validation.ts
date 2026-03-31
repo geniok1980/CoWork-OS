@@ -100,7 +100,7 @@ export const AgentConfigSchema = z
     autoApproveTypes: z.array(z.string().min(1).max(200)).max(50).optional(),
     allowSharedContextMemory: z.boolean().optional(),
     conversationMode: z.enum(["task", "chat", "hybrid"]).optional(),
-    executionMode: z.enum(["execute", "chat", "plan", "analyze", "verified"]).optional(),
+    executionMode: z.enum(["execute", "chat", "plan", "analyze", "verified", "debug"]).optional(),
     taskDomain: z.enum(["auto", "code", "research", "operations", "writing", "general", "media"]).optional(),
     autonomousMode: z.boolean().optional(),
     qualityPasses: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
@@ -126,6 +126,41 @@ export const AgentConfigSchema = z
         judgeModelKey: z.string().max(200),
         maxParallelParticipants: z.number().int().min(1).max(10).optional(),
       })
+      .optional(),
+    researchWorkflow: z
+      .object({
+        enabled: z.boolean(),
+        researcher: z
+          .object({
+            providerType: z.enum(LLM_PROVIDER_TYPES).optional(),
+            modelKey: z.string().max(200).optional(),
+          })
+          .strict()
+          .optional(),
+        critic: z
+          .object({
+            providerType: z.enum(LLM_PROVIDER_TYPES).optional(),
+            modelKey: z.string().max(200).optional(),
+          })
+          .strict()
+          .optional(),
+        refiner: z
+          .object({
+            providerType: z.enum(LLM_PROVIDER_TYPES).optional(),
+            modelKey: z.string().max(200).optional(),
+          })
+          .strict()
+          .optional(),
+        judge: z
+          .object({
+            providerType: z.enum(LLM_PROVIDER_TYPES).optional(),
+            modelKey: z.string().max(200).optional(),
+          })
+          .strict()
+          .optional(),
+        emitSemanticProgress: z.boolean().optional(),
+      })
+      .strict()
       .optional(),
     councilMode: z.boolean().optional(),
     councilRunId: z.string().uuid().optional(),

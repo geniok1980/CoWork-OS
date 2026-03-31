@@ -269,7 +269,10 @@ export function isTaskStaleForUi(
   return now - lastTouchedAt >= STALE_TASK_AGE_MS;
 }
 
-export function useMissionControlData(initialCompanyId: string | null = null) {
+export function useMissionControlData(
+  initialCompanyId: string | null = null,
+  initialIssueId: string | null = null,
+) {
   // ── Core state ──
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(ALL_WORKSPACES_ID);
@@ -1033,10 +1036,28 @@ export function useMissionControlData(initialCompanyId: string | null = null) {
   );
 
   useEffect(() => {
-    setSelectedIssueId((prev) =>
-      prev && filteredIssues.some((i) => i.id === prev) ? prev : filteredIssues[0]?.id || null,
-    );
-  }, [filteredIssues]);
+    setSelectedIssueId((prev) => {
+      if (prev && issues.some((i) => i.id === prev)) return prev;
+      return filteredIssues[0]?.id || null;
+    });
+  }, [filteredIssues, issues]);
+
+  const lastAppliedInitialIssueIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!initialIssueId) {
+      lastAppliedInitialIssueIdRef.current = null;
+      return;
+    }
+    if (lastAppliedInitialIssueIdRef.current === initialIssueId) return;
+    const match = issues.find((i) => i.id === initialIssueId);
+    if (match) {
+      lastAppliedInitialIssueIdRef.current = initialIssueId;
+      setSelectedIssueId(initialIssueId);
+      setDetailPanel({ kind: "issue", issueId: initialIssueId });
+      setActiveTab("ops");
+      setOpsSubTab("overview");
+    }
+  }, [initialIssueId, issues]);
 
   const plannerRunIssueIds = useMemo(() => {
     const metadata = selectedPlannerRun?.metadata as { createdIssueIds?: string[]; updatedIssueIds?: string[] } | undefined;

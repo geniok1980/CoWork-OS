@@ -19,6 +19,8 @@ import {
   ComputerUseApprovalDialog,
   isComputerUseAppGrantApproval,
 } from "./components/ComputerUseApprovalDialog";
+import { GenericApprovalDialog } from "./components/GenericApprovalDialog";
+import { ApproveAllSessionWarningDialog } from "./components/ApproveAllSessionWarningDialog";
 import { QuickTaskFAB } from "./components/QuickTaskFAB";
 import { NotificationPanel } from "./components/NotificationPanel";
 import { WebAccessClient } from "./components/WebAccessClient";
@@ -93,7 +95,6 @@ type RemoteTaskView = {
 };
 const MAX_RENDERER_TASK_EVENTS = 600;
 const APPROVAL_TOAST_PREFIX = "approval-request-";
-const APPROVAL_WARNING_TOAST_ID = "approval-auto-approve-warning";
 const RENDERER_NOISE_EVENT_TYPES = new Set([
   "log",
   "llm_usage",
@@ -171,8 +172,38 @@ function capTaskEvents(events: TaskEvent[]): TaskEvent[] {
   return indexed.filter(({ index }) => keepIndexes.has(index)).map(({ event }) => event);
 }
 
+function mergeUniqueTaskEvents(existing: TaskEvent[], incoming: TaskEvent[]): TaskEvent[] {
+  if (incoming.length === 0) return existing;
+  const merged = [...existing];
+  const seen = new Set(existing.map((event) => event.id));
+  for (const event of incoming) {
+    if (seen.has(event.id)) continue;
+    seen.add(event.id);
+    merged.push(event);
+  }
+  return merged;
+}
+
 function getApprovalToastId(approvalId: string): string {
   return `${APPROVAL_TOAST_PREFIX}${approvalId}`;
+}
+
+function pickFirstPendingGenericApproval(
+  pending: Map<string, ApprovalRequest>,
+): ApprovalRequest | null {
+  for (const [, a] of pending) {
+    if (!isComputerUseAppGrantApproval(a)) return a;
+  }
+  return null;
+}
+
+function pickFirstPendingComputerUseApproval(
+  pending: Map<string, ApprovalRequest>,
+): ApprovalRequest | null {
+  for (const [, a] of pending) {
+    if (isComputerUseAppGrantApproval(a)) return a;
+  }
+  return null;
 }
 
 function extractApprovalId(event: TaskEvent): string | null {
@@ -248,7 +279,7 @@ export function App() {
       const matched = pendingChildEventsRef.current.filter((e) => newIds.has(e.taskId));
       pendingChildEventsRef.current = pendingChildEventsRef.current.filter((e) => !newIds.has(e.taskId));
       if (matched.length > 0) {
-        setChildEvents((prev) => [...prev, ...matched]);
+        setChildEvents((prev) => mergeUniqueTaskEvents(prev, matched));
       }
     }
   }, [childTasks]);
@@ -279,6 +310,8 @@ export function App() {
   const [computerUseAppGrantApproval, setComputerUseAppGrantApproval] = useState<ApprovalRequest | null>(
     null,
   );
+  const [genericApproval, setGenericApproval] = useState<ApprovalRequest | null>(null);
+  const [approveAllSessionWarningOpen, setApproveAllSessionWarningOpen] = useState(false);
   const [unseenOutputTaskIds, setUnseenOutputTaskIds] = useState<string[]>([]);
   const [unseenCompletedTaskIds, setUnseenCompletedTaskIds] = useState<string[]>([]);
   const [rightPanelHighlight, setRightPanelHighlight] = useState<{
@@ -293,6 +326,8 @@ export function App() {
   // Ref to track current tasks for use in event handlers (avoids stale closure)
   const tasksRef = useRef<Task[]>([]);
   const sessionAutoApproveAllRef = useRef(false);
+  /** While true, `handleApprovalResponse` does not advance modal state (bulk auto-approve). */
+  const bulkApproveSilentRef = useRef(false);
   const pendingApprovalsRef = useRef<Map<string, ApprovalRequest>>(new Map());
   const pendingInputRequestsRef = useRef<Map<string, InputRequest>>(new Map());
   const eventsRef = useRef<TaskEvent[]>([]);
@@ -801,7 +836,18 @@ export function App() {
     if (handled) {
       pendingApprovalsRef.current.delete(approvalId);
       dismissToast(getApprovalToastId(approvalId));
-      setComputerUseAppGrantApproval((prev) => (prev?.id === approvalId ? null : prev));
+      if (!bulkApproveSilentRef.current) {
+        setComputerUseAppGrantApproval((prev) =>
+          prev?.id === approvalId
+            ? pickFirstPendingComputerUseApproval(pendingApprovalsRef.current)
+            : prev,
+        );
+        setGenericApproval((prev) =>
+          prev?.id === approvalId
+            ? pickFirstPendingGenericApproval(pendingApprovalsRef.current)
+            : prev,
+        );
+      }
     }
   };
 
@@ -832,17 +878,27 @@ export function App() {
 
   const handleSessionApproveAllConfirm = () => {
     setSessionAutoApproveAll(true);
-    dismissToast(APPROVAL_WARNING_TOAST_ID);
 
     // Persist to main process so it survives HMR / renderer state resets
     void window.electronAPI.setSessionAutoApprove(true);
 
-    for (const [approvalId, approval] of pendingApprovalsRef.current) {
-      if (isComputerUseAppGrantApproval(approval)) {
-        continue;
+    setComputerUseAppGrantApproval(null);
+    setGenericApproval(null);
+
+    const pendingNonComputerUse = Array.from(pendingApprovalsRef.current.entries()).filter(
+      ([, approval]) => !isComputerUseAppGrantApproval(approval),
+    );
+
+    void (async () => {
+      bulkApproveSilentRef.current = true;
+      try {
+        await Promise.all(
+          pendingNonComputerUse.map(([approvalId]) => handleApprovalResponse(approvalId, true)),
+        );
+      } finally {
+        bulkApproveSilentRef.current = false;
       }
-      void handleApprovalResponse(approvalId, true);
-    }
+    })();
 
     addToast({
       type: "info",
@@ -853,87 +909,19 @@ export function App() {
   };
 
   const reshowPendingApprovalToasts = () => {
-    let pendingComputerUse: ApprovalRequest | null = null;
-    for (const [id, approval] of pendingApprovalsRef.current) {
-      if (isComputerUseAppGrantApproval(approval)) {
-        pendingComputerUse = approval;
-        continue;
-      }
-      addToast({
-        id: getApprovalToastId(id),
-        type: "info",
-        title: "Approval needed",
-        message: approval.description || "A task is waiting for your approval.",
-        taskId: approval.taskId,
-        approvalId: approval.id,
-        persistent: true,
-        actions: [
-          {
-            label: "Approve",
-            dismissOnClick: false,
-            callback: () => {
-              void handleApprovalResponse(approval.id, true);
-            },
-          },
-          {
-            label: "Deny",
-            variant: "secondary",
-            dismissOnClick: false,
-            callback: () => {
-              void handleApprovalResponse(approval.id, false);
-            },
-          },
-          {
-            label: "Approve all",
-            variant: "danger",
-            dismissOnClick: false,
-            callback: () => {
-              showApproveAllWarning();
-            },
-          },
-        ],
-      });
-    }
-    if (pendingComputerUse) {
-      setComputerUseAppGrantApproval(pendingComputerUse);
-    }
+    setComputerUseAppGrantApproval(pickFirstPendingComputerUseApproval(pendingApprovalsRef.current));
+    setGenericApproval(pickFirstPendingGenericApproval(pendingApprovalsRef.current));
   };
 
   const showApproveAllWarning = () => {
-    // Dismiss all pending approval toasts so the warning is the only dialog visible
     const pendingApprovalIds = Array.from(pendingApprovalsRef.current.keys());
     for (const id of pendingApprovalIds) {
       dismissToast(getApprovalToastId(id));
     }
 
-    addToast({
-      id: APPROVAL_WARNING_TOAST_ID,
-      type: "error",
-      title: "Warning: approve all requests?",
-      message:
-        "This will auto-approve every future request in this session. Only enable this if you fully trust the active tasks.",
-      persistent: true,
-      // Mark as approval-related so it renders centered
-      approvalId: "__approve-all-warning__",
-      actions: [
-        {
-          label: "I Understand",
-          variant: "danger",
-          callback: () => {
-            handleSessionApproveAllConfirm();
-          },
-        },
-        {
-          label: "Cancel",
-          variant: "secondary",
-          callback: () => {
-            dismissToast(APPROVAL_WARNING_TOAST_ID);
-            // Re-show pending approval toasts that were hidden
-            reshowPendingApprovalToasts();
-          },
-        },
-      ],
-    });
+    setComputerUseAppGrantApproval(null);
+    setGenericApproval(null);
+    setApproveAllSessionWarningOpen(true);
   };
 
   // Keep tasksRef in sync with tasks state
@@ -1122,40 +1110,7 @@ export function App() {
           } else if (sessionAutoApproveAllRef.current) {
             void handleApprovalResponse(approval.id, true);
           } else {
-            addToast({
-              id: getApprovalToastId(approval.id),
-              type: "info",
-              title: "Approval needed",
-              message: approval.description || "A task is waiting for your approval.",
-              taskId: event.taskId,
-              approvalId: approval.id,
-              persistent: true,
-              actions: [
-                {
-                  label: "Approve",
-                  dismissOnClick: false,
-                  callback: () => {
-                    void handleApprovalResponse(approval.id, true);
-                  },
-                },
-                {
-                  label: "Deny",
-                  variant: "secondary",
-                  dismissOnClick: false,
-                  callback: () => {
-                    void handleApprovalResponse(approval.id, false);
-                  },
-                },
-                {
-                  label: "Approve all",
-                  variant: "danger",
-                  dismissOnClick: false,
-                  callback: () => {
-                    showApproveAllWarning();
-                  },
-                },
-              ],
-            });
+            setGenericApproval((prev) => prev ?? approval);
           }
         }
       }
@@ -1165,7 +1120,16 @@ export function App() {
         if (approvalId) {
           pendingApprovalsRef.current.delete(approvalId);
           dismissToast(getApprovalToastId(approvalId));
-          setComputerUseAppGrantApproval((prev) => (prev?.id === approvalId ? null : prev));
+          setComputerUseAppGrantApproval((prev) =>
+            prev?.id === approvalId
+              ? pickFirstPendingComputerUseApproval(pendingApprovalsRef.current)
+              : prev,
+          );
+          setGenericApproval((prev) =>
+            prev?.id === approvalId
+              ? pickFirstPendingGenericApproval(pendingApprovalsRef.current)
+              : prev,
+          );
         }
       }
 
@@ -1489,7 +1453,7 @@ export function App() {
       // Capture events from dispatched child tasks for DispatchedAgentsPanel / CliAgentFrame
       if (!isSelectedTask && event.type !== "llm_streaming" && event.type !== "llm_usage") {
         if (childTaskIdsRef.current.has(event.taskId)) {
-          setChildEvents((prev) => [...prev, rawEvent]);
+          setChildEvents((prev) => mergeUniqueTaskEvents(prev, [rawEvent]));
         } else if (event.type === "task_created" || event.type === "step_started" || event.type === "tool_call" || event.type === "command_output" || event.type === "progress_update" || event.type === "assistant_message") {
           // Buffer events from unknown task IDs — they may be from a just-spawned child
           // whose task_created event hasn't been processed yet (race condition)
@@ -1658,7 +1622,7 @@ export function App() {
           allEvents.push(...evts);
         }
         allEvents.sort((a, b) => a.timestamp - b.timestamp);
-        setChildEvents(allEvents);
+        setChildEvents(mergeUniqueTaskEvents([], allEvents));
       } catch (error) {
         console.error("Failed to load child task events:", error);
       }
@@ -1683,7 +1647,7 @@ export function App() {
     };
     // Re-load when child tasks change (new children appear)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [childTasks.map((c) => `${c.id}:${c.status}`).join(","), remoteTaskView]);
+  }, [childTasks.map((c) => `${c.id}:${c.status}`).join(","), remoteTaskView, selectedTaskId]);
 
   // Load all existing sessions upfront so the sidebar is fully populated.
   // Pagination only kicks in for sessions beyond INITIAL_TASK_LOAD (extremely
@@ -2946,6 +2910,7 @@ export function App() {
                 workspace={currentWorkspace}
                 events={events}
                 tasks={tasks}
+                childTasks={remoteTaskView ? [] : childTasks}
                 queueStatus={queueStatus}
                 onSelectTask={handleSelectTaskFromShell}
                 onCancelTask={handleCancelTaskById}
@@ -2966,13 +2931,31 @@ export function App() {
           {/* Quick Task FAB */}
           {currentWorkspace && currentView === "main" && <QuickTaskFAB onCreateTask={handleQuickTask} />}
 
-          {computerUseAppGrantApproval ? (
+          {approveAllSessionWarningOpen ? (
+            <ApproveAllSessionWarningDialog
+              onConfirm={() => {
+                setApproveAllSessionWarningOpen(false);
+                handleSessionApproveAllConfirm();
+              }}
+              onCancel={() => {
+                setApproveAllSessionWarningOpen(false);
+                reshowPendingApprovalToasts();
+              }}
+            />
+          ) : computerUseAppGrantApproval ? (
             <ComputerUseApprovalDialog
               approval={computerUseAppGrantApproval}
               onAllowSession={() =>
                 void handleApprovalResponse(computerUseAppGrantApproval.id, true)
               }
               onDeny={() => void handleApprovalResponse(computerUseAppGrantApproval.id, false)}
+            />
+          ) : genericApproval ? (
+            <GenericApprovalDialog
+              approval={genericApproval}
+              onApprove={() => void handleApprovalResponse(genericApproval.id, true)}
+              onDeny={() => void handleApprovalResponse(genericApproval.id, false)}
+              onApproveAllSession={showApproveAllWarning}
             />
           ) : null}
 

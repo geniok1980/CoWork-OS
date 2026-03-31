@@ -41,17 +41,17 @@ export function ComputerUseApprovalDialog({
   };
 
   return (
-    <div className="approval-dialog-overlay computer-use-approval-overlay" role="dialog" aria-modal="true">
-      <div className="approval-dialog approval-warning computer-use-approval-dialog">
-        <div className="approval-icon" aria-hidden="true">
+    <div className="session-approval-overlay" role="dialog" aria-modal="true">
+      <div className="session-approval-card session-approval-card--computer-use">
+        <div className="session-approval-icon" aria-hidden="true">
           🖥️
         </div>
 
-        <div className="approval-content">
-          <h3>Computer use — app access</h3>
-          <p className="approval-description">{approval.description}</p>
+        <div className="session-approval-body">
+          <h3 className="session-approval-title">Computer use — app access</h3>
+          <p className="session-approval-prompt">{approval.description}</p>
 
-          <dl className="computer-use-approval-details">
+          <dl className="session-approval-details">
             {d.appName ? (
               <>
                 <dt>App</dt>
@@ -62,7 +62,7 @@ export function ComputerUseApprovalDialog({
               <>
                 <dt>Bundle ID</dt>
                 <dd>
-                  <code>{d.bundleId}</code>
+                  <code className="session-approval-code">{d.bundleId}</code>
                 </dd>
               </>
             ) : null}
@@ -87,20 +87,20 @@ export function ComputerUseApprovalDialog({
           </dl>
 
           {d.sentinelWarning ? (
-            <p className="computer-use-sentinel-warning">{d.sentinelWarning}</p>
+            <p className="session-approval-sentinel-warning">{d.sentinelWarning}</p>
           ) : null}
 
-          <p className="computer-use-session-hint">
-            Grants apply only for this computer-use session. Press <kbd>Esc</kbd> during control to
-            stop.
+          <p className="session-approval-footer-hint session-approval-footer-hint--center">
+            Grants apply only for this computer-use session. Press <kbd className="session-approval-kbd">Esc</kbd>{" "}
+            during control to stop.
           </p>
         </div>
 
-        <div className="approval-actions computer-use-approval-actions">
-          <button type="button" className="button-secondary" onClick={onDeny}>
+        <div className="session-approval-actions">
+          <button type="button" className="session-approval-btn-deny" onClick={onDeny}>
             Deny
           </button>
-          <button type="button" className="button-primary" onClick={onAllowSession}>
+          <button type="button" className="session-approval-btn-allow" onClick={onAllowSession}>
             Allow for this session
           </button>
         </div>

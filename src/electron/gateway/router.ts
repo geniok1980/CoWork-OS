@@ -113,6 +113,8 @@ type MessageSecurityContext = {
   contextType?: "dm" | "group";
   deniedTools?: string[];
   agentRoleId?: string;
+  /** Set when research chat routing applies; forwarded into new task agentConfig */
+  researchWorkflowPreset?: boolean;
 };
 
 export class MessageRouter {
@@ -2031,9 +2033,12 @@ export class MessageRouter {
     });
     if (researchResult) {
       message.text = researchResult.text;
+      if (!securityContext) securityContext = {};
       if (researchResult.agentRoleId) {
-        if (!securityContext) securityContext = {};
         securityContext.agentRoleId = researchResult.agentRoleId;
+      }
+      if (researchResult.researchWorkflowPreset) {
+        securityContext.researchWorkflowPreset = true;
       }
     }
 
@@ -6006,6 +6011,14 @@ export class MessageRouter {
         ...(allowSharedContextMemory ? { allowSharedContextMemory: true } : {}),
         ...(toolRestrictions.length > 0 ? { toolRestrictions } : {}),
         originChannel: adapter.type,
+        ...(securityContext?.researchWorkflowPreset
+          ? {
+              researchWorkflow: {
+                enabled: true,
+                emitSemanticProgress: true,
+              },
+            }
+          : {}),
       },
     });
 

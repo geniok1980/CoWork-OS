@@ -1,5 +1,11 @@
 import type { TaskEvent, TimelineEventStatus } from "../../../shared/types";
 import { getEffectiveTaskEventType } from "../../utils/task-event-compat";
+import {
+  friendlyToolCallTitle,
+  friendlyToolLaneCompletedLabel,
+  friendlyToolRunningLabel,
+  friendlyToolResultTitle,
+} from "../../utils/timeline-tool-labels";
 
 export interface ParallelLaneProjection {
   laneKey: string;
@@ -119,6 +125,19 @@ function getToolCallIndex(payload: Record<string, unknown>): number | undefined 
   return value > 0 ? value : undefined;
 }
 
+function getToolCorrelationId(payload: Record<string, unknown>): string | undefined {
+  const toolUseId =
+    typeof payload.toolUseId === "string" && payload.toolUseId.trim().length > 0
+      ? payload.toolUseId.trim()
+      : "";
+  if (toolUseId) return toolUseId;
+  const callId =
+    typeof payload.callId === "string" && payload.callId.trim().length > 0
+      ? payload.callId.trim()
+      : "";
+  return callId || undefined;
+}
+
 function ensureLane(
   group: GroupAccumulator,
   laneKey: string,
@@ -138,8 +157,48 @@ function ensureLane(
 }
 
 function laneTitleForToolName(toolName: string | undefined): string {
-  if (!toolName || toolName.trim().length === 0) return "Running tool";
-  return `Running ${toolName.trim()}`;
+  return friendlyToolRunningLabel(toolName);
+}
+
+function isGenericLaneTitle(
+  title: string | undefined,
+  toolName: string | undefined,
+  failed: boolean,
+): boolean {
+  const trimmed = typeof title === "string" ? title.trim() : "";
+  const tool = typeof toolName === "string" ? toolName.trim() : "";
+  if (!trimmed || !tool) return true;
+  return (
+    trimmed === laneTitleForToolName(tool) ||
+    trimmed === friendlyToolLaneCompletedLabel(tool, failed) ||
+    trimmed === friendlyToolResultTitle(tool, undefined, !failed)
+  );
+}
+
+function humanizeToolLaneMessage(message: string, fallbackToolName?: string): string {
+  const trimmed = message.trim();
+  if (!trimmed) return trimmed;
+
+  const runningMatch = /^Running\s+([A-Za-z0-9_:-]+)$/i.exec(trimmed);
+  if (runningMatch?.[1]) {
+    return friendlyToolRunningLabel(runningMatch[1].trim());
+  }
+
+  const completedMatch = /^([A-Za-z0-9_:-]+)\s+completed$/i.exec(trimmed);
+  if (completedMatch?.[1]) {
+    return friendlyToolLaneCompletedLabel(completedMatch[1].trim(), false);
+  }
+
+  const failedMatch = /^([A-Za-z0-9_:-]+)\s+finished with issues$/i.exec(trimmed);
+  if (failedMatch?.[1]) {
+    return friendlyToolLaneCompletedLabel(failedMatch[1].trim(), true);
+  }
+
+  if (fallbackToolName && trimmed === fallbackToolName) {
+    return friendlyToolRunningLabel(fallbackToolName);
+  }
+
+  return trimmed;
 }
 
 function inferGroupStatus(group: GroupAccumulator): TimelineEventStatus {
@@ -212,10 +271,7 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
 
     const stepId = extractStepId(event);
     const toolUseIdFromStep = extractToolUseIdFromStepId(stepId);
-    const toolUseIdFromPayload =
-      typeof payload.toolUseId === "string" && payload.toolUseId.trim().length > 0
-        ? payload.toolUseId.trim()
-        : undefined;
+    const toolUseIdFromPayload = getToolCorrelationId(payload);
     const toolUseId = toolUseIdFromPayload ?? toolUseIdFromStep;
     const laneKey =
       toolUseId ??
@@ -234,7 +290,16 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
               const step = asObject(payload.step);
               return typeof step.description === "string" ? step.description.trim() : "";
             })();
-      if (message) lane.title = message;
+      if (message) {
+        const nextTitle = humanizeToolLaneMessage(message, lane.toolName);
+        if (
+          !lane.title ||
+          !isGenericLaneTitle(nextTitle, lane.toolName, false) ||
+          isGenericLaneTitle(lane.title, lane.toolName, lane.status === "failed")
+        ) {
+          lane.title = nextTitle;
+        }
+      }
       lane.status = toTimelineStatus(event.status, lane.status || "in_progress");
       return;
     }
@@ -246,12 +311,30 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
         typeof payload.message === "string" && payload.message.trim().length > 0
           ? payload.message.trim()
           : "";
+      // Only overwrite the title when the existing one is generic; a detailed
+      // title set by an earlier tool_result event (e.g. "Fetched: Releases …")
+      // should never be replaced by a generic label like "Fetched page".
+      const existingIsGeneric = isGenericLaneTitle(
+        lane.title,
+        lane.toolName,
+        lane.status === "failed",
+      );
       if (message) {
-        lane.title = message;
-      } else {
+        const nextTitle = humanizeToolLaneMessage(message, lane.toolName);
+        if (
+          !lane.title ||
+          !isGenericLaneTitle(nextTitle, lane.toolName, lane.status === "failed") ||
+          existingIsGeneric
+        ) {
+          lane.title = nextTitle;
+        }
+      } else if (!lane.title || existingIsGeneric) {
         const finalName = lane.toolName || "";
         if (finalName) {
-          lane.title = `${finalName} ${lane.status === "failed" ? "failed" : "done"}`;
+          lane.title = friendlyToolLaneCompletedLabel(
+            finalName,
+            lane.status === "failed",
+          );
         }
       }
       return;
@@ -262,7 +345,13 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
       const toolName = typeof payload.tool === "string" ? payload.tool.trim() : "";
       if (toolName) {
         lane.toolName = toolName;
-        lane.title = lane.title || laneTitleForToolName(toolName);
+        const specificTitle = friendlyToolCallTitle(
+          toolName,
+          payload.input as Record<string, unknown> | undefined,
+        );
+        if (!lane.title || isGenericLaneTitle(lane.title, toolName, false)) {
+          lane.title = specificTitle;
+        }
       }
       const callIndex = getToolCallIndex(payload);
       if (callIndex) lane.toolCallIndex = callIndex;
@@ -282,11 +371,11 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
       lane.status = "failed";
       const finalName = toolName || lane.toolName || "";
       if (finalName) {
-        // Only overwrite with the "failed" suffix if the lane has no descriptive
-        // title yet (or still holds the generic tool-name placeholder). A title
-        // set by a progress/step event is more informative and should be kept.
-        const isGenericOrEmpty = !lane.title || lane.title === laneTitleForToolName(finalName);
-        if (isGenericOrEmpty) lane.title = `${finalName} failed`;
+        lane.title = friendlyToolResultTitle(
+          finalName,
+          { error: typeof payload.error === "string" ? payload.error : "Tool failed" },
+          false,
+        );
       }
       return;
     }
@@ -305,11 +394,11 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
       }
       const finalName = toolName || lane.toolName || "";
       if (finalName) {
-        // Only overwrite with "done/failed" if the lane has no descriptive title
-        // yet. A title set by a progress/step event is more informative.
-        const suffix = lane.status === "failed" ? "failed" : "done";
-        const isGenericOrEmpty = !lane.title || lane.title === laneTitleForToolName(finalName);
-        if (isGenericOrEmpty) lane.title = `${finalName} ${suffix}`;
+        lane.title = friendlyToolResultTitle(
+          finalName,
+          payload.result as Record<string, unknown> | undefined,
+          lane.status !== "failed",
+        );
       }
     }
   });
@@ -331,35 +420,61 @@ export function buildParallelGroupProjection(events: TaskEvent[]): ParallelGroup
       if (isToolsParallelGroupId(groupId)) return; // already handled in first pass
 
       const effectiveType = getEffectiveTaskEventType(event);
-      if (effectiveType !== "tool_result" && effectiveType !== "tool_error") return;
+      if (
+        effectiveType !== "tool_call" &&
+        effectiveType !== "tool_result" &&
+        effectiveType !== "tool_error"
+      ) {
+        return;
+      }
 
       const payload = asObject(event.payload);
-      const callId = typeof payload.callId === "string" ? payload.callId.trim() : "";
-      if (!callId || !allLaneToolUseIds.has(callId)) return;
+      const correlationId = getToolCorrelationId(payload);
+      if (!correlationId || !allLaneToolUseIds.has(correlationId)) return;
 
       orphanSuppressedIds.add(event.id);
 
       // Also update the matching lane with completion info
       for (const group of groupsById.values()) {
         for (const lane of group.lanesByKey.values()) {
-          if (lane.toolUseId !== callId) continue;
+          if (lane.toolUseId !== correlationId) continue;
           const toolName = typeof payload.tool === "string" ? payload.tool.trim() : "";
           const finalName = toolName || lane.toolName || "";
-          if (effectiveType === "tool_result") {
+          if (effectiveType === "tool_call") {
+            lane.startedAt = Math.min(lane.startedAt, event.timestamp);
+            if (toolName) {
+              lane.toolName = toolName;
+            }
+            if (finalName) {
+              const nextTitle = friendlyToolCallTitle(
+                finalName,
+                payload.input as Record<string, unknown> | undefined,
+              );
+              if (isGenericLaneTitle(lane.title, finalName, false)) {
+                lane.title = nextTitle;
+              }
+            }
+          } else if (effectiveType === "tool_result") {
             lane.finishedAt = event.timestamp;
             if (lane.status !== "failed") {
               lane.status = "completed";
               if (finalName) {
-                const isGenericOrEmpty = !lane.title || lane.title === laneTitleForToolName(finalName);
-                if (isGenericOrEmpty) lane.title = `${finalName} done`;
+                lane.title = friendlyToolResultTitle(
+                  finalName,
+                  payload.result as Record<string, unknown> | undefined,
+                  true,
+                );
               }
             }
           } else {
             lane.finishedAt = event.timestamp;
             lane.status = "failed";
             if (finalName) {
-              const isGenericOrEmpty = !lane.title || lane.title === laneTitleForToolName(finalName);
-              if (isGenericOrEmpty) lane.title = `${finalName} failed`;
+              lane.title = friendlyToolResultTitle(
+                finalName,
+                { error: typeof payload.error === "string" ? payload.error : "Tool failed" },
+                false,
+              );
             }
           }
           break;

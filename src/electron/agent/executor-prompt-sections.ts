@@ -48,8 +48,10 @@ export function buildModeDomainContract(executionMode: ExecutionMode, taskDomain
   return [
     `EXECUTION MODE: ${executionMode}`,
     `TASK DOMAIN: ${taskDomain}`,
-    executionMode === "execute"
+    executionMode === "execute" || executionMode === "debug"
       ? "- Mode policy: full tool execution is allowed when needed."
+      : executionMode === "verified"
+        ? "- Mode policy: full tool execution with step verification when configured."
       : executionMode === "chat"
         ? "- Mode policy: direct chat only. Do not use tools."
       : executionMode === "plan"

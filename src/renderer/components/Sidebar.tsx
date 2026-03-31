@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, SlidersHorizontal, Cpu, EyeOff, AppWindow, B
 import { resolveTwinIcon } from "../utils/twin-icons";
 import { stripAllEmojis } from "../utils/emoji-replacer";
 import { Task, Workspace, UiDensity, InfraStatus } from "../../shared/types";
+import type { MailboxDigestSnapshot, MailboxSyncStatus } from "../../shared/mailbox";
 import { isAutomatedTaskLike } from "../../shared/automated-task-detection";
 import { VirtualList } from "./VirtualList";
 import { isPretextEnabled } from "../utils/pretext-adapter";
@@ -236,7 +237,7 @@ function compareTaskTreeNodes(a: TaskTreeNode, b: TaskTreeNode): number {
 }
 
 export function Sidebar({
-  workspace: _workspace,
+  workspace,
   tasks,
   selectedTaskId,
   isHomeActive = false,
@@ -274,6 +275,8 @@ export function Sidebar({
   const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   // Automated sessions folder is collapsed by default to keep the sidebar clean
   const [automatedFolderCollapsed, setAutomatedFolderCollapsed] = useState(true);
+  const [mailboxDigest, setMailboxDigest] = useState<MailboxDigestSnapshot | null>(null);
+  const [mailboxStatus, setMailboxStatus] = useState<MailboxSyncStatus | null>(null);
   const pinActionErrorTimeoutRef = useRef<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<Map<string, HTMLButtonElement>>(new Map());
@@ -301,6 +304,48 @@ export function Sidebar({
       })
       .catch(() => {});
   }, []);
+
+  const loadMailboxInboxUnread = useCallback(async () => {
+    const api = window.electronAPI;
+    if (!api?.getMailboxDigest || !api?.getMailboxSyncStatus) return;
+    const [digest, status] = await Promise.all([
+      api.getMailboxDigest(workspace?.id).catch(() => null),
+      api.getMailboxSyncStatus().catch(() => null),
+    ]);
+    setMailboxDigest(digest);
+    setMailboxStatus(status);
+  }, [workspace?.id]);
+
+  useEffect(() => {
+    void loadMailboxInboxUnread();
+  }, [loadMailboxInboxUnread]);
+
+  const mailboxEventDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.onMailboxEvent) return;
+    const unsubscribe = api.onMailboxEvent(() => {
+      if (mailboxEventDebounceRef.current !== null) {
+        clearTimeout(mailboxEventDebounceRef.current);
+      }
+      mailboxEventDebounceRef.current = setTimeout(() => {
+        mailboxEventDebounceRef.current = null;
+        void loadMailboxInboxUnread();
+      }, 500);
+    });
+    return () => {
+      unsubscribe();
+      if (mailboxEventDebounceRef.current !== null) {
+        clearTimeout(mailboxEventDebounceRef.current);
+      }
+    };
+  }, [loadMailboxInboxUnread]);
+
+  const inboxUnreadCount = mailboxDigest?.unreadCount ?? mailboxStatus?.unreadCount ?? 0;
+  const inboxNavLabel =
+    inboxUnreadCount > 0
+      ? `Inbox (${inboxUnreadCount > 99 ? "99+" : inboxUnreadCount})`
+      : "Inbox";
 
   // Helper to get date group for a timestamp
   const getDateGroup = useCallback((timestamp: number): string => {
@@ -1309,7 +1354,8 @@ export function Sidebar({
             className={`new-task-btn cli-new-task-btn cli-action-btn sidebar-home-btn ${isInboxAgentActive ? "active" : ""}`}
             onClick={onOpenInboxAgent}
             aria-pressed={isInboxAgentActive}
-            title="Inbox"
+            title={inboxNavLabel}
+            aria-label={inboxNavLabel}
           >
             <span className="cli-btn-text">
               <span className="terminal-only">inbox</span>
@@ -1317,7 +1363,7 @@ export function Sidebar({
                 <span className="sidebar-home-btn-icon" aria-hidden="true" style={{ display: 'flex' }}>
                   <Inbox size={16} strokeWidth={2} style={{ display: 'block' }} />
                 </span>
-                <span>Inbox</span>
+                <span>{inboxNavLabel}</span>
               </span>
             </span>
           </button>

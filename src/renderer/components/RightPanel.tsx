@@ -221,6 +221,7 @@ interface RightPanelProps {
   workspace: Workspace | null;
   events: TaskEvent[];
   tasks?: Task[];
+  childTasks?: Task[];
   queueStatus?: QueueStatus | null;
   onSelectTask?: (taskId: string) => void;
   onCancelTask?: (taskId: string) => void;
@@ -245,6 +246,7 @@ export function RightPanel({
   workspace,
   events: rawEvents,
   tasks = [],
+  childTasks = [],
   queueStatus,
   onSelectTask,
   onCancelTask,
@@ -252,6 +254,9 @@ export function RightPanel({
   onHighlightConsumed,
 }: RightPanelProps) {
   const events = useMemo(() => normalizeEventsForTimelineUi(rawEvents), [rawEvents]);
+  const hasActiveChildren = childTasks.some((t) =>
+    ["executing", "planning", "queued", "pending"].includes(t.status),
+  );
   const [expandedSections, setExpandedSections] = useState({
     progress: true,
     queue: true,
@@ -687,10 +692,10 @@ export function RightPanel({
             ) : (
               <div className="cli-empty-state">
                 <div
-                  className={`cli-status-badge ${task?.status === "executing" ? "active" : task?.status === "paused" ? "paused" : task?.status === "blocked" ? "blocked" : task?.status === "completed" ? "completed" : ""}`}
+                  className={`cli-status-badge ${(task?.status === "executing" || (task?.status === "completed" && hasActiveChildren)) ? "active" : task?.status === "paused" ? "paused" : task?.status === "blocked" ? "blocked" : task?.status === "completed" ? "completed" : ""}`}
                 >
                   <span className="terminal-only">
-                    {task?.status === "executing"
+                    {(task?.status === "executing" || (task?.status === "completed" && hasActiveChildren))
                       ? "◉ WORKING..."
                       : task?.status === "paused"
                         ? "⏸ WAITING"
@@ -703,7 +708,7 @@ export function RightPanel({
                             : "○ READY"}
                   </span>
                   <span className="modern-only">
-                    {task?.status === "executing"
+                    {(task?.status === "executing" || (task?.status === "completed" && hasActiveChildren))
                       ? "Working..."
                       : task?.status === "paused"
                         ? "Waiting for your cue"
@@ -720,7 +725,7 @@ export function RightPanel({
                   <span className="terminal-only">
                     {agentContext.getUiCopy("rightProgressEmptyHint")}
                   </span>
-                  <span className="modern-only">Standing by when you are ready.</span>
+                  <span className="modern-only">{hasActiveChildren ? "Sub-task is still working..." : "Standing by when you are ready."}</span>
                 </p>
               </div>
             )}
@@ -1014,7 +1019,7 @@ export function RightPanel({
       {/* Empty space filler */}
       <div style={{ flex: 1 }} />
 
-      {task?.status === "completed" && task?.terminalStatus === "partial_success" && (
+      {task?.status === "completed" && !hasActiveChildren && task?.terminalStatus === "partial_success" && (
         <div
           className="right-panel-preserved-line"
           title={preservedOutputsTooltip}

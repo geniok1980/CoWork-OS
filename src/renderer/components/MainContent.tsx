@@ -2707,6 +2707,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
   const shouldRenderTimelineEventInStepFeed = props.shouldRenderTimelineEventInStepFeed as (
     event: TaskEvent,
   ) => boolean;
+  const toolCallPairing = props.toolCallPairing as { completions: Map<string, TaskEvent>; claimedResultIds: Set<string> };
   const hasEventDetails = props.hasEventDetails as (event: TaskEvent) => boolean;
   const isEventExpanded = props.isEventExpanded as (event: TaskEvent) => boolean;
   const showAllActionBlocks = props.showAllActionBlocks as Set<string>;
@@ -3068,8 +3069,10 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                           }
                           const isExpandable = hasEventDetails(event);
                           const isExpanded = isEventExpanded(event);
+                          const toolCallResultEvent = toolCallPairing.completions.get(event.id);
+                          const renderEvent = toolCallResultEvent ?? event;
                           const eventTitle = renderEventTitle(
-                            event,
+                            renderEvent,
                             workspace?.path,
                             setViewerFilePath,
                             agentContext,
@@ -3091,7 +3094,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                                   )
                                 }
                                 timeLabel={formatTime(event.timestamp)}
-                                indicator={resolveTimelineIndicator(event, {
+                                indicator={resolveTimelineIndicator(renderEvent, {
                                   isTaskCompleted: !isTaskWorking,
                                 })}
                                 showConnectorAbove={showChildConnectorAbove}
@@ -3497,8 +3500,10 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
 
                 const isExpandable = hasEventDetails(event);
                 const isExpanded = isEventExpanded(event);
+                const toolCallResultEvent2 = toolCallPairing.completions.get(event.id);
+                const renderEvent2 = toolCallResultEvent2 ?? event;
                 const eventTitle = renderEventTitle(
-                  event,
+                  renderEvent2,
                   workspace?.path,
                   setViewerFilePath,
                   agentContext,
@@ -3521,7 +3526,7 @@ const TaskConversationFlow = memo(function TaskConversationFlow(props: any) {
                         )
                       }
                       timeLabel={formatTime(event.timestamp)}
-                      indicator={resolveTimelineIndicator(event, {
+                      indicator={resolveTimelineIndicator(renderEvent2, {
                         isTaskCompleted: !isTaskWorking,
                       })}
                       showConnectorAbove={showConnectorAbove}
@@ -4173,6 +4178,38 @@ export function MainContent({
   );
   const parallelGroupsByAnchorEventId = parallelGroupProjection.groupsByAnchorEventId;
   const suppressedParallelEventIds = parallelGroupProjection.suppressedEventIds;
+
+  // Pair individual tool_call / tool_result events (outside parallel groups) so that
+  // the tool_result row is suppressed and the tool_call row reflects the completed state.
+  const toolCallPairing = useMemo(() => {
+    // callId → tool_call event
+    const callIdToEvent = new Map<string, TaskEvent>();
+    // tool_call event ID → tool_result event
+    const completions = new Map<string, TaskEvent>();
+    // tool_result event IDs claimed by a matching tool_call
+    const claimedResultIds = new Set<string>();
+
+    for (const event of filteredEvents) {
+      if (suppressedParallelEventIds.has(event.id)) continue;
+      const effectiveType = getEffectiveTaskEventType(event);
+      if (effectiveType === "tool_call") {
+        const p = event.payload as Record<string, unknown> | undefined;
+        const id = typeof p?.id === "string" ? p.id : typeof p?.callId === "string" ? p.callId : "";
+        if (id) callIdToEvent.set(id, event);
+      } else if (effectiveType === "tool_result") {
+        const p = event.payload as Record<string, unknown> | undefined;
+        const callId = typeof p?.callId === "string" ? p.callId : "";
+        if (callId) {
+          const callEvent = callIdToEvent.get(callId);
+          if (callEvent) {
+            completions.set(callEvent.id, event);
+            claimedResultIds.add(event.id);
+          }
+        }
+      }
+    }
+    return { completions, claimedResultIds };
+  }, [filteredEvents, suppressedParallelEventIds]);
 
   const latestUserMessageTimestamp = useMemo(() => {
     for (let i = events.length - 1; i >= 0; i--) {
@@ -5447,6 +5484,13 @@ export function MainContent({
     if (effectiveType === "user_message" || effectiveType === "assistant_message") {
       return false;
     }
+    if (shouldHideApprovalEventInStepFeed(event)) {
+      return false;
+    }
+    // Suppress tool_result events that are paired with their tool_call (shown inline)
+    if (effectiveType === "tool_result" && toolCallPairing.claimedResultIds.has(event.id)) {
+      return false;
+    }
     const showEvenWithoutSteps =
       ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(event.type) ||
       ALWAYS_VISIBLE_TECHNICAL_EVENT_TYPES.has(effectiveType as EventType) ||
@@ -5455,7 +5499,7 @@ export function MainContent({
       isSpreadsheetFileEvent(event) ||
       (effectiveType === "tool_result" && event.payload?.tool === "schedule_task");
     return showSteps || showEvenWithoutSteps;
-  }, [isImageFileEvent, isSpreadsheetFileEvent, isVideoFileEvent, showSteps]);
+  }, [isImageFileEvent, isSpreadsheetFileEvent, isVideoFileEvent, showSteps, toolCallPairing.claimedResultIds]);
 
   // Check if an event has details to show
   const hasEventDetails = useCallback((event: TaskEvent): boolean => {
@@ -5466,6 +5510,9 @@ export function MainContent({
     if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
     if (effectiveType === "task_completed") {
       return hasTaskOutputs(resolveTaskOutputSummaryFromCompletionEvent(event, events));
+    }
+    if (shouldHideApprovalEventInStepFeed(event)) {
+      return false;
     }
     if (
       !verboseSteps &&
@@ -5518,6 +5565,7 @@ export function MainContent({
     if (isSpreadsheetFileEvent(event)) return true;
     if (workspace?.path && getStepCompletionPreviewPath(event)) return true;
     if (effectiveType === "task_completed") return hasEventDetails(event);
+    if (shouldHideApprovalEventInStepFeed(event)) return false;
     if (
       effectiveType === "artifact_created" ||
       effectiveType === "diagram_created" ||
@@ -7932,6 +7980,7 @@ export function MainContent({
       setViewerFilePath={setViewerFilePath}
       formatTime={formatTime}
       shouldRenderTimelineEventInStepFeed={shouldRenderTimelineEventInStepFeed}
+      toolCallPairing={toolCallPairing}
       hasEventDetails={hasEventDetails}
       isEventExpanded={isEventExpanded}
       showAllActionBlocks={showAllActionBlocks}
@@ -8112,8 +8161,8 @@ export function MainContent({
 
       {/* Footer with Input */}
       <div className="main-footer">
-        {/* Scroll to bottom button */}
-        {!autoScroll && task && (
+        {/* Scroll to bottom button — only when there is actually content above the fold */}
+        {!autoScroll && task && mainBodyRef.current && (mainBodyRef.current.scrollHeight - mainBodyRef.current.scrollTop - mainBodyRef.current.clientHeight > 20) && (
           <button
             className="scroll-to-bottom-btn"
             onClick={() => {
@@ -8284,7 +8333,10 @@ export function MainContent({
               </div>
             </div>
           )}
-          {task.status === "completed" && (
+          {task.status === "completed" &&
+            !childTasks.some((t) =>
+              ["executing", "planning", "queued", "pending"].includes(t.status),
+            ) && (
             <div className="task-status-banner">
               <div className="task-status-banner-content">
                 <strong>Rate this result</strong>
@@ -9056,6 +9108,12 @@ function extractApprovalCommand(approval: Any | null): string | null {
 function isRunCommandApproval(approval: Any | null): boolean {
   if (approval?.type === "run_command") return true;
   return Boolean(extractApprovalCommand(approval));
+}
+
+function shouldHideApprovalEventInStepFeed(event: TaskEvent): boolean {
+  if (getEffectiveTaskEventType(event) !== "approval_requested") return false;
+  if (event.payload?.autoApproved === true) return true;
+  return isRunCommandApproval(getApprovalPayload(event));
 }
 
 function renderEventTitle(
@@ -9860,11 +9918,11 @@ function renderEventDetails(
 
       if (command) {
         return (
-          <div className="event-details event-details-scrollable">
+          <div className="event-details">
             <div style={{ marginBottom: 6, fontWeight: 600 }}>Running command:</div>
-            <pre>
-              <code>{truncateForDisplay(command, 8000)}</code>
-            </pre>
+            <div className="session-approval-code-scroll" role="region" aria-label="Command">
+              <code className="session-approval-code session-approval-code--multiline">{command}</code>
+            </div>
             {(cwd || timeoutLabel) && (
               <div style={{ marginTop: 8 }}>
                 {cwd && <div>CWD: {cwd}</div>}

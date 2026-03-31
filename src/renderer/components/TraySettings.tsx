@@ -31,7 +31,7 @@ export function TraySettings({ onStatusChange }: TraySettingsProps) {
     const detectedPlatform = detectPlatform();
     setPlatform(detectedPlatform);
     if (detectedPlatform === "darwin" || detectedPlatform === "win32") {
-      loadSettings();
+      void loadSettings();
     } else {
       setLoading(false);
     }
@@ -43,29 +43,30 @@ export function TraySettings({ onStatusChange }: TraySettingsProps) {
       const traySettings = await window.electronAPI.getTraySettings();
       setSettings(traySettings);
       onStatusChange?.(traySettings.enabled);
-    } catch (error) {
-      console.error("Failed to load tray settings:", error);
+    } catch {
+      setSettings(null);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSave = async (newSettings: Partial<TraySettingsType>) => {
+  const handleSave = async (patch: Partial<TraySettingsType>) => {
     try {
       setSaving(true);
-      await window.electronAPI.saveTraySettings(newSettings);
-      setSettings((prev) => (prev ? { ...prev, ...newSettings } : null));
-      if (newSettings.enabled !== undefined) {
-        onStatusChange?.(newSettings.enabled);
+      const result = await window.electronAPI.saveTraySettings(patch);
+      if (result.settings) {
+        setSettings(result.settings);
+        onStatusChange?.(result.settings.enabled);
       }
-    } catch (error) {
-      console.error("Failed to save tray settings:", error);
+    } catch {
+      await loadSettings();
     } finally {
       setSaving(false);
     }
   };
 
-  const trayLabel = isMacOS ? "Menu Bar" : "System Tray";
+  const trayHeading = isMacOS ? "Menu Bar" : "System Tray";
+  const trayLabel = isMacOS ? "menu bar" : "system tray";
 
   if (!supportsTraySettings) {
     return (
@@ -81,128 +82,166 @@ export function TraySettings({ onStatusChange }: TraySettingsProps) {
   }
 
   if (loading) {
-    return <div className="settings-loading">Loading {trayLabel.toLowerCase()} settings...</div>;
+    return <div className="settings-loading">Loading {trayLabel} settings…</div>;
   }
 
   return (
     <div className="tray-settings">
       <div className="settings-section">
-        <h3>{trayLabel}</h3>
+        <h3>{trayHeading}</h3>
         <p className="settings-description">
-          Configure the {trayLabel.toLowerCase()} icon and behavior. The {trayLabel.toLowerCase()}{" "}
-          provides quick access to workspaces and tasks.
+          {isMacOS ? (
+            <>
+              Control where CoWork appears when it runs: the menu bar icon, the Dock, and banner
+              alerts. Changes apply immediately.
+            </>
+          ) : (
+            <>
+              Control the system tray icon and banner notifications for task updates. Changes apply
+              immediately.
+            </>
+          )}
         </p>
 
-        <div className="settings-toggle-group">
-          <div className="settings-toggle-item">
-            <div className="toggle-info">
-              <span className="toggle-label">Enable {trayLabel} Icon</span>
-              <span className="toggle-description">
-                Show CoWork OS icon in the {trayLabel.toLowerCase()}
-              </span>
-            </div>
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={settings?.enabled ?? true}
-                onChange={(e) => handleSave({ enabled: e.target.checked })}
-                disabled={saving}
-              />
-              <span className="toggle-slider"></span>
-            </label>
-          </div>
-
-          {/* Dock icon toggle is macOS-only */}
-          {isMacOS && (
-            <div className="settings-toggle-item">
-              <div className="toggle-info">
-                <span className="toggle-label">Show Dock Icon</span>
-                <span className="toggle-description">
-                  Show CoWork OS in the macOS Dock when running
+        <div className="tray-settings-options">
+          <div className="settings-form-group tray-settings-option">
+            <div className="tray-settings-option-inner">
+              <div className="tray-settings-option-text">
+                <span className="tray-settings-option-title">
+                  {isMacOS ? "Show menu bar icon" : "Show system tray icon"}
                 </span>
+                <p className="tray-settings-option-desc">
+                  {isMacOS ? (
+                    <>
+                      Adds a CoWork icon to the menu bar for quick access. Turn off to hide the icon;
+                      the app can still run from the Dock or when you open a window.
+                    </>
+                  ) : (
+                    <>
+                      Adds a CoWork icon to the notification area for quick access. Turn off to hide
+                      the icon while CoWork keeps running.
+                    </>
+                  )}
+                </p>
               </div>
-              <label className="toggle-switch">
+              <label className="settings-toggle tray-settings-toggle">
                 <input
                   type="checkbox"
-                  checked={settings?.showDockIcon ?? true}
-                  onChange={(e) => handleSave({ showDockIcon: e.target.checked })}
+                  checked={settings?.enabled ?? true}
+                  onChange={(e) => void handleSave({ enabled: e.target.checked })}
                   disabled={saving}
+                  aria-label={isMacOS ? "Show menu bar icon" : "Show system tray icon"}
                 />
-                <span className="toggle-slider"></span>
+                <span className="toggle-slider" />
               </label>
+            </div>
+          </div>
+
+          {isMacOS && (
+            <div className="settings-form-group tray-settings-option">
+              <div className="tray-settings-option-inner">
+                <div className="tray-settings-option-text">
+                  <span className="tray-settings-option-title">Show Dock icon</span>
+                  <p className="tray-settings-option-desc">
+                    While CoWork is open, show its icon in the Dock. Turn off if you prefer to work
+                    from the menu bar only (the Dock icon can still appear briefly when you focus the
+                    app).
+                  </p>
+                </div>
+                <label className="settings-toggle tray-settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={settings?.showDockIcon ?? true}
+                    onChange={(e) => void handleSave({ showDockIcon: e.target.checked })}
+                    disabled={saving}
+                    aria-label="Show Dock icon"
+                  />
+                  <span className="toggle-slider" />
+                </label>
+              </div>
             </div>
           )}
 
-          <div className="settings-toggle-item">
-            <div className="toggle-info">
-              <span className="toggle-label">Start Minimized</span>
-              <span className="toggle-description">
-                Start with the main window hidden ({trayLabel.toLowerCase()} only)
-              </span>
+          <div className="settings-form-group tray-settings-option">
+            <div className="tray-settings-option-inner">
+              <div className="tray-settings-option-text">
+                <span className="tray-settings-option-title">Start with window closed</span>
+                <p className="tray-settings-option-desc">
+                  On launch, keep the main window hidden until you open it from the {trayLabel} menu
+                  or elsewhere.
+                </p>
+              </div>
+              <label className="settings-toggle tray-settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings?.startMinimized ?? false}
+                  onChange={(e) => void handleSave({ startMinimized: e.target.checked })}
+                  disabled={saving}
+                  aria-label="Start with main window hidden"
+                />
+                <span className="toggle-slider" />
+              </label>
             </div>
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={settings?.startMinimized ?? false}
-                onChange={(e) => handleSave({ startMinimized: e.target.checked })}
-                disabled={saving}
-              />
-              <span className="toggle-slider"></span>
-            </label>
           </div>
 
-          <div className="settings-toggle-item">
-            <div className="toggle-info">
-              <span className="toggle-label">Close to {trayLabel}</span>
-              <span className="toggle-description">
-                Closing the window minimizes to {trayLabel.toLowerCase()} instead of quitting
-              </span>
+          <div className="settings-form-group tray-settings-option">
+            <div className="tray-settings-option-inner">
+              <div className="tray-settings-option-text">
+                <span className="tray-settings-option-title">Close button hides, does not quit</span>
+                <p className="tray-settings-option-desc">
+                  When you close the main window, CoWork keeps running in the background. Turn off
+                  to make the close button quit the app (you can still quit from the {trayLabel}{" "}
+                  menu).
+                </p>
+              </div>
+              <label className="settings-toggle tray-settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings?.closeToTray ?? true}
+                  onChange={(e) => void handleSave({ closeToTray: e.target.checked })}
+                  disabled={saving}
+                  aria-label="Close window hides app instead of quitting"
+                />
+                <span className="toggle-slider" />
+              </label>
             </div>
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={settings?.closeToTray ?? true}
-                onChange={(e) => handleSave({ closeToTray: e.target.checked })}
-                disabled={saving}
-              />
-              <span className="toggle-slider"></span>
-            </label>
           </div>
 
-          <div className="settings-toggle-item">
-            <div className="toggle-info">
-              <span className="toggle-label">Show Notifications</span>
-              <span className="toggle-description">
-                Show system notifications for task completions and updates
-              </span>
+          <div className="settings-form-group tray-settings-option">
+            <div className="tray-settings-option-inner">
+              <div className="tray-settings-option-text">
+                <span className="tray-settings-option-title">Banner notifications</span>
+                <p className="tray-settings-option-desc">
+                  Show short alerts near the top of the screen for task updates, completions, and
+                  items that need your attention.
+                </p>
+              </div>
+              <label className="settings-toggle tray-settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings?.showNotifications ?? true}
+                  onChange={(e) => void handleSave({ showNotifications: e.target.checked })}
+                  disabled={saving}
+                  aria-label="Show banner notifications"
+                />
+                <span className="toggle-slider" />
+              </label>
             </div>
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={settings?.showNotifications ?? true}
-                onChange={(e) => handleSave({ showNotifications: e.target.checked })}
-                disabled={saving}
-              />
-              <span className="toggle-slider"></span>
-            </label>
           </div>
         </div>
       </div>
 
-      <div className="settings-section">
-        <h4>{trayLabel} Features</h4>
+      <div className="settings-section tray-settings-features">
+        <h4>What you get from the {trayHeading} icon</h4>
         <div className="settings-callout info">
-          <strong>Quick Access:</strong>
           <ul style={{ margin: "8px 0 0 0", paddingLeft: "20px" }}>
-            <li>Click the {trayLabel.toLowerCase()} icon to show/hide the main window</li>
             <li>
-              Right-click (or click) to see the quick menu with:
-              <ul style={{ paddingLeft: "20px", marginTop: "4px" }}>
-                <li>Channel connection status</li>
-                <li>Workspace selection</li>
-                <li>New task shortcut</li>
-                <li>Settings access</li>
-              </ul>
+              <strong>Open the menu:</strong> click the CoWork icon in the {trayLabel} to open the
+              menu (channels, workspaces, quick task, window show/hide, settings, quit).
+            </li>
+            <li>
+              <strong>Show or hide the window:</strong> choose &quot;Show Window&quot; or
+              &quot;Hide Window&quot; from that menu.
             </li>
           </ul>
         </div>

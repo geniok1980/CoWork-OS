@@ -679,7 +679,13 @@ export class CouncilService {
     const task = this.taskRepo.findById(taskId);
     const events = this.taskEventRepo.findByTaskId(taskId);
     const resolvedText =
-      resolveTaskResultText({ summary: task?.resultSummary, events }) ||
+      resolveTaskResultText({
+        summary: task?.resultSummary,
+        semanticSummary: task?.semanticSummary,
+        verificationVerdict: task?.verificationVerdict,
+        verificationReport: task?.verificationReport,
+        events,
+      }) ||
       task?.resultSummary ||
       task?.error ||
       "Council run completed without a synthesized memo.";

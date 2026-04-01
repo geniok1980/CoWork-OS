@@ -16,6 +16,7 @@ interface StepDescriptor {
 
 interface GroupOptions {
   label?: string;
+  semanticSummary?: string;
   maxParallel?: number;
   actor?: "system" | "agent" | "user" | "tool" | "subagent";
   status?: TimelineEventStatus;
@@ -72,9 +73,12 @@ export class TimelineEmitter {
   startGroupLane(groupId: string, options: GroupOptions = {}): void {
     const normalizedGroupId = typeof groupId === "string" ? groupId.trim() : "";
     if (!normalizedGroupId) return;
+    const semanticSummary =
+      typeof options.semanticSummary === "string" ? options.semanticSummary.trim() : "";
     this.emit("timeline_group_started", {
       groupId: normalizedGroupId,
-      groupLabel: options.label || normalizedGroupId,
+      groupLabel: semanticSummary || options.label || normalizedGroupId,
+      semanticSummary: semanticSummary || undefined,
       maxParallel:
         typeof options.maxParallel === "number" && Number.isFinite(options.maxParallel)
           ? Math.max(1, Math.floor(options.maxParallel))
@@ -92,9 +96,12 @@ export class TimelineEmitter {
     const normalizedGroupId = typeof groupId === "string" ? groupId.trim() : "";
     if (!normalizedGroupId) return;
     const status = options.status || "completed";
+    const semanticSummary =
+      typeof options.semanticSummary === "string" ? options.semanticSummary.trim() : "";
     this.emit("timeline_group_finished", {
       groupId: normalizedGroupId,
-      groupLabel: options.label || normalizedGroupId,
+      groupLabel: semanticSummary || options.label || normalizedGroupId,
+      semanticSummary: semanticSummary || undefined,
       status,
       actor: options.actor || "tool",
       legacyType:

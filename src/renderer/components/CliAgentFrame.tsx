@@ -39,6 +39,32 @@ interface FrameEvent {
   timestamp: number;
 }
 
+function buildTaskCompletionLabel(event: TaskEvent): string {
+  const p = event.payload as Record<string, unknown> | undefined;
+  const resultSummary =
+    typeof p?.resultSummary === "string" ? p.resultSummary.trim() : "";
+  const semanticSummary =
+    typeof p?.semanticSummary === "string" ? p.semanticSummary.trim() : "";
+  const verificationVerdict =
+    typeof p?.verificationVerdict === "string" ? p.verificationVerdict.trim() : "";
+  const verificationReport =
+    typeof p?.verificationReport === "string" ? p.verificationReport.trim() : "";
+
+  const summary = [resultSummary, semanticSummary].filter((value) => value.length > 0).join(" · ");
+  if (!verificationVerdict && !verificationReport) {
+    return summary || "Task completed";
+  }
+
+  const verification = [
+    verificationVerdict ? `Verification: ${verificationVerdict}` : "",
+    verificationReport || "",
+  ]
+    .filter((value) => value.length > 0)
+    .join(" · ");
+
+  return [summary, verification].filter((value) => value.length > 0).join(" · ") || "Task completed";
+}
+
 function classifyEvent(event: TaskEvent, agentName: string, task?: Task): FrameEvent | null {
   const effectiveType = getEffectiveTaskEventType(event);
   if (!DISPLAY_EVENT_TYPES.has(effectiveType)) return null;
@@ -249,7 +275,7 @@ function classifyEvent(event: TaskEvent, agentName: string, task?: Task): FrameE
         id: event.id,
         type: effectiveType,
         icon: "check",
-        label: "Task completed",
+        label: buildTaskCompletionLabel(event),
         timestamp: event.timestamp,
       };
     case "task_cancelled":

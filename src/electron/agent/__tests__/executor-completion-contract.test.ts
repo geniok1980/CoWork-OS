@@ -920,4 +920,33 @@ DOCUMENT CREATION BEST PRACTICES:
       expect.objectContaining({ status: "failed" }),
     );
   });
+
+  it("waives non-mutation failed steps when soft-deadline best-effort finalization is used", () => {
+    const executor = createExecuteHarness({
+      title: "Build a website",
+      prompt: "Create a fully working website with a few working apps.",
+      lastOutput: "Refined the app shell.",
+      createdFiles: ["package.json", "src/App.jsx"],
+      planStepDescription: "Refine the experience",
+    });
+    executor.plan = {
+      description: "Plan",
+      steps: [
+        { id: "1", description: "Implement the app shell", status: "completed" },
+        { id: "2", description: "Refine the experience", status: "failed" },
+      ],
+    };
+    (executor as Any).softDeadlineTriggered = true;
+    (executor as Any).buildResultSummary = vi.fn().mockReturnValue("Refined the app shell.");
+
+    (executor as Any).finalizeTaskWithFallback("Refined the app shell.");
+
+    expect(executor.daemon.completeTask).toHaveBeenCalledWith(
+      "task-1",
+      "Refined the app shell.",
+      expect.objectContaining({
+        waiveFailedStepIds: expect.arrayContaining(["2"]),
+      }),
+    );
+  });
 });

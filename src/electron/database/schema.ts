@@ -293,10 +293,13 @@ export class DatabaseManager {
         budget_cost REAL,
         error TEXT,
         is_pinned INTEGER DEFAULT 0,
+        worker_role TEXT,
         strategy_lock INTEGER DEFAULT 0,
         budget_profile TEXT,
         terminal_status TEXT,
         failure_class TEXT,
+        verification_verdict TEXT,
+        verification_report TEXT,
         best_known_outcome TEXT,
         budget_usage TEXT,
         continuation_count INTEGER DEFAULT 0,
@@ -320,6 +323,7 @@ export class DatabaseManager {
         project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
         request_depth INTEGER,
         billing_code TEXT,
+        semantic_summary TEXT,
         FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
       );
 
@@ -1607,8 +1611,12 @@ export class DatabaseManager {
     // Migration: Add assigned_agent_role_id to tasks table
     const agentRoleColumns = [
       "ALTER TABLE tasks ADD COLUMN assigned_agent_role_id TEXT REFERENCES agent_roles(id)",
+      "ALTER TABLE tasks ADD COLUMN worker_role TEXT",
       'ALTER TABLE tasks ADD COLUMN board_column TEXT DEFAULT "backlog"',
       "ALTER TABLE tasks ADD COLUMN priority INTEGER DEFAULT 0",
+      "ALTER TABLE tasks ADD COLUMN verification_verdict TEXT",
+      "ALTER TABLE tasks ADD COLUMN verification_report TEXT",
+      "ALTER TABLE tasks ADD COLUMN semantic_summary TEXT",
     ];
 
     for (const sql of agentRoleColumns) {
@@ -2569,6 +2577,11 @@ export class DatabaseManager {
       "ALTER TABLE tasks ADD COLUMN worktree_branch TEXT",
       "ALTER TABLE tasks ADD COLUMN worktree_status TEXT",
       "ALTER TABLE tasks ADD COLUMN comparison_session_id TEXT",
+      "ALTER TABLE tasks ADD COLUMN session_id TEXT",
+      "ALTER TABLE tasks ADD COLUMN branch_from_task_id TEXT REFERENCES tasks(id)",
+      "ALTER TABLE tasks ADD COLUMN branch_from_event_id TEXT",
+      "ALTER TABLE tasks ADD COLUMN branch_label TEXT",
+      "ALTER TABLE tasks ADD COLUMN resume_strategy TEXT",
     ];
     for (const sql of worktreeColumns) {
       try {
@@ -2633,6 +2646,11 @@ export class DatabaseManager {
       this.db.exec(
         "CREATE INDEX IF NOT EXISTS idx_tasks_comparison_session ON tasks(comparison_session_id)",
       );
+    } catch {
+      // Index already exists
+    }
+    try {
+      this.db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)");
     } catch {
       // Index already exists
     }
@@ -3108,6 +3126,125 @@ export class DatabaseManager {
       `);
     } catch {
       // Table already exists
+    }
+
+    // Unified orchestration graph persistence
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS orchestration_graph_runs (
+          id TEXT PRIMARY KEY,
+          root_task_id TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          max_parallel INTEGER NOT NULL DEFAULT 1,
+          metadata TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          completed_at INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_runs_root
+          ON orchestration_graph_runs(root_task_id);
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_runs_status
+          ON orchestration_graph_runs(status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS orchestration_graph_nodes (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES orchestration_graph_runs(id) ON DELETE CASCADE,
+          node_key TEXT NOT NULL,
+          title TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          dispatch_target TEXT NOT NULL,
+          worker_role TEXT,
+          parent_task_id TEXT,
+          assigned_agent_role_id TEXT,
+          capability_hint TEXT,
+          acp_agent_id TEXT,
+          agent_config TEXT,
+          task_id TEXT,
+          remote_task_id TEXT,
+          public_handle TEXT,
+          summary TEXT,
+          output TEXT,
+          error TEXT,
+          team_run_id TEXT,
+          team_item_id TEXT,
+          workflow_phase_id TEXT,
+          acp_task_id TEXT,
+          metadata TEXT,
+          verification_verdict TEXT,
+          verification_report TEXT,
+          semantic_summary TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          started_at INTEGER,
+          completed_at INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_nodes_run
+          ON orchestration_graph_nodes(run_id);
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_nodes_status
+          ON orchestration_graph_nodes(run_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_nodes_handle
+          ON orchestration_graph_nodes(public_handle);
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_nodes_task
+          ON orchestration_graph_nodes(task_id);
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_nodes_remote_task
+          ON orchestration_graph_nodes(remote_task_id);
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_nodes_team_item
+          ON orchestration_graph_nodes(team_item_id);
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_nodes_acp_task
+          ON orchestration_graph_nodes(acp_task_id);
+
+        CREATE TABLE IF NOT EXISTS orchestration_graph_edges (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES orchestration_graph_runs(id) ON DELETE CASCADE,
+          from_node_id TEXT NOT NULL REFERENCES orchestration_graph_nodes(id) ON DELETE CASCADE,
+          to_node_id TEXT NOT NULL REFERENCES orchestration_graph_nodes(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_edges_run
+          ON orchestration_graph_edges(run_id);
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_edges_to
+          ON orchestration_graph_edges(run_id, to_node_id);
+
+        CREATE TABLE IF NOT EXISTS orchestration_graph_node_events (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES orchestration_graph_runs(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL REFERENCES orchestration_graph_nodes(id) ON DELETE CASCADE,
+          event_type TEXT NOT NULL,
+          payload TEXT,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_node_events_node
+          ON orchestration_graph_node_events(node_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_orchestration_graph_node_events_run
+          ON orchestration_graph_node_events(run_id, created_at DESC);
+      `);
+    } catch {
+      // Tables already exist
+    }
+
+    // Migration: add worker-role and verifier metadata to orchestration graph nodes
+    for (const statement of [
+      "ALTER TABLE orchestration_graph_nodes ADD COLUMN worker_role TEXT",
+      "ALTER TABLE orchestration_graph_nodes ADD COLUMN verification_verdict TEXT",
+      "ALTER TABLE orchestration_graph_nodes ADD COLUMN verification_report TEXT",
+      "ALTER TABLE orchestration_graph_nodes ADD COLUMN semantic_summary TEXT",
+    ]) {
+      try {
+        this.db.exec(statement);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/duplicate column name|already exists/i.test(msg)) {
+          continue;
+        }
+        console.error("[DatabaseManager] Migration failed:", statement, msg);
+      }
     }
 
     // Memory tier promotion: adds tier and reference tracking to memories

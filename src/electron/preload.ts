@@ -324,6 +324,7 @@ const IPC_CHANNELS = {
   TASK_PAUSE: "task:pause",
   TASK_RESUME: "task:resume",
   TASK_CONTINUE: "task:continue",
+  TASK_FORK_SESSION: "task:forkSession",
   TASK_RENAME: "task:rename",
   TASK_DELETE: "task:delete",
   DOCUMENT_OPEN_EDITOR_SESSION: "document:openEditorSession",
@@ -2740,6 +2741,12 @@ contextBridge.exposeInMainWorld("electronAPI", {
   pauseTask: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_PAUSE, id),
   resumeTask: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_RESUME, id),
   continueTask: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.TASK_CONTINUE, id),
+  forkTaskSession: (data: {
+    taskId: string;
+    prompt?: string;
+    branchLabel?: string;
+    fromEventId?: string;
+  }) => ipcRenderer.invoke(IPC_CHANNELS.TASK_FORK_SESSION, data),
   sendStdin: (taskId: string, input: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.TASK_SEND_STDIN, { taskId, input }),
   killCommand: (taskId: string, force?: boolean) =>
@@ -4594,6 +4601,12 @@ export interface ElectronAPI {
   pauseTask: (id: string) => Promise<void>;
   resumeTask: (id: string) => Promise<void>;
   continueTask: (id: string) => Promise<void>;
+  forkTaskSession: (data: {
+    taskId: string;
+    prompt?: string;
+    branchLabel?: string;
+    fromEventId?: string;
+  }) => Promise<Any>;
   sendStdin: (taskId: string, input: string) => Promise<boolean>;
   killCommand: (taskId: string, force?: boolean) => Promise<boolean>;
   renameTask: (id: string, title: string) => Promise<void>;

@@ -13,6 +13,7 @@ import {
   TOOL_GROUPS,
   ToolGroupName,
   WorkspacePathAliasPolicy,
+  WorkerRoleKind,
 } from "../../../shared/types";
 import { AgentDaemon } from "../daemon";
 import { FileTools } from "./file-tools";
@@ -53,7 +54,7 @@ import { GitTools } from "./git-tools";
 import { MemoryTools } from "./memory-tools";
 import { ChannelRepository } from "../../database/repositories";
 import { readFilesByPatterns } from "./read-files";
-import { LLMTool } from "../llm/types";
+import type { LLMTool } from "../llm/types";
 import { SearchProviderFactory } from "../search";
 import { MCPClientManager } from "../../mcp/client/MCPClientManager";
 import { MCPSettingsManager } from "../../mcp/settings";
@@ -112,6 +113,21 @@ import {
 import { writeKitFileWithSnapshot } from "../../context/kit-revisions";
 import { getACPRegistry } from "../../acp";
 import { RemoteAgentInvoker } from "../../acp/remote-invoker";
+import { withRuntimeToolMetadataList, getDefaultRuntimeToolMetadata } from "./runtime-tool-definition";
+import { ToolHandlerRegistry } from "../runtime/tool-handler-registry";
+import {
+  createStaticRuntimeToolSchedulerSpecResolver,
+  resolveRuntimeToolSchedulerSpec,
+  type RuntimeToolSchedulerSpec,
+} from "../runtime/runtime-tool-scheduler-spec";
+import {
+  composeToolMiddleware,
+  type ToolExecutionContext,
+  type ToolExecutionHandler,
+  type ToolExecutionMiddleware,
+} from "../runtime/tool-middleware";
+import { evaluateToolPolicyPipeline } from "../runtime/ToolPolicyPipeline";
+import { ToolSearchService } from "../runtime/ToolSearchService";
 
 function sanitizeFilename(raw: string, maxLen = 120): string {
   const base = path.basename(String(raw || "").trim() || "artifact");
@@ -481,6 +497,8 @@ export class ToolRegistry {
   private cachedToolDefinitionsKey: string | null = null;
   private cachedToolDefinitions: LLMTool[] | null = null;
   private toolDescriptionsCache = new Map<string, string>();
+  private readonly handlerRegistry = new ToolHandlerRegistry();
+  private readonly executionMiddlewares: ToolExecutionMiddleware[];
 
   constructor(
     private workspace: Workspace,
@@ -542,6 +560,8 @@ export class ToolRegistry {
     }
     this.gatewayContext = gatewayContext;
     this.applyToolRestrictions(toolRestrictions);
+    this.executionMiddlewares = this.buildExecutionMiddlewares();
+    this.registerRuntimeHandlers();
   }
 
   private applyToolRestrictions(restrictions?: string[]): void {
@@ -1305,10 +1325,690 @@ export class ToolRegistry {
       return 0;
     });
 
-    this.validateToolSemanticsInvariant(sortedTools);
+    const toolsWithRuntime = withRuntimeToolMetadataList(sortedTools);
+    this.validateToolSemanticsInvariant(toolsWithRuntime);
     this.cachedToolDefinitionsKey = cacheKey;
-    this.cachedToolDefinitions = sortedTools.slice();
-    return sortedTools.slice();
+    this.cachedToolDefinitions = toolsWithRuntime.slice();
+    return toolsWithRuntime.slice();
+  }
+
+  getRuntimeMetadata(toolName: string) {
+    return (
+      this.getTools().find((tool) => tool.name === toolName)?.runtime ||
+      getDefaultRuntimeToolMetadata(toolName)
+    );
+  }
+
+  getSchedulerSpec(toolName: string, input: Any): RuntimeToolSchedulerSpec {
+    const runtime = this.getRuntimeMetadata(toolName);
+    const override = this.handlerRegistry.resolveSchedulerSpec(toolName, input);
+    return resolveRuntimeToolSchedulerSpec(
+      {
+        toolName,
+        input,
+        runtime,
+      },
+      override,
+    );
+  }
+
+  getDeferredTools(): LLMTool[] {
+    return this.getTools().filter((tool) => tool.runtime?.deferLoad && !tool.runtime?.alwaysExpose);
+  }
+
+  searchDeferredTools(query: string, limit = 8): {
+    query: string;
+    matches: Array<{ name: string; description: string; score: number }>;
+  } {
+    const searchService = new ToolSearchService(this.getDeferredTools());
+    return {
+      query,
+      matches: searchService.search(query, limit),
+    };
+  }
+
+  private buildExecutionMiddlewares(): ToolExecutionMiddleware[] {
+    const policyMiddleware: ToolExecutionMiddleware = async (context, next) => {
+      const runtime = this.getRuntimeMetadata(context.request.name);
+      const pipeline = await evaluateToolPolicyPipeline({
+        workspace: this.workspace,
+        toolName: context.request.name,
+        toolInput: context.request.input,
+        gatewayContext: this.gatewayContext,
+        policyContext: context.request.runtime?.toolPolicyContext as Any,
+        approvalRequired: runtime.approvalKind !== "none" && runtime.approvalKind !== "workspace_policy"
+          ? false
+          : false,
+      });
+
+      if (pipeline.decision === "deny") {
+        const reason = pipeline.reason ? `: ${pipeline.reason}` : "";
+        throw Object.assign(new Error(`Tool "${context.request.name}" blocked by policy${reason}`), {
+          policyTrace: pipeline.trace,
+        });
+      }
+
+      if (pipeline.decision === "require_approval") {
+        const requester = (this.daemon as Any)?.requestApproval;
+        if (typeof requester !== "function") {
+          throw Object.assign(
+            new Error(
+              `Tool "${context.request.name}" requires approval, but approval system is unavailable in this context`,
+            ),
+            { policyTrace: pipeline.trace },
+          );
+        }
+        const approved = await requester.call(
+          this.daemon,
+          this.taskId,
+          "external_service",
+          `Approve tool call: ${context.request.name}`,
+          {
+            tool: context.request.name,
+            params: context.request.input ?? null,
+            reason: pipeline.reason || null,
+          },
+        );
+        if (approved !== true) {
+          throw Object.assign(new Error(`Tool "${context.request.name}" approval denied`), {
+            policyTrace: pipeline.trace,
+          });
+        }
+      }
+
+      const result = await next(context);
+      return {
+        result,
+        policyTrace: pipeline.trace,
+      };
+    };
+
+    return [policyMiddleware];
+  }
+
+  private executeWithRegisteredHandler(name: string, input: Any): Promise<Any> {
+    const handler = composeToolMiddleware(
+      (context: ToolExecutionContext) => this.handlerRegistry.execute(name, context),
+      this.executionMiddlewares,
+    );
+    return handler({
+      request: {
+        name,
+        input,
+      },
+    });
+  }
+
+  private registerRuntimeHandlers(): void {
+    const register = (
+      name: string,
+      handler: ToolExecutionHandler,
+      schedulerSpecResolver?: ReturnType<typeof createStaticRuntimeToolSchedulerSpecResolver>,
+    ) => {
+      this.handlerRegistry.register(name, handler, schedulerSpecResolver);
+    };
+    const registerPredicate = (
+      matches: (name: string) => boolean,
+      handler: ToolExecutionHandler,
+      schedulerSpecResolver?: ReturnType<typeof createStaticRuntimeToolSchedulerSpecResolver>,
+    ) => {
+      this.handlerRegistry.registerPredicate(matches, handler, schedulerSpecResolver);
+    };
+
+    const exclusiveSchedulerSpec = createStaticRuntimeToolSchedulerSpecResolver({
+      concurrencyClass: "exclusive",
+      readOnly: false,
+      idempotent: false,
+    });
+    const serialSchedulerSpec = createStaticRuntimeToolSchedulerSpecResolver({
+      concurrencyClass: "serial_only",
+      idempotent: false,
+    });
+    const readParallelSchedulerSpec = createStaticRuntimeToolSchedulerSpecResolver({
+      concurrencyClass: "read_parallel",
+      readOnly: true,
+      idempotent: true,
+    });
+
+    register(
+      "read_file",
+      async ({ request }) =>
+        this.fileTools.readFile(request.input.path, {
+          startChar: request.input.startChar,
+          maxChars: request.input.maxChars,
+        }),
+      readParallelSchedulerSpec,
+    );
+    register(
+      "read_files",
+      async ({ request }) =>
+        readFilesByPatterns(request.input, {
+          globTools: this.globTools,
+          fileTools: this.fileTools,
+        }),
+      readParallelSchedulerSpec,
+    );
+    register(
+      "write_file",
+      async ({ request }) =>
+        this.fileTools.writeFile(request.input.path, request.input.content),
+      exclusiveSchedulerSpec,
+    );
+    register(
+      "copy_file",
+      async ({ request }) =>
+        this.fileTools.copyFile(request.input.sourcePath, request.input.destPath),
+      exclusiveSchedulerSpec,
+    );
+    register("list_directory", async ({ request }) => this.fileTools.listDirectory(request.input.path), readParallelSchedulerSpec);
+    register(
+      "list_directory_with_sizes",
+      async ({ request }) =>
+        this.fileTools.listDirectoryWithSizes(request.input.path),
+      readParallelSchedulerSpec,
+    );
+    register("get_file_info", async ({ request }) => this.fileTools.getFileInfo(request.input.path), readParallelSchedulerSpec);
+    register(
+      "rename_file",
+      async ({ request }) =>
+        this.fileTools.renameFile(request.input.oldPath, request.input.newPath),
+      exclusiveSchedulerSpec,
+    );
+    register("delete_file", async ({ request }) => this.fileTools.deleteFile(request.input.path), exclusiveSchedulerSpec);
+    register("create_directory", async ({ request }) => this.fileTools.createDirectory(request.input.path), exclusiveSchedulerSpec);
+    register(
+      "search_files",
+      async ({ request }) =>
+        this.fileTools.searchFiles(request.input.query, request.input.path),
+      readParallelSchedulerSpec,
+    );
+    register("create_spreadsheet", async ({ request }) => this.skillTools.createSpreadsheet(request.input));
+    register("create_document", async ({ request }) => this.skillTools.createDocument(request.input));
+    register("edit_document", async ({ request }) => this.skillTools.editDocument(request.input));
+    register("edit_pdf_region", async ({ request }) => this.skillTools.editPdfRegion(request.input));
+    register("create_presentation", async ({ request }) => this.skillTools.createPresentation(request.input));
+    register("organize_folder", async ({ request }) => this.skillTools.organizeFolder(request.input));
+    register("skill_list", async ({ request }) => this.executeSkillList(request.input));
+    register("skill_get", async ({ request }) => this.executeSkillGet(request.input));
+    register("skill_create", async ({ request }) => this.executeSkillCreate(request.input));
+    register("skill_duplicate", async ({ request }) => this.executeSkillDuplicate(request.input));
+    register("skill_update", async ({ request }) => this.executeSkillUpdate(request.input));
+    register("skill_delete", async ({ request }) => this.executeSkillDelete(request.input));
+    register("skill_proposal", async ({ request }) => this.executeSkillProposal(request.input));
+    register("glob", async ({ request }) => this.globTools.glob(request.input), readParallelSchedulerSpec);
+    register("grep", async ({ request }) => this.grepTools.grep(request.input), readParallelSchedulerSpec);
+    register("edit_file", async ({ request }) => this.editTools.editFile(request.input), exclusiveSchedulerSpec);
+    register("count_text", async ({ request }) => this.textTools.countText(request.input));
+    register("text_metrics", async ({ request }) => this.textTools.textMetrics(request.input));
+    register("monty_run", async ({ request }) => this.montyTools.montyRun(request.input));
+    register("monty_list_transforms", async ({ request }) => this.montyTools.listTransforms(request.input));
+    register("monty_run_transform", async ({ request }) => this.montyTools.runTransform(request.input));
+    register("monty_transform_file", async ({ request }) => this.montyTools.transformFile(request.input));
+    register("extract_json", async ({ request }) => this.montyTools.extractJson(request.input));
+    register("web_fetch", async ({ request }) => {
+      const result = await this.webFetchTools.webFetch(request.input);
+      if (this.citationTracker) {
+        this.citationTracker.addFromFetch(request.input.url, request.input.url);
+      }
+      return result;
+    }, readParallelSchedulerSpec);
+    register("http_request", async ({ request }) => this.webFetchTools.httpRequest(request.input), readParallelSchedulerSpec);
+    register("web_search", async ({ request }) => {
+      const result = await this.searchTools.webSearch(request.input);
+      if (this.citationTracker && result && typeof result === "object") {
+        this.citationTracker.addFromSearch((result as Any).results || []);
+      }
+      return result;
+    }, readParallelSchedulerSpec);
+    register("tool_search", async ({ request }) =>
+      this.searchDeferredTools(request.input?.query || "", request.input?.limit),
+    );
+    registerPredicate(
+      (name) => BrowserTools.isBrowserTool(name),
+      async ({ request }) => this.browserTools.executeTool(request.name, request.input),
+      serialSchedulerSpec,
+    );
+    registerPredicate(
+      (name) => name.startsWith("qa_"),
+      async ({ request }) => this.qaTools.execute(request.name, request.input),
+      serialSchedulerSpec,
+    );
+    register("x_action", async ({ request }) => this.xTools.executeAction(request.input));
+    register("notion_action", async ({ request }) => this.notionTools.executeAction(request.input));
+    register("box_action", async ({ request }) => this.boxTools.executeAction(request.input));
+    register("onedrive_action", async ({ request }) => this.oneDriveTools.executeAction(request.input));
+    register("google_drive_action", async ({ request }) =>
+      this.googleDriveTools.executeAction(request.input),
+    );
+    register("gmail_action", async ({ request }) => this.gmailTools.executeAction(request.input));
+    register("mailbox_action", async ({ request }) => {
+      if (!this.mailboxTools) {
+        throw new Error("Mailbox tools unavailable (database not accessible)");
+      }
+      return await this.mailboxTools.executeAction(request.input);
+    });
+    register("calendar_action", async ({ request }) =>
+      this.googleCalendarTools.executeAction(request.input),
+    );
+    register("apple_calendar_action", async ({ request }) =>
+      this.appleCalendarTools.executeAction(request.input),
+    );
+    register("apple_reminders_action", async ({ request }) =>
+      this.appleRemindersTools.executeAction(request.input),
+    );
+    register("dropbox_action", async ({ request }) => this.dropboxTools.executeAction(request.input));
+    register("sharepoint_action", async ({ request }) =>
+      this.sharePointTools.executeAction(request.input),
+    );
+    register("voice_call", async ({ request }) => this.voiceCallTools.executeAction(request.input));
+    register(
+      "run_command",
+      async ({ request }) =>
+        this.shellTools.runCommand(request.input.command, request.input),
+      exclusiveSchedulerSpec,
+    );
+    register("git_status", async () => this.gitTools.gitStatus());
+    register("git_diff", async ({ request }) => this.gitTools.gitDiff(request.input));
+    register("git_commit", async ({ request }) => this.gitTools.gitCommit(request.input));
+    register("git_merge_to_base", async () => this.gitTools.gitMergeToBase());
+    register("system_info", async () => this.systemTools.getSystemInfo());
+    register("search_memories", async ({ request }) => this.systemTools.searchMemories(request.input));
+    register("memory_save", async ({ request }) => this.memoryTools.save(request.input));
+    register("scratchpad_write", async ({ request }) => this.scratchpadTools.write(request.input));
+    register("scratchpad_read", async ({ request }) => this.scratchpadTools.read(request.input));
+    register("read_clipboard", async () => this.systemTools.readClipboard());
+    register("write_clipboard", async ({ request }) => this.systemTools.writeClipboard(request.input.text));
+    register("take_screenshot", async ({ request }) => this.systemTools.takeScreenshot(request.input));
+    register("open_application", async ({ request }) => this.systemTools.openApplication(request.input.appName));
+    register("open_url", async ({ request }) => this.systemTools.openUrl(request.input.url));
+    register("open_path", async ({ request }) => this.systemTools.openPath(request.input.path));
+    register("show_in_folder", async ({ request }) => this.systemTools.showInFolder(request.input.path));
+    register("get_env", async ({ request }) => this.systemTools.getEnvVariable(request.input.name));
+    register("get_app_paths", async () => this.systemTools.getAppPaths());
+    register("run_applescript", async ({ request }) => this.systemTools.runAppleScript(request.input.script), exclusiveSchedulerSpec);
+    register("generate_image", async ({ request }) => this.imageTools.generateImage(request.input));
+    register("generate_video", async ({ request }) => this.videoTools.generateVideo(request.input));
+    register("get_video_generation_job", async ({ request }) =>
+      this.videoTools.getVideoGenerationJob(request.input),
+    );
+    register("cancel_video_generation_job", async ({ request }) =>
+      this.videoTools.cancelVideoGenerationJob(request.input),
+    );
+    register("analyze_image", async ({ request }) => this.visionTools.analyzeImage(request.input));
+    register("read_pdf_visual", async ({ request }) => this.visionTools.readPdfVisual(request.input));
+    register("computer_screenshot", async () => this.computerUseTools.takeScreenshot(), serialSchedulerSpec);
+    register(
+      "computer_move_mouse",
+      async ({ request }) =>
+        this.computerUseTools.moveMouse(request.input.x, request.input.y),
+      serialSchedulerSpec,
+    );
+    register("computer_click", async ({ request }) => {
+      if (request.input.action === "drag") {
+        return await this.computerUseTools.drag(
+          request.input.x,
+          request.input.y,
+          request.input.toX,
+          request.input.toY,
+        );
+      }
+      if (request.input.action === "scroll") {
+        return await this.computerUseTools.scroll(
+          request.input.x,
+          request.input.y,
+          request.input.direction,
+          request.input.amount,
+        );
+      }
+      return await this.computerUseTools.click(
+        request.input.x,
+        request.input.y,
+        request.input.button,
+        request.input.clickType,
+      );
+    }, serialSchedulerSpec);
+    register("computer_type", async ({ request }) => this.computerUseTools.typeText(request.input.text), serialSchedulerSpec);
+    register("computer_key", async ({ request }) => this.computerUseTools.pressKeys(request.input.keys), serialSchedulerSpec);
+    register("batch_image_process", async ({ request }) => this.batchImageTools.batchProcess(request.input));
+    register("schedule_task", async ({ request }) => this.cronTools.executeAction(request.input));
+    registerPredicate(
+      (name) =>
+        name.startsWith("cloud_sandbox_") ||
+        name.startsWith("domain_") ||
+        name.startsWith("wallet_") ||
+        name.startsWith("x402_") ||
+        name === "infra_status",
+      async ({ request }) => this.infraTools.executeTool(request.name, request.input),
+      serialSchedulerSpec,
+    );
+    register("canvas_create", async ({ request }) => this.canvasTools.createCanvas(request.input.title), serialSchedulerSpec);
+    register("canvas_push", async ({ request }) => {
+      const canvasInput = request.input || {};
+      const rawSessionId = canvasInput.session_id;
+      const inferredSessionId = rawSessionId || this.getLatestCanvasSessionId();
+      if (!canvasInput.session_id && inferredSessionId) {
+        canvasInput.session_id = inferredSessionId;
+      }
+      try {
+        return await this.canvasTools.pushContent(
+          canvasInput.session_id,
+          canvasInput.content,
+          canvasInput.filename,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown canvas push error";
+        this.daemon.logEvent(this.taskId, "tool_error", {
+          tool: "canvas_push",
+          error: message,
+          softFailure: true,
+        });
+        return {
+          success: true,
+          warning:
+            "Canvas preview could not be refreshed right now, but execution can continue without it.",
+          fallback: true,
+        };
+      }
+    }, serialSchedulerSpec);
+    register(
+      "canvas_open_url",
+      async ({ request }) =>
+        this.canvasTools.openUrl(
+          request.input.session_id,
+          request.input.url,
+          request.input.show,
+        ),
+      serialSchedulerSpec,
+    );
+    register("canvas_show", async ({ request }) => this.canvasTools.showCanvas(request.input.session_id), serialSchedulerSpec);
+    register("canvas_hide", async ({ request }) => this.canvasTools.hideCanvas(request.input.session_id), serialSchedulerSpec);
+    register("canvas_close", async ({ request }) => this.canvasTools.closeCanvas(request.input.session_id), serialSchedulerSpec);
+    register(
+      "canvas_eval",
+      async ({ request }) =>
+        this.canvasTools.evalScript(request.input.session_id, request.input.script),
+      serialSchedulerSpec,
+    );
+    register(
+      "canvas_snapshot",
+      async ({ request }) =>
+        this.canvasTools.takeSnapshot(request.input.session_id),
+      serialSchedulerSpec,
+    );
+    register("canvas_list", async () => this.canvasTools.listSessions(), serialSchedulerSpec);
+    register(
+      "canvas_checkpoint",
+      async ({ request }) =>
+        this.canvasTools.saveCheckpoint(request.input.session_id, request.input.label),
+      serialSchedulerSpec,
+    );
+    register(
+      "canvas_restore",
+      async ({ request }) =>
+        this.canvasTools.restoreCheckpoint(
+          request.input.session_id,
+          request.input.checkpoint_id,
+        ),
+      serialSchedulerSpec,
+    );
+    register(
+      "canvas_checkpoints",
+      async ({ request }) =>
+        this.canvasTools.listCheckpoints(request.input.session_id),
+      serialSchedulerSpec,
+    );
+    register("visual_open_annotator", async ({ request }) =>
+      this.visualTools.openImageAnnotator(request.input),
+    );
+    register("visual_update_annotator", async ({ request }) =>
+      this.visualTools.updateImageAnnotator(request.input),
+    );
+    register("channel_list_chats", async ({ request }) => {
+      if (!this.channelTools) {
+        throw new Error("Channel history tools unavailable (database not accessible)");
+      }
+      return await this.channelTools.listChats(request.input);
+    });
+    register("channel_history", async ({ request }) => {
+      if (!this.channelTools) {
+        throw new Error("Channel history tools unavailable (database not accessible)");
+      }
+      return await this.channelTools.channelHistory(request.input);
+    });
+    register("channel_fetch_discord_messages", async ({ request }) => {
+      if (!this.channelTools) {
+        throw new Error("Channel tools unavailable (database not accessible)");
+      }
+      return await this.channelTools.fetchDiscordMessages(request.input);
+    });
+    register("channel_download_discord_attachment", async ({ request }) => {
+      if (!this.channelTools) {
+        throw new Error("Channel tools unavailable (database not accessible)");
+      }
+      return await this.channelTools.downloadDiscordAttachment(request.input);
+    });
+    register("email_imap_unread", async ({ request }) => {
+      if (!this.emailImapTools) {
+        throw new Error("Email IMAP tools unavailable (database not accessible)");
+      }
+      return await this.emailImapTools.listUnread(request.input);
+    });
+    register("list_agent_roles", async () => this.mentionTools.listAgentRoles());
+    register("mention_agent", async ({ request }) => this.mentionTools.mentionAgent(request.input));
+    register("get_pending_mentions", async () => this.mentionTools.getPendingMentions());
+    register("acknowledge_mention", async ({ request }) =>
+      this.mentionTools.acknowledgeMention(request.input.mentionId),
+    );
+    register("complete_mention", async ({ request }) =>
+      this.mentionTools.completeMention(request.input.mentionId),
+    );
+    register("generate_document", async ({ request }) => this.documentTools.generateDocument(request.input));
+    register("generate_presentation", async ({ request }) =>
+      this.documentTools.generatePresentation(request.input),
+    );
+    register("generate_spreadsheet", async ({ request }) =>
+      this.documentTools.generateSpreadsheet(request.input),
+    );
+    register("generate_epub", async ({ request }) => this.documentTools.generateEPUB(request.input));
+    register("generate_landing_page", async ({ request }) =>
+      this.documentTools.generateLandingPage(request.input),
+    );
+    register("generate_narration_audio", async ({ request }) =>
+      this.documentTools.generateNarrationAudio(request.input),
+    );
+    register("create_diagram", async ({ request }) => {
+      const title = typeof request.input?.title === "string" ? request.input.title : "Diagram";
+      const diagram = typeof request.input?.diagram === "string" ? request.input.diagram : "";
+      if (!diagram.trim()) {
+        return { success: false, error: "diagram is required and must be non-empty Mermaid syntax" };
+      }
+      try {
+        ToolRegistry.initializeMermaidValidation();
+        await mermaid.parse(diagram, { suppressErrors: false });
+      } catch (error) {
+        return {
+          success: false,
+          error:
+            error instanceof Error && error.message
+              ? `invalid Mermaid syntax: ${error.message}`
+              : "invalid Mermaid syntax",
+        };
+      }
+      this.daemon.logEvent(this.taskId, "diagram_created", { title, diagram });
+      return { success: true, message: `Diagram "${title}" is now displayed in the UI.` };
+    });
+    register("task_history", async ({ request }) => this.taskHistory(request.input));
+    register("task_events", async ({ request }) => this.taskEvents(request.input));
+    register("request_user_input", async ({ request }) => this.requestUserInput(request.input));
+    register("revise_plan", async ({ request }) => {
+      if (!this.planRevisionHandler) {
+        throw new Error("Plan revision not available at this time");
+      }
+      const newSteps = request.input.newSteps || [];
+      const reason = request.input.reason || "No reason provided";
+      const clearRemaining = request.input.clearRemaining || false;
+      this.planRevisionHandler(newSteps, reason, clearRemaining);
+      let message = "";
+      if (clearRemaining) {
+        message = "Plan revised: Cleared remaining steps. ";
+      }
+      if (newSteps.length > 0) {
+        message += `${newSteps.length} new steps added. `;
+      }
+      message += `Reason: ${reason}`;
+      return {
+        success: true,
+        message: message.trim(),
+        clearedRemaining: clearRemaining,
+      };
+    });
+    register("switch_workspace", async ({ request }) => this.switchWorkspace(request.input));
+    register("list_projects", async ({ request }) => {
+      const projects = this.daemon.listProjects({
+        includeArchived: request.input?.include_archived === true,
+      });
+      return {
+        projects: projects.map((project: Any) => ({
+          id: project.id,
+          name: project.name,
+          status: project.status,
+          description: project.description ?? null,
+        })),
+      };
+    });
+    register("list_workspaces", async () => {
+      const workspaces = this.daemon.listWorkspaces();
+      return {
+        workspaces: workspaces.map((workspace: Any) => ({
+          id: workspace.id,
+          name: workspace.name,
+          path: workspace.path,
+        })),
+      };
+    });
+    register("link_project_workspace", async ({ request }) => {
+      const { project_id, workspace_id, is_primary } = request.input as {
+        project_id: string;
+        workspace_id: string;
+        is_primary?: boolean;
+      };
+      if (!project_id || !workspace_id) {
+        return { success: false, error: "project_id and workspace_id are required" };
+      }
+      try {
+        const link = this.daemon.linkProjectWorkspace({
+          projectId: project_id,
+          workspaceId: workspace_id,
+          isPrimary: is_primary,
+        });
+        return {
+          success: true,
+          link: {
+            id: link.id,
+            projectId: link.projectId,
+            workspaceId: link.workspaceId,
+            isPrimary: link.isPrimary,
+          },
+        };
+      } catch (err: Any) {
+        return { success: false, error: err?.message ?? "Failed to link workspace" };
+      }
+    });
+    register("list_goals", async ({ request }) => {
+      const goals = this.daemon.listGoals(request.input?.company_id);
+      return {
+        goals: goals.map((goal: Any) => ({
+          id: goal.id,
+          title: goal.title,
+          status: goal.status,
+          description: goal.description ?? null,
+        })),
+      };
+    });
+    register("list_issues", async ({ request }) => {
+      const issues = this.daemon.listIssues({
+        projectId: request.input?.project_id,
+        goalId: request.input?.goal_id,
+        status: Array.isArray(request.input?.status) ? request.input.status : undefined,
+        limit: typeof request.input?.limit === "number" ? request.input.limit : undefined,
+      });
+      return {
+        issues: issues.map((issue: Any) => ({
+          id: issue.id,
+          title: issue.title,
+          status: issue.status,
+          priority: issue.priority,
+          projectId: issue.projectId ?? null,
+          goalId: issue.goalId ?? null,
+          description: issue.description ?? null,
+        })),
+      };
+    });
+    register("create_issue", async ({ request }) => {
+      if (!request.input?.title) {
+        return { success: false, error: "title is required" };
+      }
+      try {
+        const issue = this.daemon.createIssue({
+          title: request.input.title,
+          description: request.input.description,
+          projectId: request.input.project_id,
+          goalId: request.input.goal_id,
+          status: request.input.status,
+          priority: typeof request.input.priority === "number" ? request.input.priority : 2,
+        });
+        return {
+          success: true,
+          issue: {
+            id: issue.id,
+            title: issue.title,
+            status: issue.status,
+            priority: issue.priority,
+            projectId: issue.projectId ?? null,
+            goalId: issue.goalId ?? null,
+          },
+        };
+      } catch (err: Any) {
+        return { success: false, error: err?.message ?? "Failed to create issue" };
+      }
+    });
+    register("integration_setup", async ({ request }) => this.integrationSetup(request.input));
+    register("set_personality", async ({ request }) => this.setPersonality(request.input));
+    register("set_agent_name", async ({ request }) => this.setAgentName(request.input));
+    register("set_user_name", async ({ request }) => this.setUserName(request.input));
+    register("set_persona", async ({ request }) => this.setPersona(request.input));
+    register("set_response_style", async ({ request }) => this.setResponseStyle(request.input));
+    register("set_quirks", async ({ request }) => this.setQuirks(request.input));
+    register("add_behavioral_rule", async ({ request }) => this.addBehavioralRule(request.input));
+    register("set_expertise", async ({ request }) => this.setExpertise(request.input));
+    register("set_vibes", async ({ request }) => this.setVibes(request.input));
+    register("update_lore", async ({ request }) => this.updateLore(request.input));
+    register("manage_heartbeat", async ({ request }) => this.manageHeartbeat(request.input));
+    register("execute_code", async ({ request }) => this.executeCode(request.input));
+    register("parse_document", async ({ request }) => this.parseDocument(request.input));
+    register("acp_discover", async ({ request }) => this.acpDiscover(request.input));
+    register("use_skill", async ({ request }) => this.executeUseSkill(request.input));
+    register("spawn_agent", async ({ request }) => this.spawnAgent(request.input), exclusiveSchedulerSpec);
+    register("wait_for_agent", async ({ request }) => this.waitForAgent(request.input));
+    register("orchestrate_agents", async ({ request }) => this.orchestrateAgents(request.input), exclusiveSchedulerSpec);
+    register("get_agent_status", async ({ request }) => this.getAgentStatus(request.input));
+    register("list_agents", async ({ request }) => this.listAgents(request.input));
+    register("send_agent_message", async ({ request }) => this.sendAgentMessage(request.input), exclusiveSchedulerSpec);
+    register("capture_agent_events", async ({ request }) => this.captureAgentEvents(request.input));
+    register("cancel_agent", async ({ request }) => this.cancelAgent(request.input), exclusiveSchedulerSpec);
+    register("pause_agent", async ({ request }) => this.pauseAgent(request.input), exclusiveSchedulerSpec);
+    register("resume_agent", async ({ request }) => this.resumeAgent(request.input), exclusiveSchedulerSpec);
+    registerPredicate((name) => KnowledgeGraphTools.isKnowledgeGraphTool(name), async ({ request }) =>
+      this.knowledgeGraphTools.executeTool(request.name, request.input),
+    );
+    registerPredicate(
+      (name) => {
+        const settings = MCPSettingsManager.loadSettings();
+        const prefix = settings.toolNamePrefix || "mcp_";
+        return name.startsWith(prefix);
+      },
+      async ({ request }) => this.tryExecuteMCPTool(request.name, request.input),
+    );
   }
 
   /**
@@ -2051,7 +2751,23 @@ ${skillDescriptions}`;
   /**
    * Execute a tool by name
    */
-  async executeTool(name: string, input: Any): Promise<Any> {
+  async executeToolWithRuntime(
+    name: string,
+    input: Any,
+    runtime?: Record<string, unknown>,
+  ): Promise<{ result: Any; policyTrace?: Any }> {
+    if (this.handlerRegistry.has(name)) {
+      return await this.executeWithRegisteredHandler(name, input);
+    }
+    const result = await this.executeTool(name, input, runtime);
+    return { result };
+  }
+
+  async executeTool(name: string, input: Any, _runtime?: Record<string, unknown>): Promise<Any> {
+    if (this.handlerRegistry.has(name)) {
+      const execution = await this.executeWithRegisteredHandler(name, input);
+      return execution?.result ?? execution;
+    }
     // Optional workspace-local policy hook (.cowork/policy/tools.monty).
     // Fail-open on policy script errors to avoid bricking tool execution.
     try {
@@ -3040,7 +3756,8 @@ ${skillDescriptions}`;
       return {
         success: false,
         error: `Skill '${skill_id}' is not available for this task`,
-        reason: "This skill requires specific keywords in the task prompt (e.g. the CLI agent name).",
+        reason:
+          "This skill requires a clear, explicit mention in the task prompt (for example naming the skill itself).",
       };
     }
 
@@ -3282,6 +3999,10 @@ ${skillDescriptions}`;
     }
 
     let normalized = source;
+    normalized = normalized.replace(
+      /\b(?:use|run|call|invoke|activate|apply|launch|start|enable)\s+(?:the\s+)?codex(?:-|\s+)?cli(?:\s+agent)?\s+skill\s+(?:to\s+|for\s+)?/gi,
+      "",
+    );
     normalized = normalized.replace(
       /\bby\s+spawning\s+a\s+child\s+agent\s+titled\s+["'][^"']+["']\s+and\s+have\s+it\b/gi,
       "and",
@@ -7507,11 +8228,12 @@ ${skillDescriptions}`;
     };
     message: string;
   }> {
-    const repo = new OrchestrationRepository(this.daemon.getDatabase());
     const requestedRunId = typeof input?.run_id === "string" ? input.run_id.trim() : "";
-    const run = requestedRunId ? repo.findById(requestedRunId) : repo.findByRootTaskId(this.taskId);
+    const snapshot = requestedRunId
+      ? this.daemon.getOrchestrationGraphSnapshot(requestedRunId)
+      : this.daemon.findLatestOrchestrationGraphByRootTask(this.taskId);
 
-    if (!run || run.rootTaskId !== this.taskId) {
+    if (!snapshot || snapshot.run.rootTaskId !== this.taskId) {
       return {
         success: false,
         message: requestedRunId
@@ -7520,10 +8242,13 @@ ${skillDescriptions}`;
       };
     }
 
-    const summary = run.tasks.reduce(
+    const summary = snapshot.nodes.reduce(
       (acc, task) => {
         acc.total += 1;
-        acc[task.status] += 1;
+        if (task.status === "pending") acc.pending += 1;
+        else if (task.status === "running" || task.status === "ready") acc.running += 1;
+        else if (task.status === "completed") acc.completed += 1;
+        else acc.failed += 1;
         return acc;
       },
       { total: 0, pending: 0, spawned: 0, running: 0, completed: 0, failed: 0 },
@@ -7532,27 +8257,31 @@ ${skillDescriptions}`;
     return {
       success: true,
       run: {
-        run_id: run.id,
-        root_task_id: run.rootTaskId,
-        workspace_id: run.workspaceId,
-        status: run.status,
-        created_at: run.createdAt,
-        completed_at: run.completedAt,
+        run_id: snapshot.run.id,
+        root_task_id: snapshot.run.rootTaskId,
+        workspace_id: snapshot.run.workspaceId,
+        status: snapshot.run.status,
+        created_at: snapshot.run.createdAt,
+        completed_at: snapshot.run.completedAt,
         summary,
-        tasks: run.tasks.map((task) => ({
+        tasks: snapshot.nodes.map((task) => ({
           id: task.id,
           title: task.title,
           status: task.status,
-          depends_on: task.dependsOn,
+          depends_on: snapshot.edges
+            .filter((edge) => edge.toNodeId === task.id)
+            .map((edge) => edge.fromNodeId),
           task_id: task.taskId,
-          output: task.output,
+          output: task.output || task.summary,
           error: task.error,
           capability_hint: task.capabilityHint,
           started_at: task.startedAt,
           completed_at: task.completedAt,
         })),
       },
-      message: `Loaded orchestration run ${run.id} (${summary.completed}/${summary.total} completed).`,
+      message:
+        `Loaded orchestration run ${snapshot.run.id} ` +
+        `(${summary.completed}/${summary.total} completed).`,
     };
   }
 
@@ -7659,6 +8388,127 @@ ${skillDescriptions}`;
     };
   }
 
+  private prepareSpawnAgentNode(input: {
+    prompt: string;
+    title?: string;
+    model_preference?: string;
+    capability_hint?: string;
+    acp_agent_id?: string;
+    personality?: string;
+    runtime?: SpawnAgentRuntimeMode;
+    runtime_agent?: SpawnAgentRuntimeAgent;
+    max_turns?: number;
+  }): {
+    taskTitle: string;
+    contractedPrompt: string;
+    agentConfig: AgentConfig;
+    dispatchTarget: "native_child_task" | "local_role" | "remote_acp" | "external_runtime";
+    assignedAgentRoleId?: string;
+    acpAgentId?: string;
+    workerRole: WorkerRoleKind;
+    extractionMode: boolean;
+    externalRuntime?: AgentConfig["externalRuntime"];
+  } {
+    const {
+      prompt,
+      title,
+      model_preference,
+      capability_hint,
+      acp_agent_id,
+      personality,
+      runtime,
+      runtime_agent,
+      max_turns = 20,
+    } = input;
+
+    const normalizedMaxTurns =
+      typeof max_turns === "number" && Number.isFinite(max_turns) ? Math.round(max_turns) : 20;
+
+    const phaseCEnabled = parseBooleanEnv("COWORK_GUARDRAIL_PHASE_C", true);
+    const modelPref =
+      typeof model_preference === "string" ? model_preference.trim().toLowerCase() : "";
+    const personalityPref = typeof personality === "string" ? personality.trim().toLowerCase() : "";
+    const capabilityRouted =
+      !model_preference && capability_hint
+        ? ModelCapabilityRegistry.selectForTask(String(capability_hint))
+        : undefined;
+    const modelKey =
+      modelPref === "same"
+        ? undefined
+        : (resolveModelPreferenceToModelKey(model_preference ?? capabilityRouted) ?? "haiku-4-5");
+    const personalityId: PersonalityId | undefined =
+      personalityPref === "same"
+        ? undefined
+        : (resolvePersonalityPreference(personality) ?? "concise");
+    const extractionMode = phaseCEnabled && isExtractionLikePrompt(prompt);
+    const contractedPrompt = extractionMode ? applyExtractionOutputContract(prompt) : prompt;
+
+    const agentConfig: AgentConfig = {
+      maxTurns: normalizedMaxTurns,
+      retainMemory: false,
+    };
+    const externalRuntime = resolveSpawnAgentExternalRuntime({
+      runtime,
+      runtime_agent,
+      title,
+      prompt: contractedPrompt,
+      autonomousMode: agentConfig.autonomousMode === true,
+      defaultCodexRuntimeMode: BuiltinToolsSettingsManager.getCodexRuntimeMode(),
+    });
+    if (externalRuntime) {
+      agentConfig.externalRuntime = externalRuntime;
+    }
+
+    if (phaseCEnabled) {
+      const scopedRestrictions = new Set<string>(SUB_AGENT_DEFAULT_DENIED_TOOLS);
+      agentConfig.toolRestrictions = Array.from(scopedRestrictions);
+    }
+
+    if (extractionMode) {
+      agentConfig.allowedTools = [...EXTRACTION_SUB_AGENT_ALLOWED_TOOLS];
+    }
+
+    if (modelKey) agentConfig.modelKey = modelKey;
+    if (personalityId) agentConfig.personalityId = personalityId;
+
+    const taskTitle =
+      title || `Sub-task: ${prompt.substring(0, 50)}${prompt.length > 50 ? "..." : ""}`;
+
+    let dispatchTarget: "native_child_task" | "local_role" | "remote_acp" | "external_runtime" =
+      externalRuntime ? "external_runtime" : "native_child_task";
+    let assignedAgentRoleId: string | undefined;
+    const acpAgentId =
+      typeof acp_agent_id === "string" && acp_agent_id.trim().length > 0
+        ? acp_agent_id.trim()
+        : undefined;
+    if (acpAgentId) {
+      const agent = getACPRegistry().getAgent(acpAgentId, this.daemon.getActiveAgentRoles());
+      if (!agent) {
+        throw new Error(`ACP agent ${acpAgentId} not found`);
+      }
+      if (agent.origin === "remote" && agent.endpoint) {
+        dispatchTarget = "remote_acp";
+      } else if (agent.origin === "local" && agent.localRoleId) {
+        dispatchTarget = "local_role";
+        assignedAgentRoleId = agent.localRoleId;
+      } else {
+        throw new Error(`ACP agent ${acpAgentId} is not invokable`);
+      }
+    }
+
+    return {
+      taskTitle,
+      contractedPrompt,
+      agentConfig,
+      dispatchTarget,
+      assignedAgentRoleId,
+      acpAgentId,
+      workerRole: "implementer",
+      extractionMode,
+      externalRuntime,
+    };
+  }
+
   private async spawnAgent(input: {
     prompt: string;
     title?: string;
@@ -7680,10 +8530,7 @@ ${skillDescriptions}`;
   }> {
     const {
       prompt,
-      title,
       model_preference,
-      capability_hint,
-      acp_agent_id,
       personality,
       runtime,
       runtime_agent,
@@ -7743,169 +8590,116 @@ ${skillDescriptions}`;
       };
     }
 
-    // Resolve model and personality
-    const modelPref =
-      typeof model_preference === "string" ? model_preference.trim().toLowerCase() : "";
-    const personalityPref = typeof personality === "string" ? personality.trim().toLowerCase() : "";
-
-    // Default behavior for tool-spawned sub-agents: cheaper model + concise personality,
-    // unless the caller explicitly asks to inherit ("same").
-    // If capability_hint is provided and no explicit model_preference, use registry routing.
-    const capabilityRouted =
-      !model_preference && capability_hint
-        ? ModelCapabilityRegistry.selectForTask(String(capability_hint))
-        : undefined;
-    const modelKey =
-      modelPref === "same"
-        ? undefined
-        : (resolveModelPreferenceToModelKey(model_preference ?? capabilityRouted) ?? "haiku-4-5");
-    const personalityId: PersonalityId | undefined =
-      personalityPref === "same"
-        ? undefined
-        : (resolvePersonalityPreference(personality) ?? "concise");
-
-    const extractionMode = phaseCEnabled && isExtractionLikePrompt(prompt);
-    const contractedPrompt = extractionMode ? applyExtractionOutputContract(prompt) : prompt;
-
-    // Build agent config
-    const agentConfig: AgentConfig = {
-      maxTurns: normalizedMaxTurns,
-      retainMemory: false, // Sub-agents don't retain memory
-    };
-    const externalRuntime = resolveSpawnAgentExternalRuntime({
-      runtime,
-      runtime_agent,
-      title,
-      prompt: contractedPrompt,
-      autonomousMode: agentConfig.autonomousMode === true,
-      defaultCodexRuntimeMode: BuiltinToolsSettingsManager.getCodexRuntimeMode(),
-    });
-    if (externalRuntime) {
-      agentConfig.externalRuntime = externalRuntime;
-    }
-
-    if (phaseCEnabled) {
-      const scopedRestrictions = new Set<string>(SUB_AGENT_DEFAULT_DENIED_TOOLS);
-      agentConfig.toolRestrictions = Array.from(scopedRestrictions);
-    }
-
-    if (extractionMode) {
-      agentConfig.allowedTools = [...EXTRACTION_SUB_AGENT_ALLOWED_TOOLS];
-    }
-
-    if (modelKey) agentConfig.modelKey = modelKey;
-    if (personalityId) agentConfig.personalityId = personalityId;
-
-    // Generate title if not provided
-    const taskTitle =
-      title || `Sub-task: ${prompt.substring(0, 50)}${prompt.length > 50 ? "..." : ""}`;
-
-    if (typeof acp_agent_id === "string" && acp_agent_id.trim()) {
-      const acpAgentId = acp_agent_id.trim();
-      const agent = getACPRegistry().getAgent(acpAgentId, this.daemon.getActiveAgentRoles());
-      if (!agent) {
-        return {
-          success: false,
-          message: `ACP agent ${acpAgentId} not found`,
-          error: "ACP_AGENT_NOT_FOUND",
-        };
-      }
-      if (agent.origin === "remote" && agent.endpoint) {
-        const invoker = new RemoteAgentInvoker();
-        try {
-          const remoteResult = await invoker.invoke(agent, {
-            assigneeId: acpAgentId,
-            title: taskTitle,
-            prompt: contractedPrompt,
-            workspaceId: this.workspace.id,
-          });
-          if (wait && remoteResult.remoteTaskId) {
-            const waited = await this.waitForRemoteAgent(
-              invoker,
-              acpAgentId,
-              remoteResult.remoteTaskId,
-              300,
-            );
-            return {
-              success: waited.success,
-              task_id: remoteResult.remoteTaskId,
-              title: taskTitle,
-              message: waited.message,
-              result: waited.resultSummary,
-              error: waited.error,
-            };
-          }
-          return {
-            success: remoteResult.status !== "failed" && remoteResult.status !== "cancelled",
-            task_id: remoteResult.remoteTaskId,
-            title: taskTitle,
-            message:
-              remoteResult.status === "completed"
-                ? "Remote ACP agent completed successfully."
-                : `Remote ACP agent invoked via ${agent.name}.`,
-            result: remoteResult.result,
-            error: remoteResult.error,
-          };
-        } catch (error: Any) {
-          return {
-            success: false,
-            title: taskTitle,
-            message: `Failed to invoke remote ACP agent: ${error.message}`,
-            error: error.message,
-          };
-        }
-      }
-      if (agent.origin === "local" && agent.localRoleId) {
-        // Fall through to the local child-task path below.
-      }
+    let prepared: ReturnType<ToolRegistry["prepareSpawnAgentNode"]>;
+    try {
+      prepared = this.prepareSpawnAgentNode({
+        prompt,
+        title: input.title,
+        model_preference,
+        capability_hint: input.capability_hint,
+        acp_agent_id: input.acp_agent_id,
+        personality,
+        runtime,
+        runtime_agent,
+        max_turns,
+      });
+    } catch (error: Any) {
+      const message = error?.message || String(error);
+      return {
+        success: false,
+        message,
+        error:
+          /not found/i.test(message) && typeof input.acp_agent_id === "string"
+            ? "ACP_AGENT_NOT_FOUND"
+            : message,
+      };
     }
 
     // Log spawn attempt
     this.daemon.logEvent(this.taskId, "agent_spawned", {
-      childTaskTitle: taskTitle,
+      childTaskTitle: prepared.taskTitle,
       modelPreference: model_preference,
       personality: personality,
-      runtime: runtime || (externalRuntime ? "acpx" : "native"),
-      runtimeAgent: externalRuntime?.agent,
+      runtime: runtime || (prepared.externalRuntime ? "acpx" : "native"),
+      runtimeAgent: prepared.externalRuntime?.agent,
       maxTurns: normalizedMaxTurns,
       parentDepth: currentDepth,
-      extractionMode,
+      extractionMode: prepared.extractionMode,
       fanout: {
         activeBeforeSpawn: activeChildTasks.length,
         activeLimit: activeSubAgentLimit,
         phaseCEnabled,
       },
-      allowedToolsCount: Array.isArray(agentConfig.allowedTools)
-        ? agentConfig.allowedTools.length
+      allowedToolsCount: Array.isArray(prepared.agentConfig.allowedTools)
+        ? prepared.agentConfig.allowedTools.length
         : 0,
     });
 
     try {
-      // Create the child task via daemon
-      const childTask = await this.daemon.createChildTask({
-        title: taskTitle,
-        prompt: contractedPrompt,
-        workspaceId: this.workspace.id,
-        parentTaskId: this.taskId,
-        agentType: "sub",
-        ...(typeof acp_agent_id === "string" && acp_agent_id.startsWith("local:")
-          ? { assignedAgentRoleId: getACPRegistry().getAgent(acp_agent_id, this.daemon.getActiveAgentRoles())?.localRoleId }
-          : {}),
-        agentConfig,
-        depth: currentDepth + 1,
-      });
-
-      console.log(
-        `[ToolRegistry] Spawned child agent: ${childTask.id} (depth: ${currentDepth + 1})`,
-      );
+      let handle: string;
+      if (typeof this.daemon.createOrchestrationGraphRun === "function") {
+        const snapshot = await this.daemon.createOrchestrationGraphRun({
+          rootTaskId: this.taskId,
+          workspaceId: this.workspace.id,
+          kind: "delegation",
+          maxParallel: 1,
+          metadata: { createdBy: "spawn_agent" },
+          nodes: [
+            {
+              key: "spawn-1",
+              title: prepared.taskTitle,
+              prompt: prepared.contractedPrompt,
+              kind: "child_task",
+              dispatchTarget: prepared.dispatchTarget,
+              parentTaskId: this.taskId,
+              assignedAgentRoleId: prepared.assignedAgentRoleId,
+              acpAgentId: prepared.acpAgentId,
+              workerRole: prepared.workerRole,
+              agentConfig: prepared.agentConfig,
+              metadata: { depth: currentDepth + 1 },
+            },
+          ],
+        });
+        const node = snapshot.nodes[0];
+        if (!node.publicHandle && node.status !== "completed") {
+          return {
+            success: false,
+            title: prepared.taskTitle,
+            message: node.error || "Failed to dispatch delegated agent",
+            error: node.error || "DISPATCH_FAILED",
+          };
+        }
+        handle = node.publicHandle || node.taskId || node.remoteTaskId || node.id;
+      } else {
+        if (prepared.dispatchTarget === "remote_acp") {
+          return {
+            success: false,
+            title: prepared.taskTitle,
+            message: "Remote ACP delegation requires orchestration graph support",
+            error: "GRAPH_ENGINE_REQUIRED",
+          };
+        }
+        const childTask = await this.daemon.createChildTask({
+          title: prepared.taskTitle,
+          prompt: prepared.contractedPrompt,
+          workspaceId: this.workspace.id,
+          parentTaskId: this.taskId,
+          agentType: "sub",
+          agentConfig: prepared.agentConfig,
+          depth: currentDepth + 1,
+          assignedAgentRoleId: prepared.assignedAgentRoleId,
+          workerRole: prepared.workerRole,
+        });
+        handle = childTask.id;
+      }
 
       // If wait=true, wait for completion
       if (wait) {
-        const result = await this.waitForAgentInternal(childTask.id, 300);
+        const result = await this.waitForAgentInternal(handle, 300);
         return {
           success: result.success,
-          task_id: childTask.id,
-          title: taskTitle,
+          task_id: handle,
+          title: prepared.taskTitle,
           message: result.message,
           result: result.resultSummary,
           error: result.error,
@@ -7914,9 +8708,9 @@ ${skillDescriptions}`;
 
       return {
         success: true,
-        task_id: childTask.id,
-        title: taskTitle,
-        message: `Sub-agent spawned successfully. Task ID: ${childTask.id}. Use wait_for_agent or get_agent_status to check progress.`,
+        task_id: handle,
+        title: prepared.taskTitle,
+        message: `Sub-agent spawned successfully. Task ID: ${handle}. Use wait_for_agent or get_agent_status to check progress.`,
       };
     } catch (error: Any) {
       console.error(`[ToolRegistry] Failed to spawn agent:`, error);
@@ -7945,6 +8739,27 @@ ${skillDescriptions}`;
     resultSummary?: string;
     error?: string;
   }> {
+    const delegatedNode =
+      typeof this.daemon.findDelegatedNode === "function"
+        ? this.daemon.findDelegatedNode(this.taskId, taskId)
+        : undefined;
+    if (delegatedNode) {
+      const result = await this.daemon.waitForDelegatedNode(this.taskId, taskId, timeoutSeconds);
+      if (result.node) {
+        this.daemon.logEvent(
+          this.taskId,
+          result.success ? "agent_completed" : "agent_failed",
+          {
+            childTaskId: result.node.taskId || result.node.remoteTaskId || taskId,
+            childStatus: result.status,
+            resultSummary: result.resultSummary,
+            error: result.error,
+          },
+        );
+      }
+      return result;
+    }
+
     const resolved = await this.resolveDescendantTask(taskId);
     if (!resolved.ok) {
       return {
@@ -8072,37 +8887,76 @@ ${skillDescriptions}`;
       throw new Error("orchestrate_agents supports at most 8 tasks");
     }
 
-    // Spawn all agents
-    const spawnResults: Array<{ task_id: string; title: string }> = [];
-    for (const task of tasks) {
-      const result = await this.spawnAgent({
-        prompt: task.prompt,
-        title: task.title,
-        model_preference: task.model_preference,
-        capability_hint: task.capability_hint,
-        acp_agent_id: task.acp_agent_id,
-        wait: false,
-        max_turns: 20,
-      });
-      if (result.success && result.task_id) {
-        spawnResults.push({
-          task_id: result.task_id,
-          title: result.title || task.title || "Sub-task",
-        });
-      }
-    }
-
-    if (spawnResults.length === 0) {
+    const phaseCEnabled = parseBooleanEnv("COWORK_GUARDRAIL_PHASE_C", true);
+    const activeSubAgentLimit = parseBoundedIntEnv(
+      "COWORK_SUBAGENT_MAX_ACTIVE_PER_PARENT",
+      DEFAULT_ACTIVE_SUB_AGENT_LIMIT,
+      1,
+      20,
+    );
+    const activeChildTasks = (await this.daemon.getChildTasks(this.taskId)).filter((task) =>
+      ACTIVE_CHILD_AGENT_STATUSES.has(task.status),
+    );
+    if (phaseCEnabled && activeChildTasks.length + tasks.length > activeSubAgentLimit) {
       return {
         success: false,
         results: [],
         completed: 0,
         failed: 0,
-        message: "Failed to spawn any agents",
+        message:
+          `Cannot orchestrate agents: active child-agent limit would be exceeded ` +
+          `(${activeChildTasks.length + tasks.length}/${activeSubAgentLimit}).`,
       };
     }
 
-    // Wait for all agents with shared deadline
+    const currentDepth = await this.getCurrentTaskDepth();
+    if (currentDepth >= 3) {
+      return {
+        success: false,
+        results: [],
+        completed: 0,
+        failed: 0,
+        message: "Cannot orchestrate agents: maximum nesting depth (3) reached.",
+      };
+    }
+
+    const preparedNodes = tasks.map((task, index) => {
+      const prepared = this.prepareSpawnAgentNode({
+        prompt: task.prompt,
+        title: task.title,
+        model_preference: task.model_preference,
+        capability_hint: task.capability_hint,
+        acp_agent_id: task.acp_agent_id,
+        max_turns: 20,
+      });
+      return {
+        key: `batch-${index + 1}`,
+        title: prepared.taskTitle,
+        node: {
+          key: `batch-${index + 1}`,
+          title: prepared.taskTitle,
+          prompt: prepared.contractedPrompt,
+          kind: "child_task" as const,
+          dispatchTarget: prepared.dispatchTarget,
+          parentTaskId: this.taskId,
+          assignedAgentRoleId: prepared.assignedAgentRoleId,
+          acpAgentId: prepared.acpAgentId,
+          workerRole: prepared.workerRole,
+          agentConfig: prepared.agentConfig,
+          metadata: { depth: currentDepth + 1 },
+        },
+      };
+    });
+
+    const snapshot = await this.daemon.createOrchestrationGraphRun({
+      rootTaskId: this.taskId,
+      workspaceId: this.workspace.id,
+      kind: "delegation",
+      maxParallel: tasks.length,
+      metadata: { createdBy: "orchestrate_agents" },
+      nodes: preparedNodes.map((entry) => entry.node),
+    });
+
     const deadline = Date.now() + timeout_seconds * 1000;
     const results: Array<{
       task_id: string;
@@ -8112,12 +8966,13 @@ ${skillDescriptions}`;
       error?: string;
     }> = [];
 
-    for (const spawn of spawnResults) {
+    for (const node of snapshot.nodes) {
+      const handle = node.publicHandle || node.taskId || node.remoteTaskId || node.id;
       const remainingSeconds = Math.max(1, Math.round((deadline - Date.now()) / 1000));
-      const result = await this.waitForAgentInternal(spawn.task_id, remainingSeconds);
+      const result = await this.daemon.waitForDelegatedNode(this.taskId, handle, remainingSeconds);
       results.push({
-        task_id: spawn.task_id,
-        title: spawn.title,
+        task_id: handle,
+        title: node.title,
         status: result.status,
         result_summary: result.resultSummary,
         error: result.error,
@@ -8156,6 +9011,17 @@ ${skillDescriptions}`;
     const { task_ids } = input;
 
     let tasks: Task[] = [];
+    const delegatedNodes: Array<{
+      task_id: string;
+      title: string;
+      status: string;
+      agent_type: string;
+      model_key?: string;
+      result_summary?: string;
+      error?: string;
+      created_at: number;
+      completed_at?: number;
+    }> = [];
     const rejected: Array<{
       task_id: string;
       status: string;
@@ -8165,6 +9031,21 @@ ${skillDescriptions}`;
     if (task_ids && task_ids.length > 0) {
       // Get specific tasks (restricted to descendants only)
       for (const id of task_ids) {
+        const delegatedNode = this.daemon.findDelegatedNode(this.taskId, id);
+        if (delegatedNode && !delegatedNode.taskId) {
+          delegatedNodes.push({
+            task_id: delegatedNode.publicHandle || delegatedNode.remoteTaskId || delegatedNode.id,
+            title: delegatedNode.title,
+            status: delegatedNode.status,
+            agent_type: delegatedNode.dispatchTarget,
+            model_key: delegatedNode.agentConfig?.modelKey,
+            result_summary: delegatedNode.summary || delegatedNode.output,
+            error: delegatedNode.error,
+            created_at: delegatedNode.createdAt,
+            completed_at: delegatedNode.completedAt,
+          });
+          continue;
+        }
         const resolved = await this.resolveDescendantTask(id);
         if (!resolved.ok) {
           const taskId = resolved.taskId || (typeof id === "string" ? id : String(id));
@@ -8180,6 +9061,23 @@ ${skillDescriptions}`;
     } else {
       // Get all child tasks of current task
       tasks = await this.daemon.getChildTasks(this.taskId);
+      const graphRuns = this.daemon.listOrchestrationGraphsByRootTask(this.taskId);
+      for (const run of graphRuns) {
+        for (const node of run.nodes) {
+          if (!node.publicHandle || node.taskId) continue;
+          delegatedNodes.push({
+            task_id: node.publicHandle,
+            title: node.title,
+            status: node.status,
+            agent_type: node.dispatchTarget,
+            model_key: node.agentConfig?.modelKey,
+            result_summary: node.summary || node.output,
+            error: node.error,
+            created_at: node.createdAt,
+            completed_at: node.completedAt,
+          });
+        }
+      }
     }
 
     const agents = [
@@ -8194,6 +9092,7 @@ ${skillDescriptions}`;
         created_at: task.createdAt,
         completed_at: task.completedAt,
       })),
+      ...delegatedNodes,
       ...rejected.map((item) => ({
         task_id: item.task_id,
         title: "(unavailable)",
@@ -8206,7 +9105,9 @@ ${skillDescriptions}`;
 
     return {
       agents,
-      message: `Found ${tasks.length} agent(s)${rejected.length > 0 ? ` (${rejected.length} rejected)` : ""}`,
+      message:
+        `Found ${tasks.length + delegatedNodes.length} agent(s)` +
+        `${rejected.length > 0 ? ` (${rejected.length} rejected)` : ""}`,
     };
   }
 
@@ -8237,6 +9138,10 @@ ${skillDescriptions}`;
 
     // Get all child tasks
     let tasks = await this.daemon.getChildTasks(this.taskId);
+    const graphRuns = this.daemon.listOrchestrationGraphsByRootTask(this.taskId);
+    let delegatedNodes = graphRuns.flatMap((run) =>
+      run.nodes.filter((node) => node.publicHandle && !node.taskId),
+    );
 
     // Apply filter
     if (status_filter !== "all") {
@@ -8256,28 +9161,61 @@ ${skillDescriptions}`;
             return true;
         }
       });
+      delegatedNodes = delegatedNodes.filter((node) => {
+        switch (status_filter) {
+          case "running":
+            return ["pending", "ready", "running"].includes(node.status);
+          case "completed":
+            return node.status === "completed";
+          case "failed":
+            return ["failed", "cancelled", "blocked"].includes(node.status);
+          default:
+            return true;
+        }
+      });
     }
 
     // Calculate summary from all child tasks (not filtered)
     const allTasks = await this.daemon.getChildTasks(this.taskId);
+    const allDelegatedNodes = graphRuns.flatMap((run) =>
+      run.nodes.filter((node) => node.publicHandle && !node.taskId),
+    );
     const summary = {
-      total: allTasks.length,
+      total: allTasks.length + allDelegatedNodes.length,
       running: allTasks.filter((t) =>
         ["pending", "queued", "planning", "executing", "paused"].includes(t.status),
-      ).length,
-      completed: allTasks.filter((t) => t.status === "completed").length,
-      failed: allTasks.filter((t) => ["failed", "cancelled"].includes(t.status)).length,
+      ).length + allDelegatedNodes.filter((node) => ["pending", "ready", "running"].includes(node.status)).length,
+      completed:
+        allTasks.filter((t) => t.status === "completed").length +
+        allDelegatedNodes.filter((node) => node.status === "completed").length,
+      failed:
+        allTasks.filter((t) => ["failed", "cancelled"].includes(t.status)).length +
+        allDelegatedNodes.filter((node) => ["failed", "cancelled", "blocked"].includes(node.status)).length,
     };
 
-    const agents = tasks.map((task) => ({
-      task_id: task.id,
-      title: task.title,
-      status: task.status,
-      agent_type: task.agentType || "main",
-      model_key: task.agentConfig?.modelKey,
-      depth: task.depth ?? 0,
-      created_at: task.createdAt,
-    }));
+    const agents = [
+      ...tasks.map((task) => ({
+        task_id: task.id,
+        title: task.title,
+        status: task.status,
+        agent_type: task.agentType || "main",
+        model_key: task.agentConfig?.modelKey,
+        depth: task.depth ?? 0,
+        created_at: task.createdAt,
+      })),
+      ...delegatedNodes.map((node) => ({
+        task_id: node.publicHandle || node.id,
+        title: node.title,
+        status: node.status,
+        agent_type: node.dispatchTarget,
+        model_key: node.agentConfig?.modelKey,
+        depth:
+          typeof node.metadata?.depth === "number" && Number.isFinite(node.metadata.depth)
+            ? Math.max(0, Math.floor(node.metadata.depth))
+            : 0,
+        created_at: node.createdAt,
+      })),
+    ];
 
     return {
       agents,
@@ -8495,6 +9433,24 @@ ${skillDescriptions}`;
     message: string;
     error?: string;
   }> {
+    const delegatedNode =
+      typeof input?.task_id === "string"
+        ? this.daemon.findDelegatedNode?.(this.taskId, input.task_id)
+        : undefined;
+    if (delegatedNode && !delegatedNode.taskId) {
+      const handle = delegatedNode.publicHandle || delegatedNode.remoteTaskId || delegatedNode.id;
+      if (["completed", "failed", "cancelled", "blocked"].includes(delegatedNode.status)) {
+        return {
+          success: false,
+          task_id: handle,
+          message: `Task is already ${delegatedNode.status}`,
+          error: "TASK_ALREADY_FINISHED",
+        };
+      }
+      await this.daemon.cancelDelegatedNode?.(this.taskId, handle);
+      return { success: true, task_id: handle, message: "Task cancelled" };
+    }
+
     const resolved = await this.resolveDescendantTask(input?.task_id);
     if (!resolved.ok) {
       return {
@@ -8651,6 +9607,26 @@ ${skillDescriptions}`;
    */
   private getMetaToolDefinitions(): LLMTool[] {
     return [
+      {
+        name: "tool_search",
+        description:
+          "Search deferred or specialized tools by intent. Use this when the exact tool name is unknown, " +
+          "when a needed capability is not currently exposed, or when you suspect a long-tail integration/tool exists.",
+        input_schema: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description: "Natural-language description of the capability or task you need.",
+            },
+            limit: {
+              type: "number",
+              description: "Maximum number of matches to return. Default: 8.",
+            },
+          },
+          required: ["query"],
+        },
+      },
       {
         name: "revise_plan",
         description:

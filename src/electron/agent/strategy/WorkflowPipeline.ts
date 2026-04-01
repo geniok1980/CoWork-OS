@@ -7,6 +7,7 @@
 
 import { EventEmitter } from "events";
 import { resolveModelPreferenceToModelKey } from "../../../shared/agent-preferences";
+import type { WorkerRoleKind } from "../../../shared/types";
 import {
   WorkflowPhase,
   workflowPhaseTypeToCapability,
@@ -19,6 +20,7 @@ export interface WorkflowPipelineDeps {
     workspaceId: string;
     parentTaskId: string;
     agentConfig?: Any;
+    workerRole?: WorkerRoleKind;
   }) => Promise<{ id: string }>;
   getTaskStatus: (taskId: string) => Promise<{ status: string; resultSummary?: string }>;
   log?: (...args: unknown[]) => void;
@@ -125,6 +127,7 @@ export class WorkflowPipeline extends EventEmitter {
             workflowPhaseId: phase.id,
             workflowPhaseType: phase.phaseType,
           },
+          workerRole: this.resolveWorkerRoleForPhase(phase.phaseType),
         });
 
         phase.taskId = child.id;
@@ -193,6 +196,15 @@ export class WorkflowPipeline extends EventEmitter {
     }
 
     return { status: "timeout" };
+  }
+
+  private resolveWorkerRoleForPhase(
+    phaseType: WorkflowPhase["phaseType"],
+  ): WorkerRoleKind {
+    if (phaseType === "research" || phaseType === "analyze") {
+      return "researcher";
+    }
+    return "implementer";
   }
 }
 

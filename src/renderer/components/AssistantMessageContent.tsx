@@ -2,6 +2,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { InlineVideoPreview } from "./InlineVideoPreview";
 import { normalizeInlineLists, unwrapMarkdownCodeBlocks } from "../utils/markdown-inline-lists";
+import { sanitizeToolCallTextFromAssistant } from "../../shared/tool-call-text-sanitizer";
 
 type AssistantMessageContentProps = {
   message: string;
@@ -87,7 +88,8 @@ function parseVideoDirective(line: string): MessageSegment {
 }
 
 export function parseAssistantMessageSegments(message: string): MessageSegment[] {
-  const lines = String(message || "").split("\n");
+  const sanitized = sanitizeToolCallTextFromAssistant(String(message || "")).text;
+  const lines = sanitized.split("\n");
   const segments: MessageSegment[] = [];
   let markdownBuffer: string[] = [];
 

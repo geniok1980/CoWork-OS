@@ -27,8 +27,8 @@ hero:
       text: Skills Runtime
       link: /skills-runtime-model
     - theme: alt
-      text: Release Notes 0.5.21
-      link: /release-notes-0.5.21
+      text: Release Notes 0.5.22
+      link: /release-notes-0.5.22
     - theme: alt
       text: Heartbeat v3
       link: /heartbeat-v3
@@ -58,8 +58,8 @@ features:
     details: Visible learning progression after each task, unified recall across tasks/messages/files, persistent shell sessions, and live provider routing/fallback status.
   - title: Runtime Orchestration
     details: SessionRuntime owns task-session state, session checklists, resume snapshots, and task projection while the turn kernel handles each active turn; metadata-driven tool scheduler, graph-backed delegation, typed worker roles, semantic batch summaries, and terminal-state-safe resume logic keep execution, verification, and follow-up work coherent.
-  - title: Latest Release 0.5.21
-    details: Includes the shared turn kernel, metadata-driven tool scheduling, graph-backed delegation, typed worker roles, session checklists, verification/runtime summaries, debug tooling, inbox/mailbox updates, and a much richer completion surface.
+  - title: Latest Release 0.5.22
+    details: Includes the session runtime ownership split, layered permission engine, workspace rule management, session checklists, metadata-driven tool scheduling, graph-backed delegation, typed worker roles, and refreshed completion and UI surfaces.
   - title: Inbox Agent
     details: Local-first email triage with AI classification, action-needed and commitment queues, draft review, and resync-safe background sync.
   - title: Managed Devices

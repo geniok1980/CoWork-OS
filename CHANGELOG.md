@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22] - 2026-04-03
+
 ### Added
+- **Release notes for 0.5.22**: see [Release Notes 0.5.22](docs/release-notes-0.5.22.md).
 - **Session checklist primitive**: execution-style tasks can create a session-local ordered checklist via `task_list_create`, maintain it with `task_list_update`, inspect it with `task_list_list`, and surface it read-only in the task UI with verification nudge state.
 - **Shared turn/runtime kernel**: task steps, follow-ups, subagents, and verification now run through a canonical `TurnKernel` instead of duplicated loop bodies.
 - **Metadata-driven tool scheduling**: concurrency-safe reads batch together automatically, scoped writes serialize, and post-batch result ordering stays stable through a single `ToolScheduler`.

@@ -40,6 +40,7 @@ import {
   ApprovalRequest,
   InputRequest,
   InputRequestResponse,
+  ApprovalResponseAction,
   isTempWorkspaceId,
   ImageAttachment,
   MultiLlmConfig,
@@ -68,6 +69,7 @@ import {
 import { isSpawnSubagentsPrompt } from "../shared/spawn-intent-detection";
 import { isSynthesisChildTask } from "../shared/synthesis-agent-detection";
 import { isAutomatedTaskLike } from "../shared/automated-task-detection";
+import { resolveTaskStatusUpdateFromEvent } from "../shared/task-status";
 
 // Helper to get effective theme based on system preference
 function getEffectiveTheme(themeMode: ThemeMode): "light" | "dark" {
@@ -186,6 +188,77 @@ function mergeUniqueTaskEvents(existing: TaskEvent[], incoming: TaskEvent[]): Ta
 
 function getApprovalToastId(approvalId: string): string {
   return `${APPROVAL_TOAST_PREFIX}${approvalId}`;
+}
+
+function describeApprovalPersistence(
+  payload: Any,
+  approved: boolean,
+): { type: "info" | "warning"; message: string } | null {
+  const persistence = payload?.persistence as
+    | {
+        effect?: "allow" | "deny";
+        destination?: "session" | "workspace" | "profile";
+        dbPersisted?: boolean;
+        manifestPersisted?: boolean;
+        manifestError?: string;
+      }
+    | undefined;
+  const action = typeof payload?.action === "string" ? (payload.action as ApprovalResponseAction) : "";
+
+  if (!persistence && !action) return null;
+
+  const actionLabel = action
+    ? action.replace(/_/g, " ")
+    : approved
+      ? "allow once"
+      : "deny once";
+  if (!persistence?.destination) {
+    return {
+      type: approved ? "info" : "warning",
+      message: `Approval handled with ${actionLabel}.`,
+    };
+  }
+
+  if (persistence.destination === "workspace") {
+    if (persistence.manifestPersisted === false && persistence.manifestError) {
+      return {
+        type: "warning",
+        message:
+          `Workspace rule saved to the local database, but manifest write failed: ${persistence.manifestError}`,
+      };
+    }
+    if (persistence.dbPersisted && persistence.manifestPersisted) {
+      return {
+        type: "info",
+        message: "Workspace rule saved to both the local database and the workspace manifest.",
+      };
+    }
+    if (persistence.dbPersisted) {
+      return {
+        type: "warning",
+        message: "Workspace rule saved to the local database.",
+      };
+    }
+  }
+
+  if (persistence.destination === "profile") {
+    return {
+      type: "info",
+      message: `Profile rule saved for future approvals via ${actionLabel}.`,
+    };
+  }
+
+  if (persistence.destination === "session") {
+    return {
+      type: "info",
+      message: `Session-only rule saved via ${actionLabel}.`,
+    };
+  }
+
+  return {
+    type: approved ? "info" : "warning",
+    message: `Approval handled with ${actionLabel}.`,
+  };
 }
 
 function pickFirstPendingGenericApproval(
@@ -823,12 +896,17 @@ export function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  const handleApprovalResponse = async (approvalId: string, approved: boolean) => {
+  const handleApprovalResponse = async (
+    approvalId: string,
+    approved: boolean,
+    action?: ApprovalResponseAction,
+  ) => {
     let handled = false;
     try {
       await window.electronAPI.respondToApproval({
         approvalId,
         approved,
+        action,
       });
       handled = true;
     } catch (error) {
@@ -1016,7 +1094,14 @@ export function App() {
           prev && prev.task.id === view.task.id
             ? {
                 ...prev,
-                task: { ...prev.task, status: newStatus as Task["status"] },
+                task: {
+                  ...prev.task,
+                  status:
+                    resolveTaskStatusUpdateFromEvent(
+                      prev.task,
+                      newStatus as Task["status"],
+                    ) ?? prev.task.status,
+                },
               }
             : prev,
         );
@@ -1092,9 +1177,11 @@ export function App() {
             if (isTerminalInputResolution && isTerminalTaskStatus(t.status)) {
               return t;
             }
+            const resolvedStatus =
+              resolveTaskStatusUpdateFromEvent(t, newStatus as Task["status"]) ?? t.status;
             return {
               ...t,
-              status: newStatus,
+              status: resolvedStatus,
               ...(shouldClearTerminalStatus
                 ? { terminalStatus: undefined, failureClass: undefined }
                 : eventTerminalStatus !== undefined
@@ -1137,6 +1224,23 @@ export function App() {
               ? pickFirstPendingGenericApproval(pendingApprovalsRef.current)
               : prev,
           );
+
+          const approvalFeedback = describeApprovalPersistence(
+            event.payload,
+            event.type === "approval_granted",
+          );
+          if (approvalFeedback) {
+            void window.electronAPI.addNotification({
+              type: approvalFeedback.type,
+              title:
+                event.type === "approval_granted"
+                  ? "Approval saved"
+                  : "Approval recorded",
+              message: approvalFeedback.message,
+              taskId: event.taskId,
+              workspaceId: tasksRef.current.find((t) => t.id === event.taskId)?.workspaceId,
+            });
+          }
         }
       }
 
@@ -2192,7 +2296,7 @@ export function App() {
     if (!selectedTaskId || remoteTaskView || !window.electronAPI?.getTask) return;
 
     const task = tasks.find((t) => t.id === selectedTaskId);
-    const hasPrompt = task && (task.prompt || task.userPrompt);
+    const hasPrompt = task && (task.rawPrompt || task.userPrompt || task.prompt);
     if (hasPrompt) return;
 
     let cancelled = false;
@@ -2969,8 +3073,13 @@ export function App() {
           ) : genericApproval ? (
             <GenericApprovalDialog
               approval={genericApproval}
-              onApprove={() => void handleApprovalResponse(genericApproval.id, true)}
-              onDeny={() => void handleApprovalResponse(genericApproval.id, false)}
+              onRespond={(action) =>
+                void handleApprovalResponse(
+                  genericApproval.id,
+                  action.startsWith("allow_"),
+                  action,
+                )
+              }
               onApproveAllSession={showApproveAllWarning}
             />
           ) : null}

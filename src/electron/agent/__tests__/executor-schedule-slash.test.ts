@@ -145,6 +145,9 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
       id: "task-2",
       title: "Slash command test",
       prompt,
+      rawPrompt: prompt,
+      userPrompt: prompt,
+      agentConfig: {},
       createdAt: Date.now() - 1000,
     };
 
@@ -171,22 +174,37 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     executor.lastAssistantOutput = null;
     executor.lastNonVerificationOutput = null;
     executor.taskCompleted = false;
+    executor.appliedSkills = [];
+    executor.taskContextNotes = [];
+    executor.emitEvent = vi.fn();
 
     return executor as TaskExecutor & {
       toolRegistry: { executeTool: ReturnType<typeof vi.fn> };
+      emitEvent: ReturnType<typeof vi.fn>;
     };
   }
 
   it("normalizes `/simplify` into deterministic use_skill execution", async () => {
+    const originalPrompt = "/simplify";
     const executor = createExecutor("/simplify", (name, input) => {
       expect(name).toBe("use_skill");
       expect(input).toEqual({
         skill_id: "simplify",
         parameters: {},
+        trigger: "slash",
       });
       return {
         success: true,
-        expanded_prompt: "Simplify prompt expanded",
+        content: "Simplify prompt expanded",
+        skill_application: {
+          skillId: "simplify",
+          skillName: "Simplify",
+          trigger: "slash",
+          parameters: {},
+          content: "Simplify prompt expanded",
+          reason: "Applied via /simplify",
+          appliedAt: Date.now(),
+        },
       };
     });
 
@@ -195,12 +213,23 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     );
 
     expect(handled).toBe(true);
-    expect(executor.task.prompt).toBe("Simplify prompt expanded");
+    expect(executor.task.prompt).toBe(originalPrompt);
+    expect(executor.appliedSkills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          skillId: "simplify",
+          trigger: "slash",
+          content: "Simplify prompt expanded",
+        }),
+      ]),
+    );
   });
 
   it("normalizes `/batch` with flags into deterministic use_skill execution", async () => {
+    const originalPrompt =
+      "/batch migrate docs to template --parallel 6 --domain writing --external confirm";
     const executor = createExecutor(
-      "/batch migrate docs to template --parallel 6 --domain writing --external confirm",
+      originalPrompt,
       (name, input) => {
         expect(name).toBe("use_skill");
         expect(input).toEqual({
@@ -211,10 +240,25 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
             domain: "writing",
             external: "confirm",
           },
+          trigger: "slash",
         });
         return {
           success: true,
-          expanded_prompt: "Batch prompt expanded",
+          content: "Batch prompt expanded",
+          skill_application: {
+            skillId: "batch",
+            skillName: "Batch",
+            trigger: "slash",
+            parameters: {
+              objective: "migrate docs to template",
+              parallel: 6,
+              domain: "writing",
+              external: "confirm",
+            },
+            content: "Batch prompt expanded",
+            reason: "Applied via /batch",
+            appliedAt: Date.now(),
+          },
         };
       },
     );
@@ -224,10 +268,19 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     );
 
     expect(handled).toBe(true);
-    expect(executor.task.prompt).toBe("Batch prompt expanded");
+    expect(executor.task.prompt).toBe(originalPrompt);
+    expect(executor.appliedSkills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          skillId: "batch",
+          trigger: "slash",
+        }),
+      ]),
+    );
   });
 
   it("enforces `/batch` external policy default to confirm when omitted", async () => {
+    const originalPrompt = "/batch migrate docs";
     const executor = createExecutor("/batch migrate docs", (name, input) => {
       expect(name).toBe("use_skill");
       expect(input).toEqual({
@@ -236,10 +289,23 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
           objective: "migrate docs",
           external: "confirm",
         },
+        trigger: "slash",
       });
       return {
         success: true,
-        expanded_prompt: "Batch prompt expanded",
+        content: "Batch prompt expanded",
+        skill_application: {
+          skillId: "batch",
+          skillName: "Batch",
+          trigger: "slash",
+          parameters: {
+            objective: "migrate docs",
+            external: "confirm",
+          },
+          content: "Batch prompt expanded",
+          reason: "Applied via /batch",
+          appliedAt: Date.now(),
+        },
       };
     });
 
@@ -248,7 +314,7 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     );
 
     expect(handled).toBe(true);
-    expect(executor.task.prompt).toBe("Batch prompt expanded");
+    expect(executor.task.prompt).toBe(originalPrompt);
   });
 
   it("rejects `/batch` without an objective", async () => {
@@ -270,10 +336,23 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
           objective: "migrate docs",
           external: "none",
         },
+        trigger: "slash",
       });
       return {
         success: true,
-        expanded_prompt: "Batch prompt expanded",
+        content: "Batch prompt expanded",
+        skill_application: {
+          skillId: "batch",
+          skillName: "Batch",
+          trigger: "slash",
+          parameters: {
+            objective: "migrate docs",
+            external: "none",
+          },
+          content: "Batch prompt expanded",
+          reason: "Applied via /batch",
+          appliedAt: Date.now(),
+        },
       };
     });
 
@@ -353,9 +432,19 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     const executor = createExecutor("Refactor this module then run /simplify", (name, input) => {
       expect(name).toBe("use_skill");
       expect(input.skill_id).toBe("simplify");
+      expect(input.trigger).toBe("slash");
       return {
         success: true,
-        expanded_prompt: "Expanded simplify workflow",
+        content: "Expanded simplify workflow",
+        skill_application: {
+          skillId: "simplify",
+          skillName: "Simplify",
+          trigger: "slash",
+          parameters: {},
+          content: "Expanded simplify workflow",
+          reason: "Applied via /simplify",
+          appliedAt: Date.now(),
+        },
       };
     });
 
@@ -364,7 +453,14 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     );
 
     expect(handled).toBe(true);
-    expect(executor.task.prompt).toContain("Refactor this module");
-    expect(executor.task.prompt).toContain("Expanded simplify workflow");
+    expect(executor.task.prompt).toBe("Refactor this module then run /simplify");
+    expect(executor.appliedSkills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          skillId: "simplify",
+          content: "Expanded simplify workflow",
+        }),
+      ]),
+    );
   });
 });

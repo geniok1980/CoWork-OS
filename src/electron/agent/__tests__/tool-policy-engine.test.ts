@@ -45,6 +45,21 @@ describe("tool-policy-engine request_user_input gating", () => {
     expect(decision.decision).toBe("allow");
   });
 
+  it("allows session checklist tools in execute mode and denies them in plan mode", () => {
+    const allowed = evaluateToolPolicy("task_list_create", {
+      executionMode: "execute",
+      taskDomain: "auto",
+    });
+    const denied = evaluateToolPolicy("task_list_list", {
+      executionMode: "plan",
+      taskDomain: "auto",
+    });
+
+    expect(allowed.decision).toBe("allow");
+    expect(denied.decision).toBe("deny");
+    expect(denied.reason).toContain("execute, verified, or debug mode");
+  });
+
   it("allows run_command in general domain when shell is enabled", () => {
     const decision = evaluateToolPolicy("run_command", {
       executionMode: "execute",

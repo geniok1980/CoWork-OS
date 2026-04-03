@@ -25,3 +25,21 @@ export function isVerificationStepDescription(description?: string | null): bool
 
   return false;
 }
+
+export function planHasVerificationStep(
+  plan?:
+    | {
+        steps?: Array<{
+          kind?: string;
+          description?: string | null;
+        }>;
+      }
+    | null,
+): boolean {
+  return Boolean(
+    plan?.steps?.some(
+      (step) =>
+        step?.kind === "verification" || isVerificationStepDescription(step?.description),
+    ),
+  );
+}

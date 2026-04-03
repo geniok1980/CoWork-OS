@@ -28,11 +28,14 @@ import {
   WorkspacePathAliasPolicy,
   TaskPathRootPolicy,
   GuardrailSettings,
+  PermissionMode,
   WebSearchMode,
   type LLMRoutingRuntimeState,
   type LLMRoutingReason,
   type LLMRoutingFallbackStep,
   type RuntimeToolMetadata,
+  type SkillApplication,
+  type SkillApplicationTrigger,
 } from "../../shared/types";
 import { resolveModelPreferenceToModelKey } from "../../shared/agent-preferences";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
@@ -58,6 +61,16 @@ import { DeferredToolCatalog } from "./runtime/DeferredToolCatalog";
 import { ToolSearchService } from "./runtime/ToolSearchService";
 import { createToolBatchSummaryGenerator } from "./runtime/ToolBatchSummaryGenerator";
 import { resolveDefaultRuntimeToolSchedulerSpec } from "./runtime/runtime-tool-scheduler-spec";
+import {
+  SessionRuntime,
+  type SessionRuntimeState,
+  type SessionRuntimeTaskProjection,
+} from "./runtime/SessionRuntime";
+import type {
+  TurnKernelIterationState,
+  TurnKernelPolicy,
+  TurnKernelPreparedResponse,
+} from "./runtime/turn-kernel";
 import { createVerificationRuntime } from "./runtime/VerificationRuntime";
 import { buildWorkerRolePrompt, resolveWorkerRoleKind } from "./runtime/worker-role-registry";
 import { enrichToolEventPayload } from "./runtime/tool-event-enrichment";
@@ -81,13 +94,12 @@ import {
   truncateToTokens,
 } from "./context-manager";
 import { GuardrailManager } from "../guardrails/guardrail-manager";
+import { PermissionSettingsManager } from "../security/permission-settings-manager";
 import { PersonalityManager } from "../settings/personality-manager";
 import { detectContextMode } from "./context-mode-detector";
 import { calculateCost, formatCost } from "./llm/pricing";
 import { loadImageFromFile, validateImageForProvider } from "./llm/image-utils";
-import { sanitizeToolCallHistory } from "./llm/openai-compatible";
 import { assertNormalizedTurnTranscript } from "./runtime/turn-transcript-normalizer";
-import { TurnKernel } from "./runtime/turn-kernel";
 import { getCustomSkillLoader } from "./custom-skill-loader";
 import { MemoryService } from "../memory/MemoryService";
 import { PlaybookService } from "../memory/PlaybookService";
@@ -164,7 +176,6 @@ import { createTimelineEmitter } from "./timeline-emitter";
 import { LifecycleMutex } from "./executor-lifecycle-mutex";
 import {
   maybeApplyQualityPasses as maybeApplyQualityPassesUtil,
-  requestLLMResponseWithAdaptiveBudget as requestLLMResponseWithAdaptiveBudgetUtil,
 } from "./executor-llm-turn-utils";
 import { ProgressScoreEngine } from "./progress-score-engine";
 import { processAssistantResponseText as processAssistantResponseTextUtil } from "./executor-assistant-output-utils";
@@ -172,7 +183,6 @@ import { sanitizeToolCallTextFromAssistant } from "./tool-call-text-sanitizer";
 import {
   evaluateToolAvailability,
   evaluateToolPolicy,
-  filterToolsByPolicy,
   hasNativeDesktopGuiIntent,
   normalizeExecutionMode,
   normalizeTaskDomain,
@@ -627,6 +637,7 @@ const isLLMImageContent = (block: LLMContent): block is LLMImageContent => {
  * Supports both Anthropic API and AWS Bedrock
  */
 export class TaskExecutor {
+  private _runtime?: SessionRuntime;
   private provider!: LLMProvider;
   private toolRegistry: ToolRegistry;
   private toolScheduler!: ToolScheduler;
@@ -684,6 +695,8 @@ export class TaskExecutor {
   private conversationHistory: LLMMessage[] = [];
   private systemPrompt: string = "";
   private lastUserMessage: string;
+  private appliedSkills: SkillApplication[] = [];
+  private taskContextNotes: string[] = [];
   private recoveryRequestActive: boolean = false;
   private capabilityUpgradeRequested: boolean = false;
   private redirectRequested: boolean = false;
@@ -742,7 +755,6 @@ export class TaskExecutor {
   private lastRecoveryClass: "user_blocker" | "local_runtime" | "provider_quota" | "external_unknown" | null =
     null;
   private lastToolDisabledScope: "provider" | "global" | null = null;
-  private dispatchedMentionedAgents = false;
   private lastAssistantText: string | null = null;
   private explicitChatSummaryBlock: string | null = null;
   private explicitChatSummaryCreatedAt: number = 0;
@@ -1135,6 +1147,7 @@ export class TaskExecutor {
       clearTerminalFailure?: boolean;
     },
   ): void {
+    const runtimeProjection = this.applyRuntimeTaskProjectionToTask();
     const completedAt = Date.now();
     const clearError = opts?.clearError !== false;
     const clearTerminalFailure = opts?.clearTerminalFailure === true;
@@ -1162,12 +1175,40 @@ export class TaskExecutor {
       ...(clearTerminalFailure ? { terminalStatus: undefined, failureClass: undefined } : {}),
       ...(trimmedSummary ? { resultSummary: trimmedSummary } : {}),
       ...(this.bestKnownOutcome ? { bestKnownOutcome: this.bestKnownOutcome } : {}),
+      ...runtimeProjection,
       ...this.getCompletionProjectionFields(),
     });
     this.emitEvent("task_completed", {
       message,
       ...(trimmedSummary ? { resultSummary: trimmedSummary } : {}),
+      ...runtimeProjection,
       ...this.getCompletionProjectionFields(),
+    });
+  }
+
+  private finalizeFollowUpFailure(error: Any): void {
+    const runtimeProjection = this.applyRuntimeTaskProjectionToTask();
+    const completedAt = Date.now();
+    const message = error?.message || String(error);
+    const completionProjection = this.getCompletionProjectionFields();
+
+    this.task.status = "failed";
+    this.task.completedAt = completedAt;
+    this.task.error = message;
+
+    this.daemon.failTask(this.task.id, message, {
+      completedAt,
+      ...(this.bestKnownOutcome ? { bestKnownOutcome: this.bestKnownOutcome } : {}),
+      ...runtimeProjection,
+      ...completionProjection,
+    });
+    this.emitEvent("task_status", {
+      status: "failed",
+      message,
+      terminalStatus: "failed",
+      ...(this.bestKnownOutcome ? { bestKnownOutcome: this.bestKnownOutcome } : {}),
+      ...runtimeProjection,
+      ...completionProjection,
     });
   }
 
@@ -1625,7 +1666,7 @@ export class TaskExecutor {
 
       const preflight = await this.preflightToolInvocation({
         content,
-        contextText: `${params.stepDescription}\n${this.task.prompt}`,
+        contextText: `${params.stepDescription}\n${this.getExecutionTaskPrompt()}`,
         stepMode: params.stepMode,
         stepId: params.stepId,
         rewriteReason: params.followUp ? "tool_pre_execution_follow_up" : "tool_pre_execution",
@@ -1918,6 +1959,9 @@ export class TaskExecutor {
                 if (hadToolError) {
                   hadToolSuccessAfterError = true;
                 }
+                if (toolName === "use_skill") {
+                  this.consumeSkillApplicationResult(result, "model");
+                }
                 this.recordToolUsage(toolName);
                 this.recordToolResult(toolName, result, input);
                 if (params.requiredTools.has(canonicalToolName)) {
@@ -2066,21 +2110,34 @@ export class TaskExecutor {
 
     payloadObj = enrichToolEventPayload(type, payloadObj);
 
+    const runtime = this._runtime ?? null;
     if (type === "awaiting_user_input" && typeof payload?.reasonCode === "string") {
       this.lastAwaitingUserInputReasonCode = payload.reasonCode;
     } else if (type === "retry_started" && typeof payload?.retryReason === "string") {
-      this.lastRetryReason = payload.retryReason;
+      if (runtime) {
+        runtime.setRetryReason(payload.retryReason);
+      } else {
+        this.lastRetryReason = payload.retryReason;
+      }
     } else if (
       (type === "step_recovery_planned" || type === "research_recovery_started") &&
       typeof payload?.recoveryClass === "string"
     ) {
-      this.lastRecoveryClass = payload.recoveryClass;
+      if (runtime) {
+        runtime.setRecoveryClass(payload.recoveryClass);
+      } else {
+        this.lastRecoveryClass = payload.recoveryClass;
+      }
     } else if (
       type === "tool_error" &&
       payload?.disabled === true &&
       (payload?.disabledScope === "provider" || payload?.disabledScope === "global")
     ) {
-      this.lastToolDisabledScope = payload.disabledScope;
+      if (runtime) {
+        runtime.setToolDisabledScope(payload.disabledScope);
+      } else {
+        this.lastToolDisabledScope = payload.disabledScope;
+      }
     }
 
     if (timeline && type === "step_started") {
@@ -2325,7 +2382,7 @@ export class TaskExecutor {
       }
     }
 
-    const result = await runner.prompt(initialPrompt || this.task.prompt || "");
+    const result = await runner.prompt(initialPrompt || this.getContractPrompt() || "");
     const assistantText = result.assistantText.trim();
     if (assistantText) {
       this.lastAssistantOutput = assistantText;
@@ -3238,216 +3295,7 @@ export class TaskExecutor {
     lastSharedContextKey: string;
     lastSharedContextBlock: string;
   }> {
-    let {
-      messages,
-      lastTurnMemoryRecallQuery,
-      lastTurnMemoryRecallBlock,
-      lastSharedContextKey,
-      lastSharedContextBlock,
-    } = opts;
-
-    this.maybeInjectTurnBudgetSoftLanding(
-      messages,
-      opts.phase === "follow_up" ? "follow-up" : "step",
-    );
-    this.checkBudgets();
-
-    const userProfileBlock = this.buildUserProfileBlock(10);
-    if (userProfileBlock) {
-      this.upsertPinnedUserBlock(messages, {
-        tag: TaskExecutor.PINNED_USER_PROFILE_TAG,
-        content: userProfileBlock,
-        insertAfterTag: TaskExecutor.PINNED_COMPACTION_SUMMARY_TAG,
-      });
-    } else {
-      this.removePinnedUserBlock(messages, TaskExecutor.PINNED_USER_PROFILE_TAG);
-    }
-
-    if (opts.allowSharedContextInjection) {
-      const key = this.computeSharedContextKey();
-      if (key !== lastSharedContextKey) {
-        lastSharedContextKey = key;
-        lastSharedContextBlock = this.buildSharedContextBlock();
-      }
-
-      if (lastSharedContextBlock) {
-        this.upsertPinnedUserBlock(messages, {
-          tag: TaskExecutor.PINNED_SHARED_CONTEXT_TAG,
-          content: lastSharedContextBlock,
-          insertAfterTag: TaskExecutor.PINNED_USER_PROFILE_TAG,
-        });
-      } else {
-        this.removePinnedUserBlock(messages, TaskExecutor.PINNED_SHARED_CONTEXT_TAG);
-      }
-    } else {
-      this.removePinnedUserBlock(messages, TaskExecutor.PINNED_SHARED_CONTEXT_TAG);
-    }
-
-    if (opts.allowMemoryInjection) {
-      const query = opts.memoryQuery.slice(0, 2500);
-      if (query !== lastTurnMemoryRecallQuery) {
-        lastTurnMemoryRecallQuery = query;
-        lastTurnMemoryRecallBlock = this.buildHybridMemoryRecallBlock(this.workspace.id, query);
-      }
-
-      if (lastTurnMemoryRecallBlock) {
-        this.upsertPinnedUserBlock(messages, {
-          tag: TaskExecutor.PINNED_MEMORY_RECALL_TAG,
-          content: lastTurnMemoryRecallBlock,
-          insertAfterTag: lastSharedContextBlock
-            ? TaskExecutor.PINNED_SHARED_CONTEXT_TAG
-            : TaskExecutor.PINNED_COMPACTION_SUMMARY_TAG,
-        });
-      } else {
-        this.removePinnedUserBlock(messages, TaskExecutor.PINNED_MEMORY_RECALL_TAG);
-      }
-    }
-
-    await this.maybePreCompactionMemoryFlush({
-      messages,
-      systemPromptTokens: opts.systemPromptTokens,
-      allowMemoryInjection: opts.allowMemoryInjection,
-      contextLabel: opts.contextLabel,
-    });
-
-    let didProactiveCompact = false;
-    const ctxUtil = this.contextManager.getContextUtilization(messages, opts.systemPromptTokens);
-    if (ctxUtil.utilization >= PROACTIVE_COMPACTION_THRESHOLD) {
-      const proactiveResult = this.contextManager.proactiveCompactWithMeta(
-        messages,
-        opts.systemPromptTokens,
-        PROACTIVE_COMPACTION_TARGET,
-      );
-      messages = proactiveResult.messages;
-
-      if (
-        proactiveResult.meta.removedMessages.didRemove &&
-        proactiveResult.meta.removedMessages.messages.length > 0
-      ) {
-        didProactiveCompact = true;
-        const postCompactTokens = estimateTotalTokens(messages);
-        const slack = Math.max(0, ctxUtil.availableTokens - postCompactTokens);
-        const summaryBudget = Math.min(
-          COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS,
-          Math.max(COMPACTION_SUMMARY_MIN_OUTPUT_TOKENS, Math.floor(slack * 0.6)),
-        );
-
-        let summaryBlock = await this.buildCompactionSummaryBlock({
-          removedMessages: proactiveResult.meta.removedMessages.messages,
-          maxOutputTokens: summaryBudget,
-          contextLabel: opts.contextLabel,
-        });
-
-        if (summaryBlock) {
-          const summaryTokens = estimateTokens(summaryBlock);
-          const postInsertTokens = estimateTotalTokens(messages) + summaryTokens;
-          if (postInsertTokens > ctxUtil.availableTokens * 0.95) {
-            const maxSummaryTokens = Math.max(
-              200,
-              ctxUtil.availableTokens - estimateTotalTokens(messages) - 2000,
-            );
-            summaryBlock = this.truncateSummaryBlock(summaryBlock, maxSummaryTokens);
-          }
-
-          this.upsertPinnedUserBlock(messages, {
-            tag: TaskExecutor.PINNED_COMPACTION_SUMMARY_TAG,
-            content: summaryBlock,
-          });
-          await this.flushCompactionSummaryToMemory({
-            workspaceId: this.workspace.id,
-            taskId: this.task.id,
-            allowMemoryInjection: opts.allowMemoryInjection,
-            summaryBlock,
-          });
-
-          const summaryText = this.extractPinnedBlockContent(
-            summaryBlock,
-            TaskExecutor.PINNED_COMPACTION_SUMMARY_TAG,
-            TaskExecutor.PINNED_COMPACTION_SUMMARY_CLOSE_TAG,
-          );
-          this.emitEvent("context_summarized", {
-            summary: summaryText,
-            removedCount: proactiveResult.meta.removedMessages.count,
-            tokensBefore: proactiveResult.meta.originalTokens,
-            tokensAfter: estimateTotalTokens(messages),
-            proactive: true,
-          });
-        }
-      }
-    }
-
-    if (!didProactiveCompact) {
-      const compaction = this.contextManager.compactMessagesWithMeta(
-        messages,
-        opts.systemPromptTokens,
-      );
-      messages = compaction.messages;
-
-      if (
-        compaction.meta.removedMessages.didRemove &&
-        compaction.meta.removedMessages.messages.length > 0
-      ) {
-        const availableTokens = this.contextManager.getAvailableTokens(opts.systemPromptTokens);
-        const tokensNow = estimateTotalTokens(messages);
-        const slack = Math.max(0, availableTokens - tokensNow);
-        const summaryBudget = Math.min(
-          COMPACTION_SUMMARY_MAX_OUTPUT_TOKENS,
-          Math.max(COMPACTION_SUMMARY_MIN_OUTPUT_TOKENS, Math.floor(slack * 0.6)),
-        );
-
-        let summaryBlock = await this.buildCompactionSummaryBlock({
-          removedMessages: compaction.meta.removedMessages.messages,
-          maxOutputTokens: summaryBudget,
-          contextLabel: opts.contextLabel,
-        });
-
-        if (summaryBlock) {
-          const summaryTokens = estimateTokens(summaryBlock);
-          const postInsertTokens = estimateTotalTokens(messages) + summaryTokens;
-          if (postInsertTokens > availableTokens * 0.95) {
-            const maxSummaryTokens = Math.max(
-              200,
-              availableTokens - estimateTotalTokens(messages) - 2000,
-            );
-            summaryBlock = this.truncateSummaryBlock(summaryBlock, maxSummaryTokens);
-          }
-
-          this.upsertPinnedUserBlock(messages, {
-            tag: TaskExecutor.PINNED_COMPACTION_SUMMARY_TAG,
-            content: summaryBlock,
-          });
-          await this.flushCompactionSummaryToMemory({
-            workspaceId: this.workspace.id,
-            taskId: this.task.id,
-            allowMemoryInjection: opts.allowMemoryInjection,
-            summaryBlock,
-          });
-
-          const summaryText = this.extractPinnedBlockContent(
-            summaryBlock,
-            TaskExecutor.PINNED_COMPACTION_SUMMARY_TAG,
-            TaskExecutor.PINNED_COMPACTION_SUMMARY_CLOSE_TAG,
-          );
-          this.emitEvent("context_summarized", {
-            summary: summaryText,
-            removedCount: compaction.meta.removedMessages.count,
-            tokensBefore: compaction.meta.originalTokens,
-            tokensAfter: compaction.meta.removedMessages.tokensAfter,
-          });
-        }
-      }
-    }
-
-    this.pruneStaleToolErrors(messages);
-    this.consolidateConsecutiveUserMessages(messages);
-
-    return {
-      messages,
-      lastTurnMemoryRecallQuery,
-      lastTurnMemoryRecallBlock,
-      lastSharedContextKey,
-      lastSharedContextBlock,
-    };
+    return this.getSessionRuntime().prepareMessagesForTurnIteration(opts);
   }
 
   private removePinnedUserBlock(messages: LLMMessage[], tag: string): void {
@@ -4437,10 +4285,6 @@ ${transcript}
   private softDeadlineTriggered: boolean = false;
   private wrapUpRequested: boolean = false;
   private completionVerificationMetadata: VerificationCompletionMetadata | null = null;
-  /** Deterministic verification outcomes (verified mode) for completion review */
-  private verificationEvidenceEntries: VerificationEvidenceEntry[] = [];
-  private nonBlockingVerificationFailedStepIds: Set<string> = new Set();
-  private blockingVerificationFailedStepIds: Set<string> = new Set();
   private stepStopReasons: Set<
     | "completed"
     | "max_turns"
@@ -4548,6 +4392,829 @@ ${transcript}
   /** Expose workspace ID for daemon to refresh executors when permissions change. */
   getWorkspaceId(): string {
     return this.task.workspaceId;
+  }
+
+  get runtime(): SessionRuntime {
+    return this.getSessionRuntime();
+  }
+
+  private getSessionRuntime(): SessionRuntime {
+    return this._runtime ?? this.initializeSessionRuntime();
+  }
+
+  private buildToolRegistry(workspace: Workspace): ToolRegistry {
+    const registry = new ToolRegistry(
+      workspace,
+      this.daemon,
+      this.task.id,
+      this.task.agentConfig?.gatewayContext,
+      this.task.agentConfig?.toolRestrictions,
+    );
+    registry.setWorkspacePathAliasPolicy(this.getEffectiveWorkspacePathAliasPolicy());
+    registry.setWebSearchDomainPolicy({
+      allowedDomains: this.webSearchAllowedDomains,
+      blockedDomains: this.webSearchBlockedDomains,
+    });
+    registry.setCitationTracker(this.citationTracker);
+    if (this.task.agentConfig?.deepWorkMode) {
+      registry.setDeepWorkMode(true);
+    }
+    registry.setTaskListHandler({
+      create: (items) => this.getSessionRuntime().createTaskList(items),
+      update: (items) => this.getSessionRuntime().updateTaskList(items),
+      list: () => this.getSessionRuntime().getTaskListState(),
+    });
+    registry.setPlanRevisionHandler((newSteps, reason, clearRemaining) => {
+      this.requestPlanRevision(newSteps, reason, clearRemaining);
+    });
+    registry.setWorkspaceSwitchHandler(async (newWorkspace) => {
+      await this.handleWorkspaceSwitch(newWorkspace);
+    });
+    return registry;
+  }
+
+  private createSessionRuntimeDeps() {
+    return {
+      getTask: () => this.task,
+      getDefaultPermissionMode: () => this.getDefaultPermissionMode(),
+      getWorkspace: () => this.workspace,
+      setWorkspace: (workspace: Workspace) => {
+        this.workspace = workspace;
+      },
+      getToolRegistry: () => this.toolRegistry,
+      setToolRegistry: (toolRegistry: ToolRegistry) => {
+        this.toolRegistry = toolRegistry;
+      },
+      getContextManager: () => this.contextManager,
+      getSystemPrompt: () => this.systemPrompt,
+      getModelMetadata: () => ({
+        modelId: this.modelId,
+        modelKey: this.modelKey,
+        llmProfileUsed: this.llmProfileUsed,
+        resolvedModelKey: this.resolvedModelKey,
+      }),
+      getWebSearchMode: () => this.webSearchMode,
+      getTaskToolRestrictions: () => this.getTaskToolRestrictions(),
+      hasTaskToolAllowlistConfigured: () => this.hasTaskToolAllowlistConfigured(),
+      getTaskToolAllowlist: () => this.getTaskToolAllowlist(),
+      isVisualCanvasTask: () => this.isVisualCanvasTask(),
+      isCanvasTool: (toolName: string) => this.isCanvasTool(toolName),
+      getToolPolicyContext: () => this.getToolPolicyContext(),
+      applyWebSearchModeFilter: (tools: Any[]) => this.applyWebSearchModeFilter(tools),
+      applyAgentPolicyToolFilter: (tools: Any[]) => this.applyAgentPolicyToolFilter(tools),
+      applyAdaptiveToolAvailabilityFilter: (tools: Any[]) =>
+        this.applyAdaptiveToolAvailabilityFilter(tools),
+      applyStepScopedToolPolicy: (tools: Any[]) => this.applyStepScopedToolPolicy(tools),
+      applyIntentFilter: (tools: Any[]) => this.applyIntentFilter(tools),
+      sanitizeConversationHistory: (messages: LLMMessage[]) =>
+        this.sanitizeConversationHistoryForRuntime(messages),
+      pruneStaleToolErrors: (messages: LLMMessage[]) => this.pruneStaleToolErrors(messages),
+      consolidateConsecutiveUserMessages: (messages: LLMMessage[]) =>
+        this.consolidateConsecutiveUserMessages(messages),
+      maybeInjectTurnBudgetSoftLanding: (messages: LLMMessage[], phase: string) =>
+        this.maybeInjectTurnBudgetSoftLanding(messages, phase as Any),
+      checkBudgets: () => this.checkBudgets(),
+      buildUserProfileBlock: (maxLines: number) => this.buildUserProfileBlock(maxLines),
+      upsertPinnedUserBlock: (messages: LLMMessage[], opts: Any) =>
+        this.upsertPinnedUserBlock(messages, opts),
+      removePinnedUserBlock: (messages: LLMMessage[], tag: string) =>
+        this.removePinnedUserBlock(messages, tag as Any),
+      computeSharedContextKey: () => this.computeSharedContextKey(),
+      buildSharedContextBlock: () => this.buildSharedContextBlock(),
+      buildHybridMemoryRecallBlock: (workspaceId: string, query: string) =>
+        this.buildHybridMemoryRecallBlock(workspaceId, query),
+      maybePreCompactionMemoryFlush: (opts: Any) => this.maybePreCompactionMemoryFlush(opts),
+      buildCompactionSummaryBlock: (opts: Any) => this.buildCompactionSummaryBlock(opts),
+      truncateSummaryBlock: (summary: string, maxTokens: number) =>
+        this.truncateSummaryBlock(summary, maxTokens),
+      flushCompactionSummaryToMemory: (opts: Any) => this.flushCompactionSummaryToMemory(opts),
+      extractPinnedBlockContent: (summary: string, openTag: string, closeTag: string) =>
+        this.extractPinnedBlockContent(summary, openTag as Any, closeTag as Any),
+      emitEvent: (type: string, payload: Any) => this.emitEvent(type as Any, payload),
+      resolveLLMMaxTokens: (opts: {
+        messages: LLMMessage[];
+        system: string;
+        requestedMaxTokens?: number;
+      }) => this.resolveLLMMaxTokens(opts),
+      applyRetryTokenCap: (
+        baseMaxTokens: number,
+        attempt: number,
+        timeoutMs: number,
+        hasTools: boolean,
+      ) => this.applyRetryTokenCap(baseMaxTokens, attempt, timeoutMs, hasTools),
+      getRetryTimeoutMs: (
+        baseTimeoutMs: number,
+        attempt: number,
+        hasTools: boolean,
+        maxTokensBudget: number,
+      ) => this.getRetryTimeoutMs(baseTimeoutMs, attempt, hasTools, maxTokensBudget),
+      callLLMWithRetry: (requestFn: (attempt: number) => Promise<Any>, operation: string) =>
+        this.callLLMWithRetry(requestFn, operation),
+      createMessageWithTimeout: (request: Any, timeoutMs: number, operation: string) =>
+        this.createMessageWithTimeout(request, timeoutMs, operation),
+      log: (message: string) => console.log(`${this.logTag}${message}`),
+      getTaskEvents: () => this.daemon.getTaskEvents?.(this.task.id) ?? [],
+      getReplayEventType: (event: TaskEvent) => this.getReplayEventType(event),
+      loadCheckpointPayload: () => TranscriptStore.loadCheckpointSync(this.workspace.path, this.task.id),
+      pruneOldSnapshots: () => this.pruneOldSnapshots(),
+      getPlanSummary: () =>
+        this.plan
+          ? {
+              description: this.plan.description,
+              completedSteps: this.plan.steps
+                .filter((s) => s.status === "completed")
+                .map((s) => s.description)
+                .slice(0, 20),
+              failedSteps: this.plan.steps
+                .filter((s) => s.status === "failed" && !this.getRecoveredFailureStepIdSet().has(s.id))
+                .map((s) => ({ description: s.description, error: s.error }))
+                .slice(0, 10),
+            }
+          : undefined,
+      getBudgetUsage: () => this.getBudgetUsage(),
+      updateTask: (updates: Record<string, unknown>) => this.daemon.updateTask(this.task.id, updates as Any),
+      updateTaskStatus: (status: Task["status"]) =>
+        this.daemon.updateTaskStatus?.(this.task.id, status),
+      executePlan: () => this.executePlan(),
+      verifySuccessCriteria: () => this.verifySuccessCriteria(),
+      finalizeTaskWithFallback: (resultSummary?: string) => this.finalizeTaskWithFallback(resultSummary),
+      buildResultSummary: () => this.buildResultSummary(),
+      emitTerminalFailureOnce: (payload: Record<string, unknown>) =>
+        this.emitTerminalFailureOnce(payload),
+      cleanupTools: () => this.toolRegistry?.cleanup?.() ?? Promise.resolve(),
+      getEffectiveTurnBudgetPolicy: () => this.getEffectiveTurnBudgetPolicy(),
+      getEmergencyFuseMaxTurns: () => this.getEmergencyFuseMaxTurns(),
+      isWindowTurnLimitExceededError: (error: unknown) => this.isWindowTurnLimitExceededError(error),
+      assessContinuationWindow: () => this.assessContinuationWindow(),
+      getLoopWarningThreshold: () => this.loopWarningThreshold,
+      getLoopCriticalThreshold: () => this.loopCriticalThreshold,
+      getMinProgressScoreForAutoContinue: () => this.minProgressScoreForAutoContinue,
+      getContinuationStrategy: () => this.continuationStrategy,
+      getMaxAutoContinuations: () => this.maxAutoContinuations,
+      getMaxLifetimeTurns: () => this.maxLifetimeTurns,
+      getGlobalNoProgressCircuitBreaker: () => this.globalNoProgressCircuitBreaker,
+      getEffectiveExecutionMode: () => this.getEffectiveExecutionMode(),
+      getWindowEventsSinceLastReset: () => this.getWindowEventsSinceLastReset(),
+      getRenderedContextRatio: () => this.getRenderedContextRatio(),
+      hasWindowMutationEvidence: (events: Any[]) => this.hasWindowMutationEvidence(events),
+      getWindowToolUseStopStreak: (events: Any[]) => this.getWindowToolUseStopStreak(events),
+      getSignatureFromLoopFingerprint: (fingerprint?: string) =>
+        this.getSignatureFromLoopFingerprint(fingerprint),
+      shouldCompactOnContinuation: () => this.compactOnContinuation,
+      getCompactionThresholdRatio: () => this.compactionThresholdRatio,
+      getPlan: () => this.plan,
+      setTerminalStatus: (status: Task["terminalStatus"]) => {
+        this.terminalStatus = status;
+      },
+      setFailureClass: (failureClass: Task["failureClass"]) => {
+        this.failureClass = failureClass;
+      },
+      isCancelled: () => this.cancelled,
+      getCancelReason: () => this.cancelReason,
+      isWaitingForUserInput: () => this.waitingForUserInput,
+      getRecoveredFailureStepIds: () => this.getRecoveredFailureStepIdSet(),
+    };
+  }
+
+  private initializeSessionRuntime(): SessionRuntime {
+    if (this._runtime) {
+      return this._runtime;
+    }
+    const self = this as Any;
+    const state: SessionRuntimeState = {
+      transcript: {
+        conversationHistory: Array.isArray(self.conversationHistory) ? self.conversationHistory : [],
+        lastUserMessage: String(self.lastUserMessage || ""),
+        lastAssistantOutput:
+          typeof self.lastAssistantOutput === "string" ? self.lastAssistantOutput : null,
+        lastNonVerificationOutput:
+          typeof self.lastNonVerificationOutput === "string" ? self.lastNonVerificationOutput : null,
+        lastAssistantText:
+          typeof self.lastAssistantText === "string" ? self.lastAssistantText : null,
+        explicitChatSummaryBlock:
+          typeof self.explicitChatSummaryBlock === "string" ? self.explicitChatSummaryBlock : null,
+        explicitChatSummaryCreatedAt: Number(self.explicitChatSummaryCreatedAt || 0),
+        explicitChatSummarySourceMessageCount: Number(self.explicitChatSummarySourceMessageCount || 0),
+        stepOutcomeSummaries: Array.isArray(self.stepOutcomeSummaries) ? self.stepOutcomeSummaries : [],
+      },
+      tooling: {
+        toolFailureTracker:
+          self.toolFailureTracker instanceof ToolFailureTracker
+            ? self.toolFailureTracker
+            : new ToolFailureTracker(),
+        toolResultMemory: Array.isArray(self.toolResultMemory) ? self.toolResultMemory : [],
+        webEvidenceMemory: Array.isArray(self.webEvidenceMemory) ? self.webEvidenceMemory : [],
+        toolUsageCounts:
+          self.toolUsageCounts instanceof Map ? self.toolUsageCounts : new Map<string, number>(),
+        successfulToolUsageCounts:
+          self.successfulToolUsageCounts instanceof Map
+            ? self.successfulToolUsageCounts
+            : new Map<string, number>(),
+        toolUsageEventsSinceDecay: Number(self.toolUsageEventsSinceDecay || 0),
+        toolSelectionEpoch: Number(self.toolSelectionEpoch || 0),
+        discoveredDeferredToolNames:
+          self.discoveredDeferredToolNames instanceof Set
+            ? self.discoveredDeferredToolNames
+            : new Set<string>(),
+        availableToolsCacheKey:
+          typeof self.availableToolsCacheKey === "string" ? self.availableToolsCacheKey : null,
+        availableToolsCache: Array.isArray(self.availableToolsCache) ? self.availableToolsCache : null,
+        lastWebFetchFailure: self.lastWebFetchFailure || null,
+      },
+      files: {
+        fileOperationTracker:
+          self.fileOperationTracker instanceof FileOperationTracker
+            ? self.fileOperationTracker
+            : new FileOperationTracker(),
+        filesReadTracker:
+          self.filesReadTracker instanceof Map
+            ? self.filesReadTracker
+            : new Map<string, { step: string; sizeBytes: number }>(),
+      },
+      loop: {
+        globalTurnCount: Number(self.globalTurnCount || 0),
+        lifetimeTurnCount: Number(self.lifetimeTurnCount || 0),
+        continuationCount: Number(self.continuationCount || 0),
+        continuationWindow: Number(self.continuationWindow || 1),
+        windowStartEventCount: Number(self.windowStartEventCount || 0),
+        noProgressStreak: Number(self.noProgressStreak || 0),
+        lastLoopFingerprint: String(self.lastLoopFingerprint || ""),
+        compactionCount: Number(self.compactionCount || 0),
+        lastCompactionAt: Number(self.lastCompactionAt || 0),
+        lastCompactionTokensBefore: Number(self.lastCompactionTokensBefore || 0),
+        lastCompactionTokensAfter: Number(self.lastCompactionTokensAfter || 0),
+        blockedLoopFingerprintForWindow:
+          typeof self.blockedLoopFingerprintForWindow === "string"
+            ? self.blockedLoopFingerprintForWindow
+            : self.blockedLoopFingerprintForWindow ?? null,
+        pendingLoopStrategySwitchMessage: String(self.pendingLoopStrategySwitchMessage || ""),
+        softDeadlineTriggered: self.softDeadlineTriggered === true,
+        wrapUpRequested: self.wrapUpRequested === true,
+        turnWindowSoftExhaustedNotified: self.turnWindowSoftExhaustedNotified === true,
+        followUpRecoveryAttemptsInCurrentMessage: Number(
+          self.followUpRecoveryAttemptsInCurrentMessage || 0,
+        ),
+        lastFollowUpRecoveryBlockReason: String(self.lastFollowUpRecoveryBlockReason || ""),
+        iterationCount: Number(self.iterationCount || 0),
+        currentStepId: typeof self.currentStepId === "string" ? self.currentStepId : null,
+        lastPreCompactionFlushAt: Number(self.lastPreCompactionFlushAt || 0),
+        lastPreCompactionFlushTokenCount: Number(self.lastPreCompactionFlushTokenCount || 0),
+      },
+      recovery: {
+        recoveryRequestActive: self.recoveryRequestActive === true,
+        lastRecoveryFailureSignature: String(self.lastRecoveryFailureSignature || ""),
+        recoveredFailureStepIds:
+          self.recoveredFailureStepIds instanceof Set
+            ? self.recoveredFailureStepIds
+            : new Set<string>(),
+        lastRecoveryClass: self.lastRecoveryClass || null,
+        lastToolDisabledScope: self.lastToolDisabledScope || null,
+        lastRetryReason: typeof self.lastRetryReason === "string" ? self.lastRetryReason : null,
+      },
+      queues: {
+        pendingFollowUps: Array.isArray(self.pendingFollowUps) ? self.pendingFollowUps : [],
+        stepFeedbackSignal: self.stepFeedbackSignal || null,
+      },
+      worker: {
+        dispatchedMentionedAgents:
+          typeof self.dispatchedMentionedAgents === "boolean" ? self.dispatchedMentionedAgents : false,
+        verificationAgentState:
+          self.verificationAgentState && typeof self.verificationAgentState === "object"
+            ? { ...self.verificationAgentState }
+            : {},
+      },
+      permissions: {
+        mode: this.getDefaultPermissionMode(),
+        sessionRules: [],
+        temporaryGrants: new Map<string, { grantedAt: number; expiresAt?: number }>(),
+        denialTracking: new Map<string, { consecutiveDenials: number; totalDenials: number }>(),
+        latestPromptContext: null,
+      },
+      verification: {
+        verificationEvidenceEntries: Array.isArray(self.verificationEvidenceEntries)
+          ? self.verificationEvidenceEntries
+          : [],
+        nonBlockingVerificationFailedStepIds:
+          self.nonBlockingVerificationFailedStepIds instanceof Set
+            ? self.nonBlockingVerificationFailedStepIds
+            : new Set<string>(),
+        blockingVerificationFailedStepIds:
+          self.blockingVerificationFailedStepIds instanceof Set
+            ? self.blockingVerificationFailedStepIds
+            : new Set<string>(),
+      },
+      checklist: {
+        items: Array.isArray(self.sessionChecklistItems) ? self.sessionChecklistItems : [],
+        updatedAt: Number(self.sessionChecklistUpdatedAt || 0),
+        verificationNudgeNeeded: self.sessionChecklistVerificationNudgeNeeded === true,
+        nudgeReason:
+          typeof self.sessionChecklistNudgeReason === "string" ? self.sessionChecklistNudgeReason : null,
+      },
+      usage: {
+        totalInputTokens: Number(self.totalInputTokens || 0),
+        totalOutputTokens: Number(self.totalOutputTokens || 0),
+        totalCost: Number(self.totalCost || 0),
+        usageOffsetInputTokens: Number(self.usageOffsetInputTokens || 0),
+        usageOffsetOutputTokens: Number(self.usageOffsetOutputTokens || 0),
+        usageOffsetCost: Number(self.usageOffsetCost || 0),
+      },
+    };
+    this._runtime = new SessionRuntime(this.createSessionRuntimeDeps(), state);
+    this.installRuntimeStateProxies();
+    return this._runtime;
+  }
+
+  private installRuntimeFieldProxy(
+    fieldName: string,
+    getter: () => Any,
+    setter?: (value: Any) => void,
+  ): void {
+    Object.defineProperty(this, fieldName, {
+      configurable: true,
+      enumerable: false,
+      get: getter,
+      set: setter,
+    });
+  }
+
+  private installRuntimeStateProxies(): void {
+    const self = this as Any;
+    if (self.__sessionRuntimeProxiesInstalled) return;
+    const runtime = this._runtime!;
+
+    this.installRuntimeFieldProxy(
+      "conversationHistory",
+      () => runtime.state.transcript.conversationHistory,
+      (value) => {
+        runtime.state.transcript.conversationHistory = Array.isArray(value) ? value : [];
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastUserMessage",
+      () => runtime.state.transcript.lastUserMessage,
+      (value) => {
+        runtime.state.transcript.lastUserMessage = String(value || "");
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastAssistantOutput",
+      () => runtime.state.transcript.lastAssistantOutput,
+      (value) => {
+        runtime.state.transcript.lastAssistantOutput =
+          typeof value === "string" ? value : value == null ? null : String(value);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastNonVerificationOutput",
+      () => runtime.state.transcript.lastNonVerificationOutput,
+      (value) => {
+        runtime.state.transcript.lastNonVerificationOutput =
+          typeof value === "string" ? value : value == null ? null : String(value);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastAssistantText",
+      () => runtime.state.transcript.lastAssistantText,
+      (value) => {
+        runtime.state.transcript.lastAssistantText =
+          typeof value === "string" ? value : value == null ? null : String(value);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "explicitChatSummaryBlock",
+      () => runtime.state.transcript.explicitChatSummaryBlock,
+      (value) => {
+        runtime.state.transcript.explicitChatSummaryBlock =
+          typeof value === "string" ? value : value == null ? null : String(value);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "explicitChatSummaryCreatedAt",
+      () => runtime.state.transcript.explicitChatSummaryCreatedAt,
+      (value) => {
+        runtime.state.transcript.explicitChatSummaryCreatedAt = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "explicitChatSummarySourceMessageCount",
+      () => runtime.state.transcript.explicitChatSummarySourceMessageCount,
+      (value) => {
+        runtime.state.transcript.explicitChatSummarySourceMessageCount = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "stepOutcomeSummaries",
+      () => runtime.state.transcript.stepOutcomeSummaries,
+      (value) => {
+        runtime.state.transcript.stepOutcomeSummaries = Array.isArray(value) ? value : [];
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "toolFailureTracker",
+      () => runtime.state.tooling.toolFailureTracker,
+      (value) => {
+        runtime.state.tooling.toolFailureTracker = value;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "toolResultMemory",
+      () => runtime.state.tooling.toolResultMemory,
+      (value) => {
+        runtime.state.tooling.toolResultMemory = Array.isArray(value) ? value : [];
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "webEvidenceMemory",
+      () => runtime.state.tooling.webEvidenceMemory,
+      (value) => {
+        runtime.state.tooling.webEvidenceMemory = Array.isArray(value) ? value : [];
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "toolUsageCounts",
+      () => runtime.state.tooling.toolUsageCounts,
+      (value) => {
+        runtime.state.tooling.toolUsageCounts = value instanceof Map ? value : new Map();
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "successfulToolUsageCounts",
+      () => runtime.state.tooling.successfulToolUsageCounts,
+      (value) => {
+        runtime.state.tooling.successfulToolUsageCounts = value instanceof Map ? value : new Map();
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "toolUsageEventsSinceDecay",
+      () => runtime.state.tooling.toolUsageEventsSinceDecay,
+      (value) => {
+        runtime.state.tooling.toolUsageEventsSinceDecay = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "toolSelectionEpoch",
+      () => runtime.state.tooling.toolSelectionEpoch,
+      (value) => {
+        runtime.state.tooling.toolSelectionEpoch = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "discoveredDeferredToolNames",
+      () => runtime.state.tooling.discoveredDeferredToolNames,
+      (value) => {
+        runtime.state.tooling.discoveredDeferredToolNames =
+          value instanceof Set ? value : new Set();
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "availableToolsCacheKey",
+      () => runtime.state.tooling.availableToolsCacheKey,
+      (value) => {
+        runtime.state.tooling.availableToolsCacheKey =
+          typeof value === "string" ? value : value == null ? null : String(value);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "availableToolsCache",
+      () => runtime.state.tooling.availableToolsCache,
+      (value) => {
+        runtime.state.tooling.availableToolsCache = Array.isArray(value) ? value : null;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastWebFetchFailure",
+      () => runtime.state.tooling.lastWebFetchFailure,
+      (value) => {
+        runtime.state.tooling.lastWebFetchFailure = value || null;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "fileOperationTracker",
+      () => runtime.state.files.fileOperationTracker,
+      (value) => {
+        runtime.state.files.fileOperationTracker = value;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "filesReadTracker",
+      () => runtime.state.files.filesReadTracker,
+      (value) => {
+        runtime.state.files.filesReadTracker = value instanceof Map ? value : new Map();
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "globalTurnCount",
+      () => runtime.state.loop.globalTurnCount,
+      (value) => {
+        runtime.state.loop.globalTurnCount = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lifetimeTurnCount",
+      () => runtime.state.loop.lifetimeTurnCount,
+      (value) => {
+        runtime.state.loop.lifetimeTurnCount = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "continuationCount",
+      () => runtime.state.loop.continuationCount,
+      (value) => {
+        runtime.state.loop.continuationCount = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "continuationWindow",
+      () => runtime.state.loop.continuationWindow,
+      (value) => {
+        runtime.state.loop.continuationWindow = Number(value || 1);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "windowStartEventCount",
+      () => runtime.state.loop.windowStartEventCount,
+      (value) => {
+        runtime.state.loop.windowStartEventCount = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "noProgressStreak",
+      () => runtime.state.loop.noProgressStreak,
+      (value) => {
+        runtime.state.loop.noProgressStreak = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastLoopFingerprint",
+      () => runtime.state.loop.lastLoopFingerprint,
+      (value) => {
+        runtime.state.loop.lastLoopFingerprint = String(value || "");
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "compactionCount",
+      () => runtime.state.loop.compactionCount,
+      (value) => {
+        runtime.state.loop.compactionCount = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastCompactionAt",
+      () => runtime.state.loop.lastCompactionAt,
+      (value) => {
+        runtime.state.loop.lastCompactionAt = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastCompactionTokensBefore",
+      () => runtime.state.loop.lastCompactionTokensBefore,
+      (value) => {
+        runtime.state.loop.lastCompactionTokensBefore = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastCompactionTokensAfter",
+      () => runtime.state.loop.lastCompactionTokensAfter,
+      (value) => {
+        runtime.state.loop.lastCompactionTokensAfter = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "blockedLoopFingerprintForWindow",
+      () => runtime.state.loop.blockedLoopFingerprintForWindow,
+      (value) => {
+        runtime.state.loop.blockedLoopFingerprintForWindow =
+          typeof value === "string" ? value : value == null ? null : String(value);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "pendingLoopStrategySwitchMessage",
+      () => runtime.state.loop.pendingLoopStrategySwitchMessage,
+      (value) => {
+        runtime.state.loop.pendingLoopStrategySwitchMessage = String(value || "");
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "softDeadlineTriggered",
+      () => runtime.state.loop.softDeadlineTriggered,
+      (value) => {
+        runtime.state.loop.softDeadlineTriggered = value === true;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "wrapUpRequested",
+      () => runtime.state.loop.wrapUpRequested,
+      (value) => {
+        runtime.state.loop.wrapUpRequested = value === true;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "turnWindowSoftExhaustedNotified",
+      () => runtime.state.loop.turnWindowSoftExhaustedNotified,
+      (value) => {
+        runtime.state.loop.turnWindowSoftExhaustedNotified = value === true;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "followUpRecoveryAttemptsInCurrentMessage",
+      () => runtime.state.loop.followUpRecoveryAttemptsInCurrentMessage,
+      (value) => {
+        runtime.state.loop.followUpRecoveryAttemptsInCurrentMessage = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastFollowUpRecoveryBlockReason",
+      () => runtime.state.loop.lastFollowUpRecoveryBlockReason,
+      (value) => {
+        runtime.state.loop.lastFollowUpRecoveryBlockReason = String(value || "");
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "iterationCount",
+      () => runtime.state.loop.iterationCount,
+      (value) => {
+        runtime.state.loop.iterationCount = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "currentStepId",
+      () => runtime.state.loop.currentStepId,
+      (value) => {
+        runtime.state.loop.currentStepId = typeof value === "string" ? value : null;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastPreCompactionFlushAt",
+      () => runtime.state.loop.lastPreCompactionFlushAt,
+      (value) => {
+        runtime.state.loop.lastPreCompactionFlushAt = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastPreCompactionFlushTokenCount",
+      () => runtime.state.loop.lastPreCompactionFlushTokenCount,
+      (value) => {
+        runtime.state.loop.lastPreCompactionFlushTokenCount = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "recoveryRequestActive",
+      () => runtime.state.recovery.recoveryRequestActive,
+      (value) => {
+        runtime.state.recovery.recoveryRequestActive = value === true;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastRecoveryFailureSignature",
+      () => runtime.state.recovery.lastRecoveryFailureSignature,
+      (value) => {
+        runtime.state.recovery.lastRecoveryFailureSignature = String(value || "");
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "recoveredFailureStepIds",
+      () => runtime.state.recovery.recoveredFailureStepIds,
+      (value) => {
+        runtime.state.recovery.recoveredFailureStepIds = value instanceof Set ? value : new Set();
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastRecoveryClass",
+      () => runtime.state.recovery.lastRecoveryClass,
+      (value) => {
+        runtime.state.recovery.lastRecoveryClass = value || null;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastToolDisabledScope",
+      () => runtime.state.recovery.lastToolDisabledScope,
+      (value) => {
+        runtime.state.recovery.lastToolDisabledScope = value || null;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "lastRetryReason",
+      () => runtime.state.recovery.lastRetryReason,
+      (value) => {
+        runtime.state.recovery.lastRetryReason =
+          typeof value === "string" ? value : value == null ? null : String(value);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "pendingFollowUps",
+      () => runtime.state.queues.pendingFollowUps,
+      (value) => {
+        runtime.state.queues.pendingFollowUps = Array.isArray(value) ? value : [];
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "stepFeedbackSignal",
+      () => runtime.state.queues.stepFeedbackSignal,
+      (value) => {
+        runtime.state.queues.stepFeedbackSignal = value || null;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "dispatchedMentionedAgents",
+      () => runtime.state.worker.dispatchedMentionedAgents,
+      (value) => {
+        runtime.state.worker.dispatchedMentionedAgents = value === true;
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "verificationAgentState",
+      () => runtime.state.worker.verificationAgentState,
+      (value) => {
+        runtime.state.worker.verificationAgentState =
+          value && typeof value === "object" ? { ...(value as Record<string, unknown>) } : {};
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "verificationEvidenceEntries",
+      () => runtime.state.verification.verificationEvidenceEntries,
+      (value) => {
+        runtime.state.verification.verificationEvidenceEntries = Array.isArray(value) ? value : [];
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "nonBlockingVerificationFailedStepIds",
+      () => runtime.state.verification.nonBlockingVerificationFailedStepIds,
+      (value) => {
+        runtime.state.verification.nonBlockingVerificationFailedStepIds =
+          value instanceof Set ? value : new Set();
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "blockingVerificationFailedStepIds",
+      () => runtime.state.verification.blockingVerificationFailedStepIds,
+      (value) => {
+        runtime.state.verification.blockingVerificationFailedStepIds =
+          value instanceof Set ? value : new Set();
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "totalInputTokens",
+      () => runtime.state.usage.totalInputTokens,
+      (value) => {
+        runtime.state.usage.totalInputTokens = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "totalOutputTokens",
+      () => runtime.state.usage.totalOutputTokens,
+      (value) => {
+        runtime.state.usage.totalOutputTokens = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "totalCost",
+      () => runtime.state.usage.totalCost,
+      (value) => {
+        runtime.state.usage.totalCost = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "usageOffsetInputTokens",
+      () => runtime.state.usage.usageOffsetInputTokens,
+      (value) => {
+        runtime.state.usage.usageOffsetInputTokens = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "usageOffsetOutputTokens",
+      () => runtime.state.usage.usageOffsetOutputTokens,
+      (value) => {
+        runtime.state.usage.usageOffsetOutputTokens = Number(value || 0);
+      },
+    );
+    this.installRuntimeFieldProxy(
+      "usageOffsetCost",
+      () => runtime.state.usage.usageOffsetCost,
+      (value) => {
+        runtime.state.usage.usageOffsetCost = Number(value || 0);
+      },
+    );
+
+    self.__sessionRuntimeProxiesInstalled = true;
+  }
+
+  private applyRuntimeTaskProjectionToTask(): SessionRuntimeTaskProjection {
+    const projection = this.getSessionRuntime().projectTaskState();
+    this.task.budgetUsage = projection.budgetUsage;
+    this.task.continuationCount = projection.continuationCount;
+    this.task.continuationWindow = projection.continuationWindow;
+    this.task.lifetimeTurnsUsed = projection.lifetimeTurnsUsed;
+    this.task.compactionCount = projection.compactionCount;
+    this.task.lastCompactionAt = projection.lastCompactionAt;
+    this.task.lastCompactionTokensBefore = projection.lastCompactionTokensBefore;
+    this.task.lastCompactionTokensAfter = projection.lastCompactionTokensAfter;
+    this.task.noProgressStreak = projection.noProgressStreak;
+    this.task.lastLoopFingerprint = projection.lastLoopFingerprint;
+    return projection;
+  }
+
+  private getVerificationState(): ReturnType<SessionRuntime["getVerificationState"]> {
+    return this.getSessionRuntime().getVerificationState();
   }
 
   constructor(
@@ -4793,13 +5460,14 @@ ${transcript}
     });
     this.guardrailPhaseAEnabled = isFeatureEnabled("COWORK_GUARDRAIL_PHASE_A", true);
     this.guardrailPhaseBEnabled = isFeatureEnabled("COWORK_GUARDRAIL_PHASE_B", true);
-    this.lastUserMessage = task.prompt;
-    this.recoveryRequestActive = this.isRecoveryIntent(this.lastUserMessage);
+    const canonicalPrompt = this.getContractPrompt();
+    this.lastUserMessage = canonicalPrompt;
+    this.getSessionRuntime().setRecoveryRequestActive(this.isRecoveryIntent(this.lastUserMessage));
     this.capabilityUpgradeRequested = this.isCapabilityUpgradeIntent(this.lastUserMessage);
-    this.requiresTestRun = this.detectTestRequirement(`${task.title}\n${task.prompt}`);
-    this.requiresVisualQARun = this.detectVisualQARequirement(`${task.title}\n${task.prompt}`);
+    this.requiresTestRun = this.detectTestRequirement(`${task.title}\n${canonicalPrompt}`);
+    this.requiresVisualQARun = this.detectVisualQARequirement(`${task.title}\n${canonicalPrompt}`);
     this.requiresExecutionToolRun = this.detectExecutionRequirement(
-      `${task.title}\n${task.prompt}`,
+      `${task.title}\n${canonicalPrompt}`,
     );
     const allowUserInput = task.agentConfig?.allowUserInput ?? true;
     const pauseForRequiredDecision = task.agentConfig?.pauseForRequiredDecision ?? true;
@@ -4831,41 +5499,13 @@ ${transcript}
       }
     }
 
-    // Initialize tool registry
-    this.toolRegistry = new ToolRegistry(
-      workspace,
-      daemon,
-      task.id,
-      task.agentConfig?.gatewayContext,
-      task.agentConfig?.toolRestrictions,
-    );
-    this.toolRegistry.setWorkspacePathAliasPolicy(this.getEffectiveWorkspacePathAliasPolicy());
-    this.toolRegistry.setWebSearchDomainPolicy({
-      allowedDomains: this.webSearchAllowedDomains,
-      blockedDomains: this.webSearchBlockedDomains,
-    });
-
-    // Wire citation tracker into tool registry for web_search/web_fetch
     this.citationTracker = new CitationTracker(task.id);
-    this.toolRegistry.setCitationTracker(this.citationTracker);
-    if (task.agentConfig?.deepWorkMode) {
-      this.toolRegistry.setDeepWorkMode(true);
-    }
+    this.toolRegistry = this.buildToolRegistry(workspace);
     this.toolScheduler = new ToolScheduler();
     this.toolExecutionCoordinator = new ToolExecutionCoordinator(this.toolRegistry);
     this.deferredToolCatalog = new DeferredToolCatalog(this.toolRegistry.getTools());
     this.toolSearchService = new ToolSearchService(this.toolRegistry.getDeferredTools());
     this.reloadAgentPolicy();
-
-    // Set up plan revision handler
-    this.toolRegistry.setPlanRevisionHandler((newSteps, reason, clearRemaining) => {
-      this.requestPlanRevision(newSteps, reason, clearRemaining);
-    });
-
-    // Set up workspace switch handler
-    this.toolRegistry.setWorkspaceSwitchHandler(async (newWorkspace) => {
-      await this.handleWorkspaceSwitch(newWorkspace);
-    });
 
     // Initialize sandbox runner
     this.sandboxRunner = new SandboxRunner(workspace);
@@ -4880,6 +5520,7 @@ ${transcript}
 
     // Initialize file operation tracker to detect redundant reads and duplicate creations
     this.fileOperationTracker = new FileOperationTracker();
+    this.initializeSessionRuntime();
 
     console.log(
       `${this.logTag} TaskExecutor initialized with ${llmSelection.providerType}, model: ${llmSelection.modelId}, profile: ${this.llmProfileUsed}, source: ${llmSelection.modelSource}`,
@@ -4938,12 +5579,12 @@ ${transcript}
           `- Skill "${entry.skill.id}" (${entry.skill.name}): ${entry.skill.description || ""}`,
       );
       return [
-        `IMPORTANT — Highly relevant custom skills detected for this task:`,
+        `Relevant custom skills for this task:`,
         ...hints,
         ``,
-        `You MUST include a plan step that uses the use_skill tool with the skill ID(s) above.`,
-        `Example step: "Use the '${scored[0].skill.id}' skill to ${scored[0].skill.description?.toLowerCase() || "complete the task"}"`,
-        `Do NOT attempt to manually run CLI commands that these skills already handle.`,
+        `If one clearly fits, include a plan step to apply it with use_skill.`,
+        `Example step: "Apply the '${scored[0].skill.id}' skill to ${scored[0].skill.description?.toLowerCase() || "handle this part of the task"}".`,
+        `Treat these as additive helpers. Do not rewrite or replace the original task.`,
       ].join("\n");
     } catch {
       return "";
@@ -4981,7 +5622,7 @@ ${transcript}
       lines.push(
         buildWorkerRolePrompt(workerRole, {
           taskTitle: this.task.title,
-          taskPrompt: this.task.rawPrompt || this.task.userPrompt || this.task.prompt,
+          taskPrompt: this.getContractPrompt(),
           workspacePath: this.workspace.path,
         }),
       );
@@ -4996,7 +5637,7 @@ ${transcript}
    */
   private getVisualQAContextPrompt(): string {
     if (!this.task) return "";
-    const combined = `${this.task.title}\n${this.task.prompt}`;
+    const combined = `${this.task.title}\n${this.getContractPrompt()}`;
     if (!this.detectVisualQARequirement(combined)) return "";
     return [
       "VISUAL QA REQUIRED FOR THIS TASK:",
@@ -5325,96 +5966,7 @@ ${transcript}
     emptyFallback: string;
     onStreamProgress?: StreamProgressCallback;
   }): Promise<{ messages: LLMMessage[]; assistantText: string }> {
-    let messages = opts.messages;
-    let continuationPrefix = "";
-    let continuationAttempts = 0;
-    let assistantText = "";
-
-    const kernel = new TurnKernel(
-      {
-        mode: opts.mode,
-        messages,
-        maxIterations: opts.allowContinuation ? 2 : 1,
-        maxEmptyResponses: 1,
-      },
-      {
-        requestResponse: async () => {
-          const requestMessages =
-            continuationPrefix.trim().length > 0
-              ? [
-                  ...messages,
-                  {
-                    role: "assistant" as const,
-                    content: [{ type: "text" as const, text: continuationPrefix }],
-                  },
-                ]
-              : messages;
-          const response = await this.callLLMWithRetry(
-            () =>
-              this.createMessageWithTimeout(
-                {
-                  model: this.modelId,
-                  maxTokens:
-                    continuationPrefix.trim().length > 0
-                      ? opts.continuationMaxTokens
-                      : opts.initialMaxTokens,
-                  system: opts.systemPrompt,
-                  messages: requestMessages,
-                  ...(opts.onStreamProgress ? { onStreamProgress: opts.onStreamProgress } : {}),
-                },
-                LLM_TIMEOUT_MS,
-                continuationPrefix.trim().length > 0
-                  ? `${opts.operationLabel} (continuation)`
-                  : opts.operationLabel,
-              ),
-            continuationPrefix.trim().length > 0
-              ? `${opts.operationLabel} (continuation)`
-              : opts.operationLabel,
-          );
-          if (response.usage) {
-            this.updateTracking(
-              response.usage.inputTokens,
-              response.usage.outputTokens,
-              response.usage.cachedTokens,
-            );
-          }
-          return {
-            response,
-            availableTools: [],
-          };
-        },
-        handleResponse: async ({ response }, state) => {
-          const text = this.extractTextFromLLMContent(response.content || []);
-          if (
-            opts.allowContinuation &&
-            response.stopReason === "max_tokens" &&
-            text &&
-            continuationAttempts < 1
-          ) {
-            continuationPrefix = `${continuationPrefix}${text}`;
-            continuationAttempts += 1;
-            return { continueLoop: true, emptyResponseCount: 0 };
-          }
-
-          assistantText = String(`${continuationPrefix}${text || ""}`).trim() || opts.emptyFallback;
-          messages = [
-            ...messages,
-            {
-              role: "assistant",
-              content: [{ type: "text", text: assistantText }],
-            },
-          ];
-          state.messages = messages;
-          return { continueLoop: false, emptyResponseCount: 0 };
-        },
-      },
-    );
-
-    const outcome = await kernel.run();
-    return {
-      messages: outcome.messages,
-      assistantText: String(assistantText || "").trim() || opts.emptyFallback,
-    };
+    return this.getSessionRuntime().runTextLoop(opts);
   }
 
   /**
@@ -5856,24 +6408,7 @@ ${transcript}
     retryLabel: string;
     operation: string;
   }): Promise<{ response: Any; availableTools: Any[] }> {
-    return requestLLMResponseWithAdaptiveBudgetUtil({
-      ...opts,
-      llmTimeoutMs: LLM_TIMEOUT_MS,
-      modelId: this.modelId,
-      systemPrompt: this.systemPrompt,
-      getAvailableTools: () => this.getAvailableTools(),
-      resolveLLMMaxTokens: ({ messages, system }) => this.resolveLLMMaxTokens({ messages, system }),
-      applyRetryTokenCap: (baseMaxTokens, attempt, timeoutMs, hasTools) =>
-        this.applyRetryTokenCap(baseMaxTokens, attempt, timeoutMs, hasTools),
-      getRetryTimeoutMs: (baseTimeoutMs, attempt, hasTools, maxTokensBudget) =>
-        this.getRetryTimeoutMs(baseTimeoutMs, attempt, hasTools, maxTokensBudget),
-      callLLMWithRetry: (requestFn, operation) => this.callLLMWithRetry(requestFn, operation),
-      createMessageWithTimeout: (request, timeoutMs, operation) =>
-        this.createMessageWithTimeout(request, timeoutMs, operation),
-      updateTracking: (inputTokens, outputTokens, cachedTokens) =>
-        this.updateTracking(inputTokens, outputTokens, cachedTokens),
-      log: (message) => console.log(`${this.logTag}${message}`),
-    });
+    return this.getSessionRuntime().requestLLMResponseWithAdaptiveBudget(opts);
   }
 
   private async maybeApplyQualityPasses(opts: {
@@ -6109,6 +6644,7 @@ ${transcript}
   }
 
   private emitRunSummary(stopReason: string, terminalStatus: NonNullable<Task["terminalStatus"]>): void {
+    const recoveryState = this._runtime?.getRecoveryState();
     this.emitEvent("log", {
       message: "execution_run_summary",
       routedIntent: this.extractStrategyField("intent"),
@@ -6117,9 +6653,9 @@ ${transcript}
       stopReason,
       terminalStatus,
       awaitingUserInputReasonCode: this.lastAwaitingUserInputReasonCode,
-      retryReason: this.lastRetryReason,
-      recoveryClass: this.lastRecoveryClass,
-      toolDisabledScope: this.lastToolDisabledScope,
+      retryReason: recoveryState?.lastRetryReason ?? this.lastRetryReason,
+      recoveryClass: recoveryState?.lastRecoveryClass ?? this.lastRecoveryClass,
+      toolDisabledScope: recoveryState?.lastToolDisabledScope ?? this.lastToolDisabledScope,
     });
   }
 
@@ -6255,7 +6791,7 @@ ${transcript}
       this.lastUserMessage || "",
       this.task.rawPrompt || "",
       this.task.userPrompt || "",
-      this.task.prompt || "",
+      this.getExecutionTaskPrompt(),
     ]
       .join("\n")
       .toLowerCase();
@@ -6359,7 +6895,7 @@ ${transcript}
       (token) => lower.includes(token),
     ).length;
     const requiresMultiCategory = /\b(including|cover|categories|summary)\b/i.test(
-      `${this.task.title}\n${this.task.prompt}`,
+      `${this.task.title}\n${this.getContractPrompt()}`,
     );
     if (!requiresMultiCategory) {
       return text.length >= 80;
@@ -6782,57 +7318,7 @@ ${transcript}
   private async maybeCompactBeforeContinuation(
     assessment: ReturnType<typeof ProgressScoreEngine.assessWindow>,
   ): Promise<void> {
-    if (!this.compactOnContinuation) return;
-
-    const windowEvents = this.getWindowEventsSinceLastReset();
-    const contextRatio = this.getRenderedContextRatio();
-    const noMutation = !this.hasWindowMutationEvidence(windowEvents);
-    const toolUseStopStreak = this.getWindowToolUseStopStreak(windowEvents);
-    const shouldCompact =
-      contextRatio >= this.compactionThresholdRatio || (toolUseStopStreak >= 6 && noMutation);
-    if (!shouldCompact) return;
-
-    const systemPromptTokens = estimateTokens(this.systemPrompt || "");
-    const tokensBefore = estimateTotalTokens(this.conversationHistory);
-    this.emitEvent("context_compaction_started", {
-      continuationWindow: this.continuationWindow,
-      contextRatio,
-      thresholdRatio: this.compactionThresholdRatio,
-      toolUseStopStreak,
-      noMutation,
-      tokensBefore,
-    });
-
-    try {
-      const compacted = this.contextManager.compactMessagesWithMeta(
-        this.conversationHistory,
-        systemPromptTokens,
-      );
-      this.updateConversationHistory(compacted.messages);
-      const tokensAfter = estimateTotalTokens(this.conversationHistory);
-      this.compactionCount += 1;
-      this.lastCompactionAt = Date.now();
-      this.lastCompactionTokensBefore = tokensBefore;
-      this.lastCompactionTokensAfter = tokensAfter;
-      this.daemon.updateTask(this.task.id, {
-        compactionCount: this.compactionCount,
-        lastCompactionAt: this.lastCompactionAt,
-        lastCompactionTokensBefore: this.lastCompactionTokensBefore,
-        lastCompactionTokensAfter: this.lastCompactionTokensAfter,
-      });
-      this.emitEvent("context_compaction_completed", {
-        continuationWindow: this.continuationWindow,
-        tokensBefore,
-        tokensAfter,
-        removedMessages: compacted.meta.removedMessages.count,
-      });
-    } catch (error: Any) {
-      this.emitEvent("context_compaction_failed", {
-        continuationWindow: this.continuationWindow,
-        reason: error?.message || String(error),
-        tokensBefore,
-      });
-    }
+    await this.getSessionRuntime().maybeCompactBeforeContinuation(assessment);
   }
 
   private recoverFromContextCapacityOverflow(opts: {
@@ -6844,83 +7330,7 @@ ${transcript}
     attempt: number;
     maxAttempts: number;
   }): { recovered: boolean; exhausted: boolean; messages: LLMMessage[] } {
-    if (!isContextCapacityError(opts.error)) {
-      return { recovered: false, exhausted: false, messages: opts.messages };
-    }
-
-    const attemptNumber = opts.attempt + 1;
-    const reason = String((opts.error as Any)?.message || opts.error || "context_capacity_error");
-    const exhausted = attemptNumber > opts.maxAttempts;
-    if (exhausted) {
-      this.emitEvent("context_capacity_recovery_failed", {
-        phase: opts.phase,
-        stepId: opts.stepId,
-        attempt: attemptNumber,
-        maxAttempts: opts.maxAttempts,
-        reason: "retries_exhausted",
-        providerError: reason,
-      });
-      return { recovered: false, exhausted: true, messages: opts.messages };
-    }
-
-    const tokensBefore = estimateTotalTokens(opts.messages);
-    this.emitEvent("context_capacity_recovery_started", {
-      phase: opts.phase,
-      stepId: opts.stepId,
-      attempt: attemptNumber,
-      maxAttempts: opts.maxAttempts,
-      providerError: reason,
-      tokensBefore,
-    });
-
-    try {
-      const aggressiveTarget = 0.35;
-      const proactive = this.contextManager.proactiveCompactWithMeta(
-        opts.messages,
-        opts.systemPromptTokens,
-        aggressiveTarget,
-      );
-      let compactedMessages = proactive.messages;
-      if (!proactive.meta.removedMessages.didRemove) {
-        const fallback = this.contextManager.compactMessagesWithMeta(
-          compactedMessages,
-          opts.systemPromptTokens,
-        );
-        compactedMessages = fallback.messages;
-      }
-
-      this.pruneStaleToolErrors(compactedMessages);
-      this.consolidateConsecutiveUserMessages(compactedMessages);
-      const tokensAfter = estimateTotalTokens(compactedMessages);
-      this.emitEvent("context_capacity_recovery_completed", {
-        phase: opts.phase,
-        stepId: opts.stepId,
-        attempt: attemptNumber,
-        maxAttempts: opts.maxAttempts,
-        tokensBefore,
-        tokensAfter,
-        removedApproxTokens: Math.max(0, tokensBefore - tokensAfter),
-      });
-      this.emitEvent("log", {
-        metric: "context_capacity_recovery_completed",
-        phase: opts.phase,
-        stepId: opts.stepId,
-        attempt: attemptNumber,
-        maxAttempts: opts.maxAttempts,
-        tokensBefore,
-        tokensAfter,
-      });
-      return { recovered: true, exhausted: false, messages: compactedMessages };
-    } catch (compactionError: Any) {
-      this.emitEvent("context_capacity_recovery_failed", {
-        phase: opts.phase,
-        stepId: opts.stepId,
-        attempt: attemptNumber,
-        maxAttempts: opts.maxAttempts,
-        reason: compactionError?.message || String(compactionError),
-      });
-      return { recovered: false, exhausted: false, messages: opts.messages };
-    }
+    return this.getSessionRuntime().recoverFromContextCapacityOverflow(opts);
   }
 
   private tryInjectArtifactRecoveryBeforeCircuitBreaker(
@@ -6997,177 +7407,8 @@ ${transcript}
   }
 
   private async maybeAutoContinueAfterTurnLimit(error: unknown): Promise<boolean> {
-    if (!this.isWindowTurnLimitExceededError(error)) return false;
     if (!this.autoContinueOnTurnLimit) return false;
-
-    while (true) {
-      const pendingSteps = this.plan?.steps?.filter((step) => step.status === "pending").length || 0;
-      const assessment = this.assessContinuationWindow();
-      const threshold = this.minProgressScoreForAutoContinue;
-      const continuationBudgetRemaining = Math.max(0, this.maxAutoContinuations - this.continuationCount);
-      const reachedContinuationCap = continuationBudgetRemaining <= 0;
-      const hasLoopRisk =
-        assessment.loopRiskIndex >= 0.7 || assessment.repeatedFingerprintCount >= 3;
-      const reachedLoopWarning = assessment.repeatedFingerprintCount >= this.loopWarningThreshold;
-      const reachedLoopCritical = assessment.repeatedFingerprintCount >= this.loopCriticalThreshold;
-      const belowProgressThreshold =
-        this.continuationStrategy === "adaptive_progress" &&
-        assessment.progressScore < threshold;
-      const noPendingSteps = pendingSteps <= 0;
-      const lifetimeCapHit = this.lifetimeTurnCount >= this.maxLifetimeTurns;
-      this.noProgressStreak = assessment.progressScore <= 0 ? this.noProgressStreak + 1 : 0;
-      this.lastLoopFingerprint = assessment.dominantFingerprint || this.lastLoopFingerprint;
-      const noProgressCircuitBreak =
-        this.noProgressStreak >= this.globalNoProgressCircuitBreaker;
-
-      let blockReason = "";
-      if (lifetimeCapHit) {
-        blockReason = `Lifetime turn limit reached (${this.lifetimeTurnCount}/${this.maxLifetimeTurns}).`;
-      } else if (noPendingSteps) {
-        blockReason = "No pending plan steps remain to continue.";
-      } else if (noProgressCircuitBreak) {
-        blockReason =
-          `No-progress circuit breaker reached (${this.noProgressStreak}/${this.globalNoProgressCircuitBreaker}).`;
-      } else if (reachedContinuationCap) {
-        blockReason = `Auto continuation limit reached (${this.continuationCount}/${this.maxAutoContinuations}).`;
-      } else if (reachedLoopCritical) {
-        this.blockedLoopFingerprintForWindow = this.getSignatureFromLoopFingerprint(
-          assessment.dominantFingerprint,
-        );
-        blockReason =
-          `Loop fingerprint repeated too often (${assessment.repeatedFingerprintCount}/${this.loopCriticalThreshold}).`;
-      } else if (hasLoopRisk) {
-        blockReason = `Loop risk is high (${assessment.loopRiskIndex.toFixed(2)}). Try changing strategy or constraints.`;
-      } else if (belowProgressThreshold) {
-        blockReason =
-          `Recent progress score (${assessment.progressScore.toFixed(2)}) is below threshold (${threshold.toFixed(2)}).`;
-      }
-
-      this.emitEvent("continuation_decision", {
-        policy: this.continuationStrategy,
-        continuationWindow: this.continuationWindow,
-        continuationCount: this.continuationCount,
-        maxAutoContinuations: this.maxAutoContinuations,
-        progressScore: assessment.progressScore,
-        progressThreshold: threshold,
-        loopRiskIndex: assessment.loopRiskIndex,
-        repeatedFingerprintCount: assessment.repeatedFingerprintCount,
-        dominantFingerprint: assessment.dominantFingerprint,
-        noProgressStreak: this.noProgressStreak,
-        loopWarningThreshold: this.loopWarningThreshold,
-        loopCriticalThreshold: this.loopCriticalThreshold,
-        allowed: !blockReason,
-        reason: blockReason || "Continuation approved.",
-      });
-
-      if (reachedLoopWarning && !blockReason) {
-        this.pendingLoopStrategySwitchMessage =
-          "Loop warning: switch strategy now. Use a different tool family or change input class before retrying the same operation.";
-        this.emitEvent("step_contract_escalated", {
-          reason: "loop_warning_threshold_reached",
-          repeatedFingerprintCount: assessment.repeatedFingerprintCount,
-          threshold: this.loopWarningThreshold,
-          dominantFingerprint: assessment.dominantFingerprint,
-        });
-      }
-
-      this.daemon.updateTask(this.task.id, {
-        continuationCount: this.continuationCount,
-        continuationWindow: this.continuationWindow,
-        lifetimeTurnsUsed: this.lifetimeTurnCount,
-        lastProgressScore: assessment.progressScore,
-        autoContinueBlockReason: blockReason || undefined,
-        noProgressStreak: this.noProgressStreak,
-        lastLoopFingerprint: assessment.dominantFingerprint || this.lastLoopFingerprint,
-      });
-
-      if (blockReason) {
-        if (this.safetyStopEngineV4Enabled !== false) {
-          this.emitEvent("safety_stop_triggered", {
-            taskId: this.task.id,
-            policy: this.getEffectiveTurnBudgetPolicy(),
-            reason: blockReason,
-            progressScore: assessment.progressScore,
-            loopRiskIndex: assessment.loopRiskIndex,
-            repeatedFingerprintCount: assessment.repeatedFingerprintCount,
-            noProgressStreak: this.noProgressStreak,
-            continuationCount: this.continuationCount,
-            maxAutoContinuations: this.maxAutoContinuations,
-            nextActions: [
-              "Narrow the requested scope",
-              "Provide exact target paths/commands",
-              "Change strategy constraints before continuing",
-            ],
-          });
-        }
-        if (noProgressCircuitBreak) {
-          this.terminalStatus = "needs_user_action";
-          this.failureClass = "budget_exhausted";
-          this.emitEvent("no_progress_circuit_breaker", {
-            noProgressStreak: this.noProgressStreak,
-            threshold: this.globalNoProgressCircuitBreaker,
-            dominantFingerprint: assessment.dominantFingerprint,
-            nextActions: [
-              "Narrow the requested scope",
-              "Provide exact target paths/commands",
-              "Change strategy constraints before continuing",
-            ],
-          });
-          this.daemon.updateTask(this.task.id, {
-            terminalStatus: "needs_user_action",
-            failureClass: "budget_exhausted",
-          });
-        }
-        this.emitEvent("auto_continuation_blocked", {
-          reason: blockReason,
-          suggestion:
-            "Try narrowing scope, providing precise constraints, or giving a different approach before continuing manually.",
-          progressScore: assessment.progressScore,
-          loopRiskIndex: assessment.loopRiskIndex,
-          noProgressStreak: this.noProgressStreak,
-        });
-        return false;
-      }
-
-      await this.maybeCompactBeforeContinuation(assessment);
-      this.continuationCount += 1;
-      this.continuationWindow += 1;
-      this.emitEvent("auto_continuation_started", {
-        mode: "auto",
-        continuationCount: this.continuationCount,
-        continuationWindow: this.continuationWindow,
-        maxAutoContinuations: this.maxAutoContinuations,
-        progressScore: assessment.progressScore,
-        loopRiskIndex: assessment.loopRiskIndex,
-      });
-      this.daemon.updateTask(this.task.id, {
-        continuationCount: this.continuationCount,
-        continuationWindow: this.continuationWindow,
-        lifetimeTurnsUsed: this.lifetimeTurnCount,
-        lastProgressScore: assessment.progressScore,
-        autoContinueBlockReason: undefined,
-        noProgressStreak: this.noProgressStreak,
-        lastLoopFingerprint: assessment.dominantFingerprint || this.lastLoopFingerprint,
-        compactionCount: this.compactionCount,
-        lastCompactionAt: this.lastCompactionAt || undefined,
-        lastCompactionTokensBefore: this.lastCompactionTokensBefore || undefined,
-        lastCompactionTokensAfter: this.lastCompactionTokensAfter || undefined,
-      });
-
-      try {
-        await this.continueAfterBudgetExhaustedUnlocked({
-          mode: "auto",
-          rethrowOnError: true,
-          continuationAssessment: assessment,
-        });
-        return true;
-      } catch (continuationError) {
-        if (this.isWindowTurnLimitExceededError(continuationError)) {
-          continue;
-        }
-        throw continuationError;
-      }
-    }
+    return this.getSessionRuntime().maybeAutoContinueAfterTurnLimit(error);
   }
 
   /**
@@ -7187,9 +7428,7 @@ ${transcript}
     this.lifetimeTurnCount++; // Track lifetime turns across continuation windows
 
     if (this.lifetimeTurnCount % 5 === 0) {
-      this.daemon.updateTask(this.task.id, {
-        lifetimeTurnsUsed: this.lifetimeTurnCount,
-      });
+      this.daemon.updateTask(this.task.id, this.applyRuntimeTaskProjectionToTask());
     }
 
     // Persist usage to task events so it can be exported/audited later.
@@ -9175,14 +9414,186 @@ ${transcript}
     return inferRequiredArtifactExtensionsUtil(this.task.title, this.getContractPrompt());
   }
 
+  private getRequiredArtifactExtensionsForStep(
+    stepContract: Pick<StepExecutionContract, "requiredExtensions">,
+  ): string[] {
+    const stepScopedRequiredArtifactExtensions = (stepContract.requiredExtensions || []).map((ext) =>
+      String(ext).toLowerCase(),
+    );
+    if (stepScopedRequiredArtifactExtensions.length > 0) {
+      return stepScopedRequiredArtifactExtensions;
+    }
+    return this.inferRequiredArtifactExtensions().map((ext) => String(ext).toLowerCase());
+  }
+
   private getContractPrompt(): string {
     const rawPrompt = String(this.task.rawPrompt || "").trim();
     if (rawPrompt) return rawPrompt;
 
-    const prompt = String(this.task.prompt || "").trim();
-    if (prompt) return prompt;
+    const userPrompt = String(this.task.userPrompt || "").trim();
+    if (userPrompt) return userPrompt;
 
-    return String(this.task.userPrompt || "");
+    return String(this.task.prompt || "");
+  }
+
+  private appendTaskContextNote(label: string, content: string): void {
+    const normalizedLabel = String(label || "").trim();
+    const normalizedContent = String(content || "").trim();
+    if (!normalizedLabel || !normalizedContent) return;
+
+    const block = `${normalizedLabel}\n${normalizedContent}`;
+    if (this.taskContextNotes.includes(block)) {
+      return;
+    }
+    this.taskContextNotes.push(block);
+  }
+
+  private buildAppliedSkillContext(): string {
+    if (this.appliedSkills.length === 0) return "";
+    return this.appliedSkills
+      .map((application) => {
+        const lines = [
+          `APPLIED SKILL: ${application.skillName} (${application.skillId})`,
+          `Trigger: ${application.trigger}`,
+          `Reason: ${application.reason}`,
+          application.content,
+        ];
+        return lines.filter(Boolean).join("\n");
+      })
+      .join("\n\n");
+  }
+
+  private getExecutionTaskPrompt(): string {
+    const sections = [this.getContractPrompt()];
+    if (this.taskContextNotes.length > 0) {
+      sections.push(this.taskContextNotes.join("\n\n"));
+    }
+    const appliedSkillContext = this.buildAppliedSkillContext();
+    if (appliedSkillContext) {
+      sections.push(appliedSkillContext);
+    }
+    return sections.filter((section) => String(section || "").trim().length > 0).join("\n\n");
+  }
+
+  private applySkillApplication(application: SkillApplication): boolean {
+    const normalizedContent = String(application.content || "").trim();
+    if (!application.skillId || !application.skillName || !normalizedContent) {
+      this.emitEvent("skill_application_blocked", {
+        skillId: application.skillId || null,
+        skillName: application.skillName || null,
+        reason: "invalid_skill_application",
+      });
+      return false;
+    }
+
+    const normalizedParameters = JSON.stringify(application.parameters || {});
+    const duplicate = this.appliedSkills.find(
+      (existing) =>
+        existing.skillId === application.skillId &&
+        JSON.stringify(existing.parameters || {}) === normalizedParameters,
+    );
+    if (duplicate) {
+      this.emitEvent("skill_application_reused", {
+        skillId: duplicate.skillId,
+        skillName: duplicate.skillName,
+        trigger: application.trigger,
+        reason: application.reason,
+      });
+      return false;
+    }
+
+    const normalizedApplication: SkillApplication = {
+      ...application,
+      content: normalizedContent,
+      appliedAt:
+        typeof application.appliedAt === "number" && Number.isFinite(application.appliedAt)
+          ? application.appliedAt
+          : Date.now(),
+    };
+    this.appliedSkills.push(normalizedApplication);
+
+    const directives = normalizedApplication.contextDirectives;
+    if (directives?.toolRestrictions?.length) {
+      const existing = new Set(this.task.agentConfig?.toolRestrictions || []);
+      for (const toolName of directives.toolRestrictions) {
+        existing.add(toolName);
+      }
+      this.task.agentConfig = {
+        ...(this.task.agentConfig || {}),
+        toolRestrictions: Array.from(existing),
+      };
+    }
+    if (directives?.allowedTools?.length) {
+      const existing = new Set(this.task.agentConfig?.allowedTools || []);
+      for (const toolName of directives.allowedTools) {
+        existing.add(toolName);
+      }
+      this.task.agentConfig = {
+        ...(this.task.agentConfig || {}),
+        allowedTools: Array.from(existing),
+      };
+    }
+    this.availableToolsCacheKey = null;
+    this.availableToolsCache = null;
+
+    this.emitEvent("skill_applied", {
+      skillId: normalizedApplication.skillId,
+      skillName: normalizedApplication.skillName,
+      trigger: normalizedApplication.trigger,
+      reason: normalizedApplication.reason,
+      parameters: normalizedApplication.parameters || {},
+      appliedAt: normalizedApplication.appliedAt,
+      contextDirectives: normalizedApplication.contextDirectives || null,
+    });
+    this.emitEvent("log", {
+      message: `Applied skill context: ${normalizedApplication.skillName}`,
+      skillId: normalizedApplication.skillId,
+      trigger: normalizedApplication.trigger,
+      reason: normalizedApplication.reason,
+    });
+    return true;
+  }
+
+  private consumeSkillApplicationResult(
+    result: Any,
+    fallbackTrigger: SkillApplicationTrigger,
+  ): boolean {
+    const application = result?.skill_application;
+    if (!application || typeof application !== "object") {
+      return false;
+    }
+    const trigger =
+      application.trigger === "slash" ||
+      application.trigger === "planner" ||
+      application.trigger === "model" ||
+      application.trigger === "explicit_hint"
+        ? application.trigger
+        : fallbackTrigger;
+    return this.applySkillApplication({
+      skillId: String(application.skillId || application.skill_id || result?.skill_id || ""),
+      skillName: String(application.skillName || application.skill_name || result?.skill_name || ""),
+      trigger,
+      parameters:
+        application.parameters && typeof application.parameters === "object"
+          ? application.parameters
+          : result?.parameters && typeof result.parameters === "object"
+            ? result.parameters
+            : {},
+      content: String(application.content || result?.content || result?.expanded_prompt || ""),
+      reason: String(
+        application.reason ||
+          result?.application_summary ||
+          `Applied skill '${result?.skill_name || result?.skill_id || "unknown"}'.`,
+      ),
+      appliedAt:
+        typeof application.appliedAt === "number" ? application.appliedAt : Date.now(),
+      contextDirectives:
+        application.contextDirectives && typeof application.contextDirectives === "object"
+          ? application.contextDirectives
+          : result?.context_directives && typeof result.context_directives === "object"
+            ? result.context_directives
+            : undefined,
+    });
   }
 
   private getSkillRoutingQuery(): string {
@@ -9199,7 +9610,7 @@ ${transcript}
       queryHash: createHash("sha1").update(query).digest("hex").slice(0, 12),
       preview,
       titlePreview: String(this.task.title || "").replace(/\s+/g, " ").trim().slice(0, 120),
-      promptPreview: String(this.task.prompt || "").replace(/\s+/g, " ").trim().slice(0, 120),
+      promptPreview: String(this.getContractPrompt()).replace(/\s+/g, " ").trim().slice(0, 120),
       rawPromptPreview: String(this.task.rawPrompt || "").replace(/\s+/g, " ").trim().slice(0, 120),
       userPromptPreview: String(this.task.userPrompt || "").replace(/\s+/g, " ").trim().slice(0, 120),
     });
@@ -9325,10 +9736,11 @@ ${transcript}
   }
 
   private isOptionalFailureStepForBalancedCompletion(step: PlanStep): boolean {
+    const verificationState = this.getVerificationState();
     this.ensureVerificationOutcomeSets();
     const id = String(step.id || "").trim();
     if (!id) return false;
-    if (this.nonBlockingVerificationFailedStepIds.has(id)) return true;
+    if (verificationState.nonBlockingVerificationFailedStepIds.has(id)) return true;
     if (this.getBudgetConstrainedFailureStepIdSet().has(id)) return true;
     const error = String(step.error || "").toLowerCase();
     return /\b(optional|non-blocking|nice-to-have|warning)\b/.test(error);
@@ -9340,6 +9752,7 @@ ${transcript}
    * when all non-verification work steps completed successfully.
    */
   private getWaivableFailedStepIdsAtCompletion(): string[] {
+    const verificationState = this.getVerificationState();
     this.ensureVerificationOutcomeSets();
     if (!this.plan?.steps?.length) return [];
     const failedSteps = this.plan.steps.filter((step) => step.status === "failed");
@@ -9359,7 +9772,7 @@ ${transcript}
 
     // Budget-constrained optional search failures are waivable when non-mutation.
     const hasBlockingVerificationFailure = failedSteps.some((step) =>
-      this.blockingVerificationFailedStepIds.has(step.id),
+      verificationState.blockingVerificationFailedStepIds.has(step.id),
     );
     if (!hasBlockingVerificationFailure) {
       const budgetFailedStepIds = this.getBudgetConstrainedFailureStepIdSet();
@@ -9521,6 +9934,7 @@ ${transcript}
       typeof resultSummary === "string" && resultSummary.trim()
         ? resultSummary.trim()
         : this.buildResultSummary();
+    const runtimeProjection = this.applyRuntimeTaskProjectionToTask();
     this.task.status = "completed";
     this.task.completedAt = Date.now();
     this.task.terminalStatus = terminalStatus;
@@ -9530,10 +9944,6 @@ ${transcript}
     this.task.dependencyOutcome = reliabilityOutcomes.dependencyOutcome;
     this.task.failureDomains = reliabilityOutcomes.failureDomains;
     this.task.stopReasons = reliabilityOutcomes.stopReasons;
-    this.task.budgetUsage = this.getBudgetUsage();
-    this.task.continuationCount = this.continuationCount;
-    this.task.continuationWindow = this.continuationWindow;
-    this.task.lifetimeTurnsUsed = this.lifetimeTurnCount;
     this.task.resultSummary = summary;
     const outputSummary = this.buildTaskOutputSummary();
     this.persistBestKnownOutcome(summary, terminalStatus, failureClass);
@@ -9555,10 +9965,9 @@ ${transcript}
     this.daemon.completeTask(this.task.id, summary, {
       terminalStatus,
       failureClass: this.task.failureClass,
-      budgetUsage: this.getBudgetUsage(),
+      ...runtimeProjection,
       outputSummary,
       bestKnownOutcome: this.bestKnownOutcome,
-      ...this.getCompletionProjectionFields(),
       waiveFailedStepIds: waivableFailedStepIds,
       failedMutationRequiredStepIds,
       waivedVerificationStepIds,
@@ -9572,10 +9981,11 @@ ${transcript}
       ...(this.getEffectiveExecutionMode() === "verified"
         ? {
             verificationEvidenceBundle: {
-              entries: [...this.verificationEvidenceEntries],
+              entries: [...this.getVerificationState().verificationEvidenceEntries],
             } satisfies TaskVerificationEvidenceBundle,
           }
         : {}),
+      ...this.getCompletionProjectionFields(),
     });
     this.emitRunSummary("completed", terminalStatus);
     if (terminalStatus === "ok") {
@@ -9629,6 +10039,7 @@ ${transcript}
       (computedTerminalStatus === "ok" || computedTerminalStatus === "needs_user_action"
         ? undefined
         : fallbackFailureClass || "contract_error");
+    const runtimeProjection = this.applyRuntimeTaskProjectionToTask();
     const hasExplicitBestEffortOutcome =
       metadata?.terminalStatus !== undefined ||
       metadata?.failureClass !== undefined ||
@@ -9651,10 +10062,6 @@ ${transcript}
     this.task.dependencyOutcome = reliabilityOutcomes.dependencyOutcome;
     this.task.failureDomains = reliabilityOutcomes.failureDomains;
     this.task.stopReasons = reliabilityOutcomes.stopReasons;
-    this.task.budgetUsage = this.getBudgetUsage();
-    this.task.continuationCount = this.continuationCount;
-    this.task.continuationWindow = this.continuationWindow;
-    this.task.lifetimeTurnsUsed = this.lifetimeTurnCount;
     this.task.resultSummary = summary;
     const outputSummary = this.buildTaskOutputSummary();
     this.persistBestKnownOutcome(summary, this.task.terminalStatus, this.task.failureClass, reason);
@@ -9674,10 +10081,9 @@ ${transcript}
     this.daemon.completeTask(this.task.id, summary, {
       terminalStatus: this.task.terminalStatus,
       failureClass: this.task.failureClass,
-      budgetUsage: this.getBudgetUsage(),
+      ...runtimeProjection,
       outputSummary,
       bestKnownOutcome: this.bestKnownOutcome,
-      ...this.getCompletionProjectionFields(),
       waiveFailedStepIds: waivableFailedStepIds,
       failedMutationRequiredStepIds,
       waivedVerificationStepIds,
@@ -9689,10 +10095,11 @@ ${transcript}
       ...(this.getEffectiveExecutionMode() === "verified"
         ? {
             verificationEvidenceBundle: {
-              entries: [...this.verificationEvidenceEntries],
+              entries: [...this.getVerificationState().verificationEvidenceEntries],
             } satisfies TaskVerificationEvidenceBundle,
           }
         : {}),
+      ...this.getCompletionProjectionFields(),
     });
     this.emitRunSummary(reason || "best_effort_finalized", this.task.terminalStatus || "ok");
     // Best-effort finalization — don't record as "success" in the playbook
@@ -9703,6 +10110,7 @@ ${transcript}
   private finalizeChatTurn(reason?: string): void {
     this.stopProgressJournal();
     this.saveConversationSnapshot();
+    const runtimeProjection = this.applyRuntimeTaskProjectionToTask();
     this.taskCompleted = true;
     this.task.status = "completed";
     this.task.completedAt = Date.now();
@@ -9711,12 +10119,10 @@ ${transcript}
     this.task.failureClass = undefined;
     this.task.bestKnownOutcome = undefined;
     this.task.resultSummary = undefined;
-    this.task.budgetUsage = this.getBudgetUsage();
-    this.task.continuationCount = this.continuationCount;
-    this.task.continuationWindow = this.continuationWindow;
-    this.task.lifetimeTurnsUsed = this.lifetimeTurnCount;
 
-    this.daemon.completeTask(this.task.id, reason || "Chat turn completed");
+    this.daemon.completeTask(this.task.id, reason || "Chat turn completed", {
+      ...runtimeProjection,
+    });
     void this.closeAcpxRuntimeSession("chat completion");
   }
 
@@ -9755,7 +10161,7 @@ ${transcript}
         "Generate a structured markdown report summarizing this completed task.",
         "",
         `Task: ${this.task.title}`,
-        `Prompt: ${(this.task.prompt || "").slice(0, 500)}`,
+        `Prompt: ${this.getContractPrompt().slice(0, 500)}`,
         `Duration: ${elapsedMin} minutes`,
         `Turns used: ${this.globalTurnCount || 0}`,
         "",
@@ -9826,7 +10232,7 @@ ${transcript}
         this.workspace.id,
         this.task.id,
         this.task.title,
-        this.task.prompt,
+        this.getExecutionTaskPrompt(),
         outcome,
         planSummary,
         toolsUsed,
@@ -9845,7 +10251,11 @@ ${transcript}
         reason: string;
       } | undefined;
       if (outcome === "success") {
-        await PlaybookService.reinforceEntry(this.workspace.id, this.task.prompt, toolsUsed)
+        await PlaybookService.reinforceEntry(
+          this.workspace.id,
+          this.getExecutionTaskPrompt(),
+          toolsUsed,
+        )
           .then(() => {
             playbookReinforced = true;
           })
@@ -9866,7 +10276,7 @@ ${transcript}
           KnowledgeGraphService.extractEntitiesFromTaskResult(
             this.workspace.id,
             this.task.id,
-            this.task.prompt,
+            this.getExecutionTaskPrompt(),
             resultSummary,
           );
         } catch {
@@ -9882,7 +10292,7 @@ ${transcript}
                 this.workspace.id,
                 this.task.id,
                 this.task.title,
-                this.task.prompt,
+                this.getExecutionTaskPrompt(),
                 toolsUsed,
                 resultSummary,
               );
@@ -9971,10 +10381,14 @@ ${transcript}
 
     const extracted = this.extractHtmlFromText(assistantText);
     const generated =
-      extracted || (await this.generateCanvasHtml(this.lastUserMessage || this.task.prompt));
+      extracted ||
+      (await this.generateCanvasHtml(this.lastUserMessage || this.getExecutionTaskPrompt()));
     content.input = {
       ...content.input,
-      content: this.normalizeCanvasContent(generated, this.lastUserMessage || this.task.prompt),
+      content: this.normalizeCanvasContent(
+        generated,
+        this.lastUserMessage || this.getExecutionTaskPrompt(),
+      ),
     };
     this.emitEvent("parameter_inference", {
       tool: content.name,
@@ -9986,7 +10400,7 @@ ${transcript}
 
   private isVisualCanvasTask(): boolean {
     const text =
-      `${this.task.title} ${this.task.prompt} ${this.lastUserMessage || ""}`.toLowerCase();
+      `${this.task.title} ${this.getContractPrompt()} ${this.lastUserMessage || ""}`.toLowerCase();
     return /\b(canvas|visual|chart|graph|diagram|dashboard|preview|ui|interface|interactive|html|website|webpage|browser|screenshot|layout|wireframe|prototype|design|render|inspect|mockup|map|timeline)\b/.test(
       text,
     );
@@ -10003,6 +10417,15 @@ ${transcript}
       console.log(`${this.logTag} Web search mode disabled: removed web_search from offered tools`);
     }
     return filtered;
+  }
+
+  private getDefaultPermissionMode(): PermissionMode {
+    const configuredDefault = PermissionSettingsManager.loadSettings().defaultMode;
+    const executionMode = this.task.agentConfig?.executionMode;
+    if (executionMode === "plan" || executionMode === "analyze") {
+      return "plan";
+    }
+    return configuredDefault || "default";
   }
 
   private getTaskToolRestrictions(): Set<string> {
@@ -10546,96 +10969,7 @@ ${transcript}
    * This prevents the LLM from trying to use tools that have been disabled by the circuit breaker
    */
   private getAvailableTools() {
-    const restrictedTools = this.getTaskToolRestrictions();
-    const hasAllowlist = this.hasTaskToolAllowlistConfigured();
-    const allowedTools = this.getTaskToolAllowlist();
-    const restrictedByTask = (name: string) =>
-      restrictedTools.has("*") || restrictedTools.has(name);
-    const blockedByAllowlist = (name: string) =>
-      hasAllowlist && !allowedTools.has("*") && !allowedTools.has(name);
-    const disabledTools = this.toolFailureTracker.getDisabledTools();
-    const cacheKey = this.buildAvailableToolsCacheKey({
-      disabledTools,
-      restrictedTools,
-      allowedTools,
-      hasAllowlist,
-    });
-    if (this.availableToolsCacheKey === cacheKey && this.availableToolsCache) {
-      return this.availableToolsCache.slice();
-    }
-
-    this.deferredToolCatalog = new DeferredToolCatalog(this.toolRegistry.getTools());
-    this.toolSearchService = new ToolSearchService(this.toolRegistry.getDeferredTools());
-    const deferredMatches = this.toolSearchService.search(
-      [this.task.title, this.task.prompt, this.lastUserMessage].filter(Boolean).join(" "),
-      8,
-    );
-    const deferredMatchNames = new Set([
-      ...deferredMatches.map((match) => match.name),
-      ...this.discoveredDeferredToolNames,
-    ]);
-    const allTools = this.deferredToolCatalog
-      .getAll()
-      .filter(
-        (entry) =>
-          !entry.deferred || entry.tool.runtime?.alwaysExpose || deferredMatchNames.has(entry.tool.name),
-      )
-      .map((entry) => entry.tool);
-    let finalTools: Any[];
-
-    if (disabledTools.length === 0 && restrictedTools.size === 0 && !hasAllowlist) {
-      let tools = allTools;
-      if (!this.isVisualCanvasTask()) {
-        tools = tools.filter((tool) => !this.isCanvasTool(tool.name));
-      }
-      const policyFiltered = filterToolsByPolicy(tools, this.getToolPolicyContext());
-      const modeFiltered = this.applyWebSearchModeFilter(policyFiltered.tools);
-      const agentPolicyFiltered = this.applyAgentPolicyToolFilter(modeFiltered);
-      finalTools = this.applyAdaptiveToolAvailabilityFilter(
-        this.applyStepScopedToolPolicy(this.applyIntentFilter(agentPolicyFiltered)),
-      );
-      this.availableToolsCacheKey = cacheKey;
-      this.availableToolsCache = finalTools.slice();
-      return finalTools;
-    }
-
-    let filtered = allTools
-      .filter((tool) => !restrictedByTask(tool.name))
-      .filter((tool) => !blockedByAllowlist(tool.name))
-      .filter((tool) => !disabledTools.includes(tool.name));
-    if (filtered.length !== allTools.length) {
-      console.log(
-        `${this.logTag} Filtered out ${allTools.length - filtered.length} tools by policy/allowlist/denials`,
-      );
-    }
-
-    if (disabledTools.length > 0) {
-      console.log(
-        `${this.logTag} Filtered out ${disabledTools.length} disabled tools: ${disabledTools.join(", ")}`,
-      );
-    }
-
-    if (hasAllowlist) {
-      console.log(`${this.logTag} Tool allowlist active (${allowedTools.size} tool(s))`);
-    }
-
-    if (!this.isVisualCanvasTask()) {
-      filtered = filtered.filter((tool) => !this.isCanvasTool(tool.name));
-    }
-    const policyFiltered = filterToolsByPolicy(filtered, this.getToolPolicyContext());
-    if (policyFiltered.blocked.length > 0) {
-      console.log(
-        `${this.logTag} Mode/domain policy filtered ${policyFiltered.blocked.length} tool(s)`,
-      );
-    }
-    const modeFiltered = this.applyWebSearchModeFilter(policyFiltered.tools);
-    const agentPolicyFiltered = this.applyAgentPolicyToolFilter(modeFiltered);
-    finalTools = this.applyAdaptiveToolAvailabilityFilter(
-      this.applyStepScopedToolPolicy(this.applyIntentFilter(agentPolicyFiltered)),
-    );
-    this.availableToolsCacheKey = cacheKey;
-    this.availableToolsCache = finalTools.slice();
-    return finalTools;
+    return this.getSessionRuntime().getAvailableTools();
   }
 
   /**
@@ -10677,7 +11011,7 @@ ${transcript}
     const contextParts: string[] = [];
 
     if (this.task.title) contextParts.push(this.task.title);
-    if (this.task.prompt) contextParts.push(this.task.prompt);
+    contextParts.push(this.getExecutionTaskPrompt());
     if (this.lastUserMessage) contextParts.push(this.lastUserMessage);
 
     const currentStep =
@@ -10880,7 +11214,7 @@ ${transcript}
       : this.isVerificationStepForCompletion(step)
         ? "verification"
         : "analysis";
-    const stepText = `${this.task.title || ""}\n${step.description || ""}\n${this.task.prompt || ""}\n${this.lastUserMessage || ""}\n${this.lastAssistantOutput || ""}`;
+    const stepText = `${this.task.title || ""}\n${step.description || ""}\n${this.getExecutionTaskPrompt()}\n${this.lastUserMessage || ""}\n${this.lastAssistantOutput || ""}`;
     const allowlist = this.buildStepToolAllowlist(
       stepContract,
       stepKind,
@@ -11005,130 +11339,7 @@ ${transcript}
    * This is used when recreating an executor for follow-up messages
    */
   rebuildConversationFromEvents(events: TaskEvent[]): void {
-    const checkpointPayload = TranscriptStore.loadCheckpointSync(this.workspace.path, this.task.id);
-    if (checkpointPayload && this.restoreConversationFromPayload(checkpointPayload, "checkpoint")) {
-      console.log(`${this.logTag} Successfully restored conversation from transcript checkpoint`);
-      return;
-    }
-
-    // First, try to restore from a saved conversation snapshot
-    // This provides full conversation context including tool results, web content, etc.
-    if (this.restoreFromSnapshot(events)) {
-      console.log(`${this.logTag} Successfully restored conversation from snapshot`);
-      // If the snapshot didn't include usageTotals (older format), reconstruct
-      // from llm_usage events so budget enforcement still works.
-      if (this.totalInputTokens === 0 && this.totalOutputTokens === 0) {
-        this.restoreUsageTotalsFromEvents(events);
-      }
-      return;
-    }
-
-    // Fallback: Build a summary of the previous conversation from events
-    // This is used for backward compatibility with tasks that don't have snapshots
-    console.log(`${this.logTag} No snapshot found, falling back to event-based summary`);
-    const conversationParts: string[] = [];
-
-    // Add the original task as context
-    conversationParts.push(`Original task: ${this.task.title}`);
-    conversationParts.push(`Task details: ${this.task.prompt}`);
-    conversationParts.push("");
-    conversationParts.push("Previous conversation summary:");
-
-    for (const event of events) {
-      switch (this.getReplayEventType(event)) {
-        case "user_message":
-          // User follow-up messages
-          if (event.payload?.message) {
-            conversationParts.push(`User: ${event.payload.message}`);
-          }
-          break;
-        case "log":
-          if (event.payload?.message) {
-            // User messages are logged as "User: message"
-            if (event.payload.message.startsWith("User: ")) {
-              conversationParts.push(`User: ${event.payload.message.slice(6)}`);
-            } else {
-              conversationParts.push(`System: ${event.payload.message}`);
-            }
-          }
-          break;
-        case "assistant_message":
-          if (event.payload?.message) {
-            // Truncate long messages in summary
-            const msg =
-              event.payload.message.length > 500
-                ? event.payload.message.slice(0, 500) + "..."
-                : event.payload.message;
-            conversationParts.push(`Assistant: ${msg}`);
-          }
-          break;
-        case "tool_call":
-          if (event.payload?.tool) {
-            conversationParts.push(`[Used tool: ${event.payload.tool}]`);
-          }
-          break;
-        case "tool_result":
-          // Include tool results for better context
-          if (event.payload?.tool && event.payload?.result) {
-            const result =
-              typeof event.payload.result === "string"
-                ? event.payload.result
-                : JSON.stringify(event.payload.result);
-            // Truncate very long results
-            const truncated = result.length > 1000 ? result.slice(0, 1000) + "..." : result;
-            conversationParts.push(`[Tool result from ${event.payload.tool}: ${truncated}]`);
-          }
-          break;
-        case "plan_created":
-          if (event.payload?.plan?.description) {
-            conversationParts.push(`[Created plan: ${event.payload.plan.description}]`);
-          }
-          break;
-        case "error":
-          if (event.payload?.message || event.payload?.error) {
-            conversationParts.push(`[Error: ${event.payload.message || event.payload.error}]`);
-          }
-          break;
-      }
-    }
-
-    // Only rebuild if there's meaningful history
-    if (conversationParts.length > 4) {
-      // More than just the task header
-
-      // Extract the last substantive assistant message from events and restore
-      // tracking variables so that buildResultSummary() / getBestFinalResponseCandidate()
-      // have meaningful content when finalizeTask runs after resumption.
-      let lastEventAssistantMessage: string | null = null;
-      for (const event of events) {
-        if (this.getReplayEventType(event) === "assistant_message" && event.payload?.message) {
-          const msg = String(event.payload.message).trim();
-          if (msg) lastEventAssistantMessage = msg;
-        }
-      }
-      if (lastEventAssistantMessage) {
-        this.lastAssistantOutput = lastEventAssistantMessage;
-        this.lastNonVerificationOutput = lastEventAssistantMessage;
-        this.lastAssistantText = lastEventAssistantMessage;
-      }
-
-      this.updateConversationHistory([
-        {
-          role: "user",
-          content: conversationParts.join("\n"),
-        },
-        {
-          role: "assistant",
-          content: [
-            {
-              type: "text",
-              text: "I understand the context from our previous conversation. How can I help you now?",
-            },
-          ],
-        },
-      ]);
-      console.log("Rebuilt conversation history from", events.length, "events (legacy fallback)");
-    }
+    this.getSessionRuntime().restoreFromEvents(events);
 
     // Set system prompt
     const fallbackExecutionMode = this.getEffectiveExecutionMode();
@@ -11160,143 +11371,7 @@ You are continuing a previous conversation. The context from the previous conver
    * Old snapshots are automatically pruned.
    */
   saveConversationSnapshot(): void {
-    try {
-      // Only save if there's meaningful conversation history
-      if (this.conversationHistory.length === 0) {
-        return;
-      }
-
-      // Serialize the conversation history with size limits
-      const serializedHistory = this.serializeConversationWithSizeLimit(this.conversationHistory);
-
-      // Serialize file operation tracker state (files read, created, directories explored)
-      const trackerState = this.fileOperationTracker.serialize();
-
-      // Get completed plan steps summary for context
-      const planSummary = this.plan
-        ? {
-            description: this.plan.description,
-            completedSteps: this.plan.steps
-              .filter((s) => s.status === "completed")
-              .map((s) => s.description)
-              .slice(0, 20), // Limit to 20 steps
-            failedSteps: this.plan.steps
-              .filter(
-                (s) => s.status === "failed" && !this.getRecoveredFailureStepIdSet().has(s.id),
-              )
-              .map((s) => ({ description: s.description, error: s.error }))
-              .slice(0, 10),
-          }
-        : undefined;
-
-      // Estimate size for logging
-      const payload = {
-        conversationHistory: serializedHistory,
-        trackerState,
-        planSummary,
-        explicitChatSummaryBlock: this.explicitChatSummaryBlock,
-        explicitChatSummaryCreatedAt: this.explicitChatSummaryCreatedAt,
-        explicitChatSummarySourceMessageCount: this.explicitChatSummarySourceMessageCount,
-        timestamp: Date.now(),
-        messageCount: serializedHistory.length,
-        // Include metadata for debugging
-        modelId: this.modelId,
-        modelKey: this.modelKey,
-        llmProfileUsed: this.llmProfileUsed,
-        resolvedModelKey: this.resolvedModelKey,
-        // Token/cost totals so budget enforcement survives a resume
-        usageTotals: {
-          inputTokens: this.getCumulativeInputTokens(),
-          outputTokens: this.getCumulativeOutputTokens(),
-          cost: this.getCumulativeCost(),
-        },
-      };
-      const estimatedSize = JSON.stringify(payload).length;
-      const sizeMB = (estimatedSize / 1024 / 1024).toFixed(2);
-
-      // Warn if snapshot is getting large
-      if (estimatedSize > 5 * 1024 * 1024) {
-        // > 5MB
-        console.warn(
-          `${this.logTag} Large snapshot (${sizeMB}MB) - consider conversation compaction`,
-        );
-      }
-
-      this.emitEvent("conversation_snapshot", {
-        ...payload,
-        estimatedSizeBytes: estimatedSize,
-      });
-
-      console.log(
-        `${this.logTag} Saved conversation snapshot with ${serializedHistory.length} messages (~${sizeMB}MB) for task ${this.task.id}`,
-      );
-
-      // Prune old snapshots to prevent database bloat (keep only the most recent)
-      this.pruneOldSnapshots();
-    } catch (error) {
-      // Don't fail the task if snapshot saving fails
-      console.error(`${this.logTag} Failed to save conversation snapshot:`, error);
-    }
-  }
-
-  /**
-   * Serialize conversation history with size limits to prevent huge snapshots.
-   * Truncates large tool results and content blocks while preserving structure.
-   */
-  private serializeConversationWithSizeLimit(history: LLMMessage[]): Any[] {
-    const MAX_CONTENT_LENGTH = 50000; // 50KB per content block
-    const MAX_TOOL_RESULT_LENGTH = 10000; // 10KB per tool result
-    const sanitizedHistory = sanitizeToolCallHistory(history);
-
-    return sanitizedHistory.map((msg) => {
-      // Handle string content
-      if (typeof msg.content === "string") {
-        return {
-          role: msg.role,
-          content:
-            msg.content.length > MAX_CONTENT_LENGTH
-              ? msg.content.slice(0, MAX_CONTENT_LENGTH) +
-                "\n[... content truncated for snapshot ...]"
-              : msg.content,
-        };
-      }
-
-      // Handle array content (tool calls, tool results, etc.)
-      if (Array.isArray(msg.content)) {
-        const truncatedContent = msg.content.map((block: Any) => {
-          // Truncate tool_result content
-          if (block.type === "tool_result" && block.content) {
-            const content =
-              typeof block.content === "string" ? block.content : JSON.stringify(block.content);
-            return {
-              ...block,
-              content:
-                content.length > MAX_TOOL_RESULT_LENGTH
-                  ? content.slice(0, MAX_TOOL_RESULT_LENGTH) + "\n[... truncated ...]"
-                  : block.content,
-            };
-          }
-          // Truncate long text blocks
-          if (block.type === "text" && block.text && block.text.length > MAX_CONTENT_LENGTH) {
-            return {
-              ...block,
-              text: block.text.slice(0, MAX_CONTENT_LENGTH) + "\n[... truncated ...]",
-            };
-          }
-          // Strip image base64 data from snapshots to prevent database bloat
-          if (block.type === "image") {
-            return {
-              type: "text",
-              text: `[Image was attached: ${block.mimeType || "unknown"}, ${((block.originalSizeBytes || 0) / 1024).toFixed(0)}KB]`,
-            };
-          }
-          return block;
-        });
-        return { role: msg.role, content: truncatedContent };
-      }
-
-      return { role: msg.role, content: msg.content };
-    });
+    this.getSessionRuntime().saveSnapshot();
   }
 
   /**
@@ -11319,157 +11394,8 @@ You are continuing a previous conversation. The context from the previous conver
    * Returns true if a snapshot was found and restored, false otherwise.
    */
   private restoreFromSnapshot(events: TaskEvent[]): boolean {
-    // Find the most recent conversation_snapshot event
-    const snapshotEvents = events.filter((e) => this.getReplayEventType(e) === "conversation_snapshot");
-    if (snapshotEvents.length === 0) {
-      return false;
-    }
-
-    // Get the most recent snapshot (events are sorted by timestamp ascending)
-    const latestSnapshot = snapshotEvents[snapshotEvents.length - 1];
-    const payload = latestSnapshot.payload;
-
-    if (!payload?.conversationHistory || !Array.isArray(payload.conversationHistory)) {
-      console.warn(`${this.logTag} Snapshot found but conversationHistory is invalid`);
-      return false;
-    }
-
-    return this.restoreConversationFromPayload(payload, "snapshot");
-  }
-
-  private restoreConversationFromPayload(payload: Any, sourceLabel: string): boolean {
-    if (!payload?.conversationHistory || !Array.isArray(payload.conversationHistory)) {
-      return false;
-    }
-
-    try {
-      let restoredHistory: LLMMessage[] = payload.conversationHistory.map((msg: Any) => ({
-        role: msg.role as "user" | "assistant",
-        content: msg.content,
-      }));
-      restoredHistory = sanitizeToolCallHistory(restoredHistory);
-
-      if (payload.trackerState) {
-        this.fileOperationTracker.restore(payload.trackerState);
-      }
-
-      if (payload.planSummary && restoredHistory.length > 0) {
-        const planContext = this.buildPlanContextSummary(payload.planSummary);
-        if (planContext && restoredHistory[0].role === "user") {
-          const firstMsg = restoredHistory[0];
-
-          if (typeof firstMsg.content === "string") {
-            if (!firstMsg.content.includes("PREVIOUS TASK CONTEXT")) {
-              restoredHistory = [
-                {
-                  role: "user",
-                  content: `${planContext}\n\n${firstMsg.content}`,
-                },
-                ...restoredHistory.slice(1),
-              ];
-            }
-          } else if (Array.isArray(firstMsg.content)) {
-            const existingText = firstMsg.content
-              .filter((b: Any) => b.type === "text")
-              .map((b: Any) => b.text)
-              .join("\n");
-            if (!existingText.includes("PREVIOUS TASK CONTEXT")) {
-              restoredHistory = [
-                {
-                  role: "user",
-                  content: [{ type: "text" as const, text: planContext }, ...(firstMsg.content as LLMContent[])],
-                },
-                ...restoredHistory.slice(1),
-              ];
-            }
-          }
-        }
-      }
-
-      this.updateConversationHistory(restoredHistory);
-
-      if (payload.usageTotals) {
-        this.usageOffsetInputTokens = 0;
-        this.usageOffsetOutputTokens = 0;
-        this.usageOffsetCost = 0;
-        this.totalInputTokens = payload.usageTotals.inputTokens || 0;
-        this.totalOutputTokens = payload.usageTotals.outputTokens || 0;
-        this.totalCost = payload.usageTotals.cost || 0;
-      }
-
-      this.explicitChatSummaryBlock =
-        typeof payload.explicitChatSummaryBlock === "string" && payload.explicitChatSummaryBlock.trim()
-          ? payload.explicitChatSummaryBlock
-          : null;
-      this.explicitChatSummaryCreatedAt =
-        typeof payload.explicitChatSummaryCreatedAt === "number" ? payload.explicitChatSummaryCreatedAt : 0;
-      this.explicitChatSummarySourceMessageCount =
-        typeof payload.explicitChatSummarySourceMessageCount === "number"
-          ? payload.explicitChatSummarySourceMessageCount
-          : 0;
-
-      console.log(
-        `${this.logTag} Restored conversation from ${sourceLabel} with ${restoredHistory.length} messages`,
-      );
-      return true;
-    } catch (error) {
-      console.error(`${this.logTag} Failed to restore from ${sourceLabel}:`, error);
-      return false;
-    }
-  }
-
-  /**
-   * Restore token/cost totals from persisted llm_usage events.
-   * Used as a fallback when the snapshot doesn't include usageTotals
-   * (e.g. older snapshots saved before the field was added, or crash recovery).
-   */
-  private restoreUsageTotalsFromEvents(events: TaskEvent[]): void {
-    // llm_usage events store cumulative totals — just grab the last one
-    const usageEvents = events.filter((e) => e.type === "llm_usage");
-    if (usageEvents.length === 0) return;
-
-    const latest = usageEvents[usageEvents.length - 1];
-    const totals = latest.payload?.totals;
-    if (totals) {
-      this.usageOffsetInputTokens = 0;
-      this.usageOffsetOutputTokens = 0;
-      this.usageOffsetCost = 0;
-      this.totalInputTokens = totals.inputTokens || 0;
-      this.totalOutputTokens = totals.outputTokens || 0;
-      this.totalCost = totals.cost || 0;
-      console.log(
-        `${this.logTag} Restored usage totals from events: ${this.totalInputTokens + this.totalOutputTokens} tokens, ${this.totalCost.toFixed(4)} cost`,
-      );
-    }
-  }
-
-  /**
-   * Build a summary of the initial task execution plan for context.
-   */
-  private buildPlanContextSummary(planSummary: {
-    description?: string;
-    completedSteps?: string[];
-    failedSteps?: { description: string; error?: string }[];
-  }): string {
-    const parts: string[] = ["PREVIOUS TASK CONTEXT:"];
-
-    if (planSummary.description) {
-      parts.push(`Task plan: ${planSummary.description}`);
-    }
-
-    if (planSummary.completedSteps && planSummary.completedSteps.length > 0) {
-      parts.push(
-        `Completed steps:\n${planSummary.completedSteps.map((s) => `  - ${s}`).join("\n")}`,
-      );
-    }
-
-    if (planSummary.failedSteps && planSummary.failedSteps.length > 0) {
-      parts.push(
-        `Failed steps:\n${planSummary.failedSteps.map((s) => `  - ${s.description}${s.error ? ` (${s.error})` : ""}`).join("\n")}`,
-      );
-    }
-
-    return parts.length > 1 ? parts.join("\n") : "";
+    this.getSessionRuntime().restoreFromEvents(events);
+    return this.conversationHistory.length > 0;
   }
 
   /**
@@ -11481,28 +11407,9 @@ You are continuing a previous conversation. The context from the previous conver
     if (workspace.permissions.shell) {
       this.allowExecutionWithoutShell = false;
     }
-    // Recreate tool registry to pick up new permissions (e.g., shell enabled)
-    this.toolRegistry = new ToolRegistry(
-      workspace,
-      this.daemon,
-      this.task.id,
-      this.task.agentConfig?.gatewayContext,
-      this.task.agentConfig?.toolRestrictions,
-    );
-    this.toolRegistry.setWorkspacePathAliasPolicy(this.getEffectiveWorkspacePathAliasPolicy());
-    this.toolRegistry.setWebSearchDomainPolicy({
-      allowedDomains: this.webSearchAllowedDomains,
-      blockedDomains: this.webSearchBlockedDomains,
-    });
-
-    // Re-register handlers after recreating tool registry
-    this.toolRegistry.setPlanRevisionHandler((newSteps, reason, clearRemaining) => {
-      this.requestPlanRevision(newSteps, reason, clearRemaining);
-    });
-    this.toolRegistry.setWorkspaceSwitchHandler(async (newWorkspace) => {
-      await this.handleWorkspaceSwitch(newWorkspace);
-    });
+    this.toolRegistry = this.buildToolRegistry(workspace);
     this.reloadAgentPolicy();
+    this.getSessionRuntime().applyWorkspaceUpdate(workspace, this.toolRegistry);
 
     console.log(`Workspace updated for task ${this.task.id}, permissions:`, workspace.permissions);
   }
@@ -11570,7 +11477,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private pushVerificationEvidence(entry: VerificationEvidenceEntry): void {
-    this.verificationEvidenceEntries.push(entry);
+    this.getSessionRuntime().recordVerificationEvidence(entry);
   }
 
   /**
@@ -11900,14 +11807,8 @@ You are continuing a previous conversation. The context from the previous conver
       }
     }
 
-    // Reset tool failure tracker (tools might work on retry)
-    this.toolFailureTracker = new ToolFailureTracker();
-    this.toolResultMemory = [];
+    this.getSessionRuntime().resetForRetry();
     this.planRevisionCount = 0;
-    this.lastAssistantOutput = null;
-    this.lastNonVerificationOutput = null;
-    this.lastRecoveryFailureSignature = "";
-    this.getRecoveredFailureStepIdSet().clear();
 
     // Add context for LLM about retry — deep work gets systematic debug instructions
     const retryMessage = this.task.agentConfig?.deepWorkMode
@@ -12508,7 +12409,7 @@ You are continuing a previous conversation. The context from the previous conver
     for (const candidate of this.getStepAliasPathHints(step.id)) {
       addEntry(candidate, "step_alias_hints");
     }
-    for (const candidate of this.extractStepPathCandidates({ ...step, description: this.task.prompt || "" } as PlanStep)) {
+    for (const candidate of this.extractStepPathCandidates({ ...step, description: this.getContractPrompt() || "" } as PlanStep)) {
       addEntry(candidate, "task_prompt_candidates");
     }
 
@@ -12593,7 +12494,7 @@ You are continuing a previous conversation. The context from the previous conver
     return (
       stepContract.targetPaths[0] ||
       this.extractStepPathCandidates(step)[0] ||
-      this.extractStepPathCandidates({ ...step, description: this.task.prompt || "" } as PlanStep)[0] ||
+      this.extractStepPathCandidates({ ...step, description: this.getContractPrompt() || "" } as PlanStep)[0] ||
       ""
     );
   }
@@ -13056,7 +12957,7 @@ You are continuing a previous conversation. The context from the previous conver
   private async analyzeTask(): Promise<{ additionalContext?: string; taskType: string }> {
     this.emitEvent("log", { message: "Analyzing task requirements..." });
 
-    const prompt = this.task.prompt.toLowerCase();
+    const prompt = this.getContractPrompt().toLowerCase();
 
     // Exclusion patterns: code/development tasks should NOT trigger document hints
     const isCodeTask =
@@ -13392,7 +13293,7 @@ You are continuing a previous conversation. The context from the previous conver
     if (this.conversationHistory.length === 0) {
       pauseHistory.push({
         role: "user",
-        content: this.task.prompt,
+        content: this.getContractPrompt(),
       });
     }
 
@@ -13478,7 +13379,7 @@ You are continuing a previous conversation. The context from the previous conver
       shouldPauseForQuestions: this.shouldPauseForQuestions,
       workspacePreflightAcknowledged: this.workspacePreflightAcknowledged,
       capabilityUpgradeRequested: this.capabilityUpgradeRequested,
-      taskPrompt: this.task.prompt,
+      taskPrompt: this.getContractPrompt(),
       workspace: this.workspace,
       isTempWorkspaceId,
       preflightShellExecutionCheck: () => this.preflightShellExecutionCheck(),
@@ -14112,7 +14013,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private isDailyAiAgentTrendsTask(): boolean {
-    const corpus = `${this.task.title}\n${this.task.prompt}`.toLowerCase();
+    const corpus = `${this.task.title}\n${this.getContractPrompt()}`.toLowerCase();
     return corpus.includes("daily ai agent trends research") || /\bai agent trends\b/.test(corpus);
   }
 
@@ -14954,18 +14855,13 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private ensureVerificationOutcomeSets(): void {
-    if (!(this.nonBlockingVerificationFailedStepIds instanceof Set)) {
-      this.nonBlockingVerificationFailedStepIds = new Set();
-    }
-    if (!(this.blockingVerificationFailedStepIds instanceof Set)) {
-      this.blockingVerificationFailedStepIds = new Set();
-    }
     this.ensureReliabilityTrackingSets();
   }
 
   private getNonBlockingFailedStepIdsAtCompletion(): string[] {
+    const verificationState = this.getVerificationState();
     this.ensureVerificationOutcomeSets();
-    if (!this.plan?.steps?.length || this.nonBlockingVerificationFailedStepIds.size === 0) {
+    if (!this.plan?.steps?.length || verificationState.nonBlockingVerificationFailedStepIds.size === 0) {
       return [];
     }
     const failedStepIds = new Set(
@@ -14974,7 +14870,7 @@ You are continuing a previous conversation. The context from the previous conver
         .map((step) => String(step.id || "").trim())
         .filter((id) => id.length > 0),
     );
-    return Array.from(this.nonBlockingVerificationFailedStepIds).filter((id) => failedStepIds.has(id));
+    return Array.from(verificationState.nonBlockingVerificationFailedStepIds).filter((id) => failedStepIds.has(id));
   }
 
   private applyVerificationOutcomeToTerminalStatus(
@@ -15094,7 +14990,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private isStrictLengthArtifactTask(): boolean {
-    const prompt = `${this.task.title}\n${this.task.prompt}`.toLowerCase();
+    const prompt = `${this.task.title}\n${this.getContractPrompt()}`.toLowerCase();
     const hasLengthConstraint =
       /\bexact(?:ly)?\s+\d+\s*(characters?|chars?|words?)\b/.test(prompt) ||
       /\b\d+\s*(characters?|chars?|words?)\b/.test(prompt) ||
@@ -16050,7 +15946,7 @@ You are continuing a previous conversation. The context from the previous conver
     // file exploration), not web research — skip the web evidence requirement.
     if (this.task.parentTaskId && this.task.agentType === "sub") return false;
 
-    const prompt = `${this.task.title}\n${this.task.prompt}`.toLowerCase();
+    const prompt = `${this.task.title}\n${this.getContractPrompt()}`.toLowerCase();
     // Use word-boundary regex to avoid false positives (e.g. "Researcher" matching "search")
     const researchSignalPattern =
       /\b(?:news|latest|today|trending|breaking|reddit|search|headline|current events)\b/;
@@ -16075,7 +15971,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private taskRequiresTodayContext(): boolean {
-    const prompt = `${this.task.title}\n${this.task.prompt}`.toLowerCase();
+    const prompt = `${this.task.title}\n${this.getContractPrompt()}`.toLowerCase();
     return prompt.includes("today");
   }
 
@@ -16207,11 +16103,12 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private async dispatchMentionedAgentsAfterPlanning(): Promise<void> {
-    if (this.dispatchedMentionedAgents) return;
+    const runtime = this.getSessionRuntime();
+    if (runtime.hasDispatchedMentionedAgents()) return;
     if (!this.plan) return;
     try {
       await this.daemon.dispatchMentionedAgents(this.task.id, this.plan);
-      this.dispatchedMentionedAgents = true;
+      runtime.markDispatchedMentionedAgents();
     } catch (error) {
       console.warn(`${this.logTag} Failed to dispatch mentioned agents:`, error);
     }
@@ -16225,7 +16122,7 @@ You are continuing a previous conversation. The context from the previous conver
    * the app can otherwise "plan" and mark steps complete without creating a job.
    */
   private async maybeHandleScheduleSlashCommand(): Promise<boolean> {
-    const raw = String(this.task.prompt || this.task.title || "").trim();
+    const raw = String(this.getContractPrompt() || this.task.title || "").trim();
     if (!raw) return false;
 
     // Only intercept explicit /schedule commands at the start of the prompt.
@@ -16753,32 +16650,36 @@ You are continuing a previous conversation. The context from the previous conver
     return true;
   }
 
-  private async expandSkillPrompt(
+  private async executeUseSkillApplication(
     skillId: string,
     parameters: Record<string, Any>,
     invocationLabel: string,
-  ): Promise<string> {
+    trigger: SkillApplicationTrigger,
+  ): Promise<void> {
     const input = {
       skill_id: skillId,
       parameters,
+      trigger,
     };
 
     this.emitEvent("tool_call", { tool: "use_skill", input });
     const result = await this.toolRegistry.executeTool("use_skill", input);
     this.emitEvent("tool_result", { tool: "use_skill", result });
 
-    if (!result?.success || typeof result?.expanded_prompt !== "string") {
+    if (!result?.success) {
       const reason =
         typeof result?.error === "string" && result.error.trim().length > 0
           ? result.error
           : `Failed to execute ${invocationLabel}.`;
       throw new Error(reason);
     }
-
-    return String(result.expanded_prompt).trim();
+    const applied = this.consumeSkillApplicationResult(result, trigger);
+    if (!applied) {
+      throw new Error(`Failed to apply additive skill context for ${invocationLabel}.`);
+    }
   }
 
-  private async runUseSkillFromSlash(command: ParsedSkillSlashCommand): Promise<string> {
+  private async runUseSkillFromSlash(command: ParsedSkillSlashCommand): Promise<void> {
     const parameters: Record<string, Any> = {};
     if (command.objective) {
       parameters.objective = command.objective;
@@ -16799,7 +16700,12 @@ You are continuing a previous conversation. The context from the previous conver
       parameters.external = "confirm";
     }
 
-    return await this.expandSkillPrompt(command.command, parameters, `/${command.command}`);
+    await this.executeUseSkillApplication(
+      command.command,
+      parameters,
+      `/${command.command}`,
+      "slash",
+    );
   }
 
   private normalizeSkillInvocationQuery(query: string): string {
@@ -16877,151 +16783,33 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private async maybeHandleHighConfidenceSkillRouting(): Promise<boolean> {
-    const contractPrompt = this.getContractPrompt();
-    const rawQuery = `${this.task.title || ""}\n${contractPrompt}`.trim();
+    const rawQuery = this.getSkillRoutingQuery().trim();
     if (!rawQuery) return false;
-    const isDelegatedChildTask =
-      Boolean(this.task.parentTaskId) ||
-      this.task.agentType === "sub" ||
-      this.task.agentType === "parallel";
-
-    const preserveContractPrompt = () => {
-      if (!String(this.task.rawPrompt || "").trim() && contractPrompt.trim()) {
-        this.task.rawPrompt = contractPrompt;
-      }
-    };
-
-    try {
-      const skillLoader = getCustomSkillLoader();
-      const ranked = skillLoader.rankModelInvocableSkillsForQuery(rawQuery, {
-        includePrereqBlockedSkills: true,
-        limit: 20,
-      });
-      const explicitMatch = ranked.find((entry) => this.isExplicitSkillInvocation(rawQuery, entry.skill));
-
-      if (explicitMatch) {
-        const routable = this.getAutoRoutableSkill(explicitMatch.skill?.id, rawQuery);
-        if (!routable) {
-          return false;
-        }
-        if (routable.reason) {
-          this.emitEvent("log", {
-            message: routable.reason,
-            skillId: explicitMatch.skill?.id,
-          });
-          return false;
-        }
-
-        const best = routable.skill;
-
-        const missingRequiredParams = (best.parameters || []).filter(
-          (param: Any) => param.required && param.default === undefined,
-        );
-        if (missingRequiredParams.length > 0) {
-          this.emitEvent("log", {
-            message:
-              `Skipped explicit skill routing to skill '${best.id}' because required parameters are still needed.`,
-            skillId: best.id,
-            missingParameters: missingRequiredParams.map((param: Any) => param.name),
-          });
-          return false;
-        }
-
-        preserveContractPrompt();
-        const expanded = await this.expandSkillPrompt(best.id, {}, `skill '${best.id}'`);
-        this.task.prompt = expanded;
-        this.emitEvent("log", {
-          message: `Explicitly routed request to skill '${best.id}'.`,
-          skillId: best.id,
-        });
-        return true;
-      }
-    } catch (error) {
-      this.emitEvent("log", {
-        message: "Explicit skill routing failed; continuing with confidence-based routing.",
-        error: String((error as Any)?.message || error),
-      });
-    }
-
-    // Higher bar than getHighConfidenceSkillHints: this path bypasses the LLM
-    // entirely and directly expands the skill prompt, so we need strong confidence.
-    const HIGH_CONFIDENCE_THRESHOLD = 0.78;
-    const MIN_MARGIN_OVER_NEXT = 0.12;
-
-    if (isDelegatedChildTask) {
-      this.emitEvent("log", {
-        message:
-          "Skipped deterministic natural-language skill routing for delegated child task to preserve the assigned mission.",
-      });
-      return false;
-    }
 
     try {
       const skillLoader = getCustomSkillLoader();
       const ranked = skillLoader.rankModelInvocableSkillsForQuery(rawQuery, {
         availableToolNames: new Set(this.getAvailableTools().map((tool) => tool.name)),
         includePrereqBlockedSkills: true,
-        limit: 2,
+        limit: 5,
       });
-      const [best, second] = ranked;
-
-      if (!best || best.score < HIGH_CONFIDENCE_THRESHOLD) {
-        return false;
-      }
-
-      const routable = this.getAutoRoutableSkill(best.skill?.id, rawQuery);
-      if (!routable) {
-        return false;
-      }
-      if (routable.reason) {
-        this.emitEvent("log", {
-          message: routable.reason,
-          skillId: best.skill?.id,
-          score: best.score,
-        });
-        return false;
-      }
-      const bestSkill = routable.skill;
-
-      const marginOverNext = best.score - (second?.score ?? 0);
-      if (second && marginOverNext < MIN_MARGIN_OVER_NEXT) {
-        return false;
-      }
-
-      const missingRequiredParams = (bestSkill.parameters || []).filter(
-        (param: Any) => param.required && param.default === undefined,
-      );
-      if (missingRequiredParams.length > 0) {
-        this.emitEvent("log", {
-          message:
-            `Skipped deterministic natural-language routing to skill '${bestSkill.id}' ` +
-            `because required parameters are still needed.`,
-          skillId: bestSkill.id,
-          missingParameters: missingRequiredParams.map((param: Any) => param.name),
-          score: best.score,
-        });
-        return false;
-      }
-
-      preserveContractPrompt();
-      const expanded = await this.expandSkillPrompt(bestSkill.id, {}, `skill '${bestSkill.id}'`);
-      this.task.prompt = expanded;
-      this.emitEvent("log", {
-        message:
-          `Deterministically routed natural-language request to skill '${bestSkill.id}'.`,
-        skillId: bestSkill.id,
-        score: best.score,
-        marginOverNext: second ? marginOverNext : null,
+      this.emitEvent("skill_candidates_ranked", {
+        queryHash: createHash("sha1").update(rawQuery).digest("hex").slice(0, 12),
+        candidates: ranked.map((entry) => ({
+          skillId: entry.skill.id,
+          skillName: entry.skill.name,
+          score: entry.score,
+          reason: entry.skill.metadata?.routing?.useWhen || entry.skill.description || "",
+        })),
       });
-      return true;
     } catch (error) {
       this.emitEvent("log", {
-        message:
-          "Deterministic natural-language skill routing failed; continuing with normal planning.",
+        message: "Skill candidate ranking failed; continuing with normal planning.",
         error: String((error as Any)?.message || error),
       });
-      return false;
     }
+
+    return false;
   }
 
   private configureBatchExternalPolicyFromSlash(command: ParsedSkillSlashCommand): void {
@@ -17211,7 +16999,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private async maybeHandleSkillSlashCommandOrInlineChain(): Promise<boolean> {
-    const raw = String(this.task.prompt || this.task.title || "").trim();
+    const raw = String(this.getContractPrompt() || this.task.title || "").trim();
     if (!raw) return false;
 
     const direct = parseLeadingSkillSlashCommand(raw);
@@ -17226,10 +17014,9 @@ You are continuing a previous conversation. The context from the previous conver
       }
 
       this.configureBatchExternalPolicyFromSlash(direct.parsed);
-      const expanded = await this.runUseSkillFromSlash(direct.parsed);
-      this.task.prompt = expanded;
+      await this.runUseSkillFromSlash(direct.parsed);
       this.emitEvent("log", {
-        message: `Normalized /${direct.parsed.command} to deterministic skill execution.`,
+        message: `Applied /${direct.parsed.command} as additive skill context.`,
       });
       return true;
     }
@@ -17248,20 +17035,10 @@ You are continuing a previous conversation. The context from the previous conver
     }
 
     this.configureBatchExternalPolicyFromSlash(inline.parsed);
-    const expanded = await this.runUseSkillFromSlash(inline.parsed);
-    const base = String(inline.baseText || "").trim();
-
-    this.task.prompt = base
-      ? [
-          base,
-          "",
-          `After completing the primary objective above, run this follow-up workflow from /${inline.parsed.command}:`,
-          expanded,
-        ].join("\n")
-      : expanded;
+    await this.runUseSkillFromSlash(inline.parsed);
 
     this.emitEvent("log", {
-      message: `Detected inline /${inline.parsed.command} chain and normalized it to deterministic skill execution.`,
+      message: `Detected inline /${inline.parsed.command} chain and applied its skill context additively.`,
     });
     return true;
   }
@@ -17508,7 +17285,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private async handleCompanionPrompt(): Promise<void> {
-    const rawPrompt = String(this.task.prompt || "").trim();
+    const rawPrompt = this.getContractPrompt().trim();
 
     // Sub-agent tasks in chat mode (e.g., synthesis) need higher token budgets
     // and a neutral system prompt instead of companion framing.
@@ -17739,7 +17516,7 @@ You are continuing a previous conversation. The context from the previous conver
       "- If work is partial, clearly mark what is complete vs pending.",
       "- Keep it concise and actionable.",
       "",
-      `Original request:\n${this.task.prompt}`,
+      `Original request:\n${this.getContractPrompt()}`,
       "",
       partialAnswer ? `Best partial answer so far:\n${partialAnswer}` : "",
       completedSteps ? `Completed plan steps:\n${completedSteps}` : "",
@@ -17867,7 +17644,7 @@ You are continuing a previous conversation. The context from the previous conver
     }
     if (!this.hasDirectAnswerReady()) return false;
 
-    const rawPrompt = String(this.task.rawPrompt || this.task.userPrompt || this.task.prompt || "").trim();
+    const rawPrompt = this.getContractPrompt().trim();
     if (!rawPrompt || rawPrompt.length > 280) return false;
     const lower = rawPrompt.toLowerCase();
     if (this.isLikelyTaskRequest(lower)) return false;
@@ -17883,7 +17660,7 @@ You are continuing a previous conversation. The context from the previous conver
   }
 
   private async persistQuickAnswerToHistory(quickAnswer: string): Promise<void> {
-    const userContent = await this.buildUserContent(this.task.prompt, this.initialImages);
+    const userContent = await this.buildUserContent(this.getContractPrompt(), this.initialImages);
     const userHistoryContent =
       typeof userContent === "string" ? [{ type: "text" as const, text: userContent }] : userContent;
     this.updateConversationHistory([
@@ -17896,7 +17673,7 @@ You are continuing a previous conversation. The context from the previous conver
     const textPrompt = [
       "Provide a direct answer to this user request in 4-8 lines.",
       "Do not mention internal planning or tools.",
-      `User request:\n${this.task.prompt}`,
+      `User request:\n${this.getExecutionTaskPrompt()}`,
     ].join("\n\n");
     const userContent = await this.buildUserContent(textPrompt, this.initialImages);
     const response = await this.createMessageWithTimeout(
@@ -17942,7 +17719,7 @@ You are continuing a previous conversation. The context from the previous conver
       "**Approach:** Outline your planned approach in 2-3 bullet points.",
       "",
       "Do not use tools or execute anything yet. Just frame the task.",
-      `\nUser request:\n${this.task.prompt}`,
+      `\nUser request:\n${this.getExecutionTaskPrompt()}`,
     ].join("\n");
     const userContent = await this.buildUserContent(preflightPrompt, this.initialImages);
     try {
@@ -17981,10 +17758,8 @@ You are continuing a previous conversation. The context from the previous conver
   private async executeUnlocked(): Promise<void> {
     try {
       this.completionVerificationMetadata = null;
-      this.verificationEvidenceEntries = [];
+      this.getSessionRuntime().resetVerificationState();
       this.ensureVerificationOutcomeSets();
-      this.nonBlockingVerificationFailedStepIds.clear();
-      this.blockingVerificationFailedStepIds.clear();
       this.stepStopReasons.clear();
       this.taskFailureDomains.clear();
       this.getBudgetConstrainedFailureStepIdSet().clear();
@@ -17992,13 +17767,13 @@ You are continuing a previous conversation. The context from the previous conver
       this.failureClass = undefined;
 
       // Emit user_message for the initial prompt so it appears in session history when reopened
-      const initialPrompt = (this.task.userPrompt || this.task.prompt || "").trim();
+      const initialPrompt = this.getContractPrompt().trim();
       if (initialPrompt) {
         this.emitEvent("user_message", { message: initialPrompt });
       }
 
       // Security: Analyze task prompt for potential injection attempts
-      const securityReport = InputSanitizer.analyze(this.task.prompt);
+      const securityReport = InputSanitizer.analyze(this.getContractPrompt());
       if (securityReport.threatLevel !== "none") {
         console.log(
           `${this.logTag} Security analysis: threat level ${securityReport.threatLevel}`,
@@ -18024,7 +17799,7 @@ You are continuing a previous conversation. The context from the previous conver
 
       if (this.isAcpxExternalRuntimeTask()) {
         try {
-          await this.executeWithAcpxRuntime(initialPrompt || this.task.prompt || "");
+          await this.executeWithAcpxRuntime(initialPrompt || this.getContractPrompt() || "");
           return;
         } catch (error) {
           if (error instanceof AcpxRuntimeUnavailableError) {
@@ -18068,7 +17843,7 @@ You are continuing a previous conversation. The context from the previous conver
 
       // If task needs clarification, add context to the task prompt
       if (taskAnalysis.additionalContext) {
-        this.task.prompt = `${this.task.prompt}\n\nADDITIONAL CONTEXT:\n${taskAnalysis.additionalContext}`;
+        this.appendTaskContextNote("ADDITIONAL CONTEXT:", taskAnalysis.additionalContext);
       }
 
       if (this.shouldEmitAnswerFirst()) {
@@ -18129,14 +17904,14 @@ You are continuing a previous conversation. The context from the previous conver
 
       // Workflow decomposition: detect multi-phase sequential pipelines
       try {
-        const workflowRoute = IntentRouter.route(this.task.title || "", this.task.prompt || "");
+        const workflowRoute = IntentRouter.route(this.task.title || "", this.getContractPrompt());
         if (workflowRoute.intent === "workflow" || workflowRoute.intent === "deep_work") {
-          let phases = WorkflowDecomposer.decompose(this.task.prompt || "", workflowRoute);
+          let phases = WorkflowDecomposer.decompose(this.getContractPrompt(), workflowRoute);
 
           // LLM fallback for deep work when regex decomposition fails
           if (!phases && this.task.agentConfig?.deepWorkMode) {
             phases = await WorkflowDecomposer.decomposeWithLLM(
-              this.task.prompt || "",
+              this.getContractPrompt(),
               this.provider,
               this.modelId,
             );
@@ -18218,11 +17993,14 @@ You are continuing a previous conversation. The context from the previous conver
               }
               throw new Error("Workflow pipeline failed");
             }
-            // Augment the task prompt with decomposition context
+            // Add decomposition guidance without overwriting the original task.
             const phaseList = phases
               .map((p, i) => `  Phase ${i + 1} (${p.phaseType}): ${p.prompt.slice(0, 120)}`)
               .join("\n");
-            this.task.prompt = `${this.task.prompt}\n\nWORKFLOW DECOMPOSITION (execute these phases sequentially, passing output from each phase to the next):\n${phaseList}`;
+            this.appendTaskContextNote(
+              "WORKFLOW DECOMPOSITION (execute these phases sequentially, passing output from each phase to the next):",
+              phaseList,
+            );
           }
         }
       } catch {
@@ -18509,16 +18287,7 @@ You are continuing a previous conversation. The context from the previous conver
         terminalStatus: "failed",
         failureClass,
         bestKnownOutcome: this.bestKnownOutcome,
-        budgetUsage: this.getBudgetUsage(),
-        continuationCount: this.continuationCount,
-        continuationWindow: this.continuationWindow,
-        lifetimeTurnsUsed: this.lifetimeTurnCount,
-        compactionCount: this.compactionCount,
-        lastCompactionAt: this.lastCompactionAt || undefined,
-        lastCompactionTokensBefore: this.lastCompactionTokensBefore || undefined,
-        lastCompactionTokensAfter: this.lastCompactionTokensAfter || undefined,
-        noProgressStreak: this.noProgressStreak,
-        lastLoopFingerprint: this.lastLoopFingerprint || undefined,
+        ...this.applyRuntimeTaskProjectionToTask(),
       });
       if (failureClass === "budget_exhausted") {
         this.emitEvent("log", { metric: "agent_budget_exhausted_total", value: 1 });
@@ -18768,7 +18537,7 @@ Return ONLY a JSON object:
       // This ensures even weaker models route to the right skills instead of guessing commands.
       this.logSkillRoutingContext("plan.high-confidence-hints", skillRoutingQuery);
       const highConfidenceSkillHints = this.getHighConfidenceSkillHints(skillRoutingQuery);
-      const planningPrompt = this.getContractPrompt();
+      const planningPrompt = this.getExecutionTaskPrompt();
       const planTextPrompt = highConfidenceSkillHints
         ? `Task: ${this.task.title}\n\nDetails: ${planningPrompt}\n\n${highConfidenceSkillHints}\n\nCreate an execution plan.`
         : `Task: ${this.task.title}\n\nDetails: ${planningPrompt}\n\nCreate an execution plan.`;
@@ -18900,7 +18669,7 @@ Return ONLY a JSON object:
           steps: [
             {
               id: "1",
-              description: this.task.prompt,
+              description: this.getContractPrompt(),
               kind: "primary",
               status: "pending",
             },
@@ -18915,7 +18684,7 @@ Return ONLY a JSON object:
         steps: [
           {
             id: "1",
-            description: this.task.prompt,
+            description: this.getContractPrompt(),
             kind: "primary",
             status: "pending",
           },
@@ -19088,7 +18857,7 @@ Return ONLY a JSON object:
     const complex = wc >= 90 || (wc >= 55 && step.description.includes(";"));
     if (!complex) return false;
     if (policy === "balanced" && !this.task.agentConfig?.deepWorkMode) {
-      const route = IntentRouter.route(this.task.title || "", this.task.prompt || "");
+      const route = IntentRouter.route(this.task.title || "", this.getContractPrompt());
       if (route.intent !== "workflow" && route.intent !== "deep_work") return false;
     }
 
@@ -19752,8 +19521,9 @@ Return ONLY a JSON object:
       const lastStep = this.plan.steps[this.plan.steps.length - 1];
       const finalStepCompleted = lastStep?.status === "completed";
       const majorityCompleted = successfulSteps.length > blockingFailedSteps.length;
+      const verificationState = this.getVerificationState();
       const hasBlockingVerificationFailure = unrecoveredFailedSteps.some((s) =>
-        this.blockingVerificationFailedStepIds.has(s.id),
+        verificationState.blockingVerificationFailedStepIds.has(s.id),
       );
       const optionalOnlyFailures =
         unrecoveredFailedSteps.length > 0 &&
@@ -19983,7 +19753,7 @@ Return ONLY a JSON object:
     // Get personality and identity prompts
     const personalityIdOverride = this.task.agentConfig?.personalityId;
     const contextMode = detectContextMode(
-      this.task.prompt,
+      this.getContractPrompt(),
       this.task.agentConfig?.conversationMode,
       undefined,
     );
@@ -20052,7 +19822,7 @@ Return ONLY a JSON object:
         const synthesized = MemorySynthesizer.synthesize(
           this.workspace.id,
           this.workspace.path,
-          this.task.prompt,
+          this.getExecutionTaskPrompt(),
           {
             tokenBudget:
               DEFAULT_PROMPT_SECTION_BUDGETS.kitContext +
@@ -20072,8 +19842,9 @@ Return ONLY a JSON object:
           (synthError as Error)?.message ?? synthError,
         );
         try {
-          const memCtx = MemoryService.getContextForInjection(this.workspace.id, this.task.prompt);
-          const pbCtx = PlaybookService.getPlaybookForContext(this.workspace.id, this.task.prompt);
+          const executionPrompt = this.getExecutionTaskPrompt();
+          const memCtx = MemoryService.getContextForInjection(this.workspace.id, executionPrompt);
+          const pbCtx = PlaybookService.getPlaybookForContext(this.workspace.id, executionPrompt);
           synthesizedMemoryBlock = [memCtx, pbCtx].filter(Boolean).join("\n");
         } catch {
           // best-effort
@@ -20087,7 +19858,7 @@ Return ONLY a JSON object:
         const selectedContext = await queryOrchestrator.selectContext({
           workspacePath: this.workspace.path,
           taskId: this.task.id,
-          taskPrompt: this.task.prompt,
+          taskPrompt: this.getExecutionTaskPrompt(),
         });
         if (selectedContext.transcriptContext) {
           synthesizedMemoryBlock = [
@@ -20446,7 +20217,7 @@ TASK / CONVERSATION HISTORY:
         const builtPrompt = await queryOrchestrator.buildExecutionPrompt({
           workspaceId: this.workspace.id,
           workspacePath: this.workspace.path,
-          taskPrompt: this.task.prompt,
+          taskPrompt: this.getExecutionTaskPrompt(),
           identityPrompt: "",
           executionMode: effectiveExecutionMode,
           taskDomain: effectiveTaskDomain,
@@ -20488,7 +20259,7 @@ TASK / CONVERSATION HISTORY:
       // Each step gets fresh context with its specific instruction
       // Build context from previous steps if any were completed
       const completedSteps = this.plan?.steps.filter((s) => s.status === "completed") || [];
-      let stepContext = `Execute this step: ${step.description}\n\nTask context: ${this.task.prompt}`;
+      let stepContext = `Execute this step: ${step.description}\n\nTask context: ${this.getExecutionTaskPrompt()}`;
 
       if (completedSteps.length > 0) {
         stepContext += `\n\nPrevious steps already completed:\n${completedSteps.map((s) => `- ${s.description}`).join("\n")}`;
@@ -20692,9 +20463,7 @@ TASK / CONVERSATION HISTORY:
       let stepFailed = false; // Track if step failed due to all tools being disabled/erroring
       let lastFailureReason = ""; // Track the reason for failure
       const stepRequiresArtifactEvidence = stepContract.requiresArtifactEvidence;
-      const requiredArtifactExtensions = this.inferRequiredArtifactExtensions().map((ext) =>
-        String(ext).toLowerCase(),
-      );
+      const requiredArtifactExtensions = this.getRequiredArtifactExtensionsForStep(stepContract);
       const createdFilesBeforeStepList = (
         this.fileOperationTracker?.getCreatedFiles?.() || []
       ).map((file) => String(file));
@@ -20917,15 +20686,8 @@ TASK / CONVERSATION HISTORY:
         bootstrapMutationSucceeded = bootstrap.succeeded;
       }
 
-      const stepKernel = new TurnKernel(
-        {
-          mode: "step",
-          messages,
-          maxIterations,
-          maxEmptyResponses,
-        },
-        {
-          shouldStopBeforeIteration: () => {
+      const stepKernelPolicy: TurnKernelPolicy = {
+          shouldStopBeforeIteration: (state: TurnKernelIterationState) => {
             if (this.cancelled || this.taskCompleted) {
               console.log(
                 `${this.logTag} Step loop terminated: cancelled=${this.cancelled}, completed=${this.taskCompleted}`,
@@ -20999,7 +20761,7 @@ TASK / CONVERSATION HISTORY:
                 return undefined;
             }
           },
-          drainPendingMessages: async () => {
+          drainPendingMessages: async (_state: TurnKernelIterationState) => {
             let pendingMsg = this.drainPendingFollowUp();
             while (pendingMsg) {
               console.log(`${this.logTag} Injecting queued follow-up into step execution`);
@@ -21010,7 +20772,7 @@ TASK / CONVERSATION HISTORY:
               pendingMsg = this.drainPendingFollowUp();
             }
           },
-          beforeIteration: async (state) => {
+          beforeIteration: async (state: TurnKernelIterationState) => {
             iterationCount = state.iterationCount;
             iterStartTime = Date.now();
             const stepElapsed = ((iterStartTime - stepStartTime) / 1000).toFixed(1);
@@ -21031,7 +20793,7 @@ TASK / CONVERSATION HISTORY:
               systemPromptTokens,
               allowSharedContextInjection,
               allowMemoryInjection,
-              memoryQuery: `${this.task.title}\n${this.task.prompt}\nStep: ${step.description}`,
+              memoryQuery: `${this.task.title}\n${this.getContractPrompt()}\nStep: ${step.description}`,
               contextLabel: `step:${step.id} ${step.description}`,
               lastTurnMemoryRecallQuery,
               lastTurnMemoryRecallBlock,
@@ -21040,7 +20802,7 @@ TASK / CONVERSATION HISTORY:
             }));
             state.messages = messages;
           },
-          requestResponse: async (state) => {
+          requestResponse: async (state: TurnKernelIterationState) => {
             iterationCount = state.iterationCount;
             try {
               return await this.requestLLMResponseWithAdaptiveBudget({
@@ -21062,7 +20824,7 @@ TASK / CONVERSATION HISTORY:
                 contextCapacityRecoveryCount += 1;
                 messages = recovery.messages;
                 state.messages = messages;
-                return { recovered: true, messages };
+                return { recovered: true as const, messages };
               }
               if (recovery.exhausted) {
                 stepFailed = true;
@@ -21071,7 +20833,7 @@ TASK / CONVERSATION HISTORY:
                   `Provider continued returning context/window overflow errors.`;
                 continueLoop = false;
                 return {
-                  stopped: true,
+                  stopped: true as const,
                   messages,
                   stopReason: "context_capacity_exhausted",
                 };
@@ -21079,7 +20841,10 @@ TASK / CONVERSATION HISTORY:
               throw llmError;
             }
           },
-          handleResponse: async ({ response, availableTools }, state) => {
+          handleResponse: async (
+            { response, availableTools }: TurnKernelPreparedResponse,
+            state: TurnKernelIterationState,
+          ) => {
             iterationCount = state.iterationCount;
             messages = state.messages;
             continueLoop = state.continueLoop;
@@ -21226,7 +20991,7 @@ TASK / CONVERSATION HISTORY:
           response,
           enabled: shouldApplyQuality,
           contextLabel: `step:${step.id} ${step.description}`,
-          userIntent: `Task: ${this.task.title}\nStep: ${step.description}\n\nUser request/context:\n${this.task.prompt}`,
+          userIntent: `Task: ${this.task.title}\nStep: ${step.description}\n\nUser request/context:\n${this.getExecutionTaskPrompt()}`,
         });
 
         // Process response - only stop if we have actual content AND it's end_turn
@@ -21447,7 +21212,7 @@ TASK / CONVERSATION HISTORY:
 
                 const preflight = await this.preflightToolInvocation({
                   content,
-                  contextText: `${step.description}\n${this.task.prompt}`,
+                  contextText: `${step.description}\n${this.getExecutionTaskPrompt()}`,
                   stepMode: stepContract.mode,
                   assistantText,
                   stepId: step.id,
@@ -22521,6 +22286,9 @@ TASK / CONVERSATION HISTORY:
                       const toolSucceeded = !(result && result.success === false);
                       if (toolSucceeded) {
                         this.recordToolUsage(content.name);
+                        if (content.name === "use_skill") {
+                          this.consumeSkillApplicationResult(result, "model");
+                        }
                       }
 
                       this.recordFileOperation(content.name, content.input, result);
@@ -22986,7 +22754,7 @@ TASK / CONVERSATION HISTORY:
             }
             const preflight = await this.preflightToolInvocation({
               content,
-              contextText: `${step.description}\n${this.task.prompt}`,
+              contextText: `${step.description}\n${this.getExecutionTaskPrompt()}`,
               stepMode: stepContract.mode,
               assistantText,
               stepId: step.id,
@@ -24738,12 +24506,17 @@ TASK / CONVERSATION HISTORY:
           });
           continueLoop = false;
         }
-            state.messages = messages;
-            return { continueLoop, emptyResponseCount };
-          },
-        },
-      );
-      const stepKernelOutcome = await stepKernel.run();
+        state.messages = messages;
+        return { continueLoop, emptyResponseCount };
+      },
+      };
+      const stepKernelOutcome = await this.getSessionRuntime().runStepLoop({
+        mode: "step",
+        messages,
+        maxIterations,
+        maxEmptyResponses,
+        policy: stepKernelPolicy,
+      });
       messages = stepKernelOutcome.messages;
       iterationCount = stepKernelOutcome.iterations;
       emptyResponseCount = stepKernelOutcome.emptyResponseCount;
@@ -25105,11 +24878,9 @@ TASK / CONVERSATION HISTORY:
           strictVerificationOutcome === "required_fail" ||
           verificationAssessment.outcome === "fail_blocking"
         ) {
-          this.blockingVerificationFailedStepIds.add(step.id);
-          this.nonBlockingVerificationFailedStepIds.delete(step.id);
+          this.getSessionRuntime().addBlockingVerificationFailedStep(step.id);
         } else {
-          this.blockingVerificationFailedStepIds.delete(step.id);
-          this.nonBlockingVerificationFailedStepIds.add(step.id);
+          this.getSessionRuntime().addNonBlockingVerificationFailedStep(step.id);
           this.upsertCompletionVerificationMetadata(verificationAssessment);
           if (
             strictVerificationOutcome === "pending_user_action" ||
@@ -25227,9 +24998,8 @@ TASK / CONVERSATION HISTORY:
         for (const domain of this.inferFailureDomainsFromReason(lastFailureReason || "")) {
           this.taskFailureDomains.add(domain);
         }
-        const isNonBlockingVerificationFailure = this.nonBlockingVerificationFailedStepIds.has(
-          step.id,
-        );
+        const isNonBlockingVerificationFailure =
+          this.getVerificationState().nonBlockingVerificationFailedStepIds.has(step.id);
 
         const isRecoveryStep = this.isRecoveryPlanStep(step);
         const capabilityRecoveryRequested =
@@ -25255,11 +25025,13 @@ TASK / CONVERSATION HISTORY:
         );
         const userRequestedRecovery = !isRecoveryStep && isRecoverySignal;
         const autoRecoveryRequested = this.shouldAutoPlanRecovery(step, lastFailureReason || "");
+        const runtime = this.getSessionRuntime();
+        const recoveryState = runtime.getRecoveryState();
         const shouldHandleRecovery =
           !isNonBlockingVerificationFailure &&
           (userRequestedRecovery || autoRecoveryRequested) &&
           recoveryClass !== "user_blocker" &&
-          this.lastRecoveryFailureSignature !== recoverySignature;
+          recoveryState.lastRecoveryFailureSignature !== recoverySignature;
 
         if (shouldHandleRecovery) {
           if (
@@ -25479,8 +25251,8 @@ TASK / CONVERSATION HISTORY:
             );
             if (revisionApplied) {
               this.autoRecoveryStepsPlanned += 1;
-              this.lastRecoveryFailureSignature = recoverySignature;
-              this.getRecoveredFailureStepIdSet().add(step.id);
+              runtime.setRecoveryFailureSignature(recoverySignature);
+              runtime.markRecoveredFailureStep(step.id);
               if (isDeepWork) {
                 this.emitEvent("research_recovery_started", {
                   stepId: step.id,
@@ -25537,10 +25309,9 @@ TASK / CONVERSATION HISTORY:
         step.completedAt = Date.now();
         this.persistBestKnownOutcome();
         delete (step as Any).__verificationRewindAttempted;
-        this.nonBlockingVerificationFailedStepIds.delete(step.id);
-        this.blockingVerificationFailedStepIds.delete(step.id);
-        this.lastRecoveryFailureSignature = "";
-        this.getRecoveredFailureStepIdSet().delete(step.id);
+        this.getSessionRuntime().clearVerificationFailedStep(step.id);
+        this.getSessionRuntime().clearRecoveryFailureSignature();
+        this.getSessionRuntime().clearRecoveredFailureStep(step.id);
         this.getBudgetConstrainedFailureStepIdSet().delete(step.id);
         const totalStepDuration = ((Date.now() - stepStartTime) / 1000).toFixed(1);
         console.log(
@@ -25736,15 +25507,7 @@ TASK / CONVERSATION HISTORY:
         status: "failed",
         error: error?.message || String(error),
         completedAt: Date.now(),
-        continuationCount: this.continuationCount,
-        continuationWindow: this.continuationWindow,
-        lifetimeTurnsUsed: this.lifetimeTurnCount,
-        noProgressStreak: this.noProgressStreak,
-        lastLoopFingerprint: this.lastLoopFingerprint || undefined,
-        compactionCount: this.compactionCount,
-        lastCompactionAt: this.lastCompactionAt || undefined,
-        lastCompactionTokensBefore: this.lastCompactionTokensBefore || undefined,
-        lastCompactionTokensAfter: this.lastCompactionTokensAfter || undefined,
+        ...this.applyRuntimeTaskProjectionToTask(),
       });
       this.emitTerminalFailureOnce({
         message: error.message,
@@ -25761,50 +25524,11 @@ TASK / CONVERSATION HISTORY:
     mode: "manual" | "auto" | "follow_up";
     reason: string;
   }): void {
-    const preResetUsage = {
-      inputTokens: this.getCumulativeInputTokens(),
-      outputTokens: this.getCumulativeOutputTokens(),
-      totalTokens: this.getCumulativeInputTokens() + this.getCumulativeOutputTokens(),
-      cost: this.getCumulativeCost(),
-    };
-    this.emitEvent("budget_reset_for_continuation", {
-      reason: opts.reason,
-      mode: opts.mode,
-      continuationCount: this.continuationCount,
-      continuationWindow: this.continuationWindow,
-      previousUsageTotals: preResetUsage,
-    });
-
-    // Preserve cumulative usage offsets but reset window counters.
-    this.usageOffsetInputTokens = preResetUsage.inputTokens;
-    this.usageOffsetOutputTokens = preResetUsage.outputTokens;
-    this.usageOffsetCost = preResetUsage.cost;
-    this.globalTurnCount = 0;
-    this.iterationCount = 0;
-    this.totalInputTokens = 0;
-    this.totalOutputTokens = 0;
-    this.totalCost = 0;
-    this.softDeadlineTriggered = false;
-    this.wrapUpRequested = false;
+    this.getSessionRuntime().resetTurnBudgetWindow(opts);
     this.budgetSoftLandingInjected = false;
     this.taskCompleted = false;
     this.cancelled = false;
     this.cancelReason = null;
-    this.blockedLoopFingerprintForWindow = null;
-    this.turnWindowSoftExhaustedNotified = false;
-    this.windowStartEventCount = this.daemon.getTaskEvents(this.task.id).length;
-    this.daemon.updateTask(this.task.id, {
-      continuationCount: this.continuationCount,
-      continuationWindow: this.continuationWindow,
-      lifetimeTurnsUsed: this.lifetimeTurnCount,
-      autoContinueBlockReason: undefined,
-      noProgressStreak: this.noProgressStreak,
-      lastLoopFingerprint: this.lastLoopFingerprint || undefined,
-      compactionCount: this.compactionCount,
-      lastCompactionAt: this.lastCompactionAt || undefined,
-      lastCompactionTokensBefore: this.lastCompactionTokensBefore || undefined,
-      lastCompactionTokensAfter: this.lastCompactionTokensAfter || undefined,
-    });
   }
 
   /**
@@ -25824,173 +25548,11 @@ TASK / CONVERSATION HISTORY:
     continuationAssessment?: ReturnType<typeof ProgressScoreEngine.assessWindow>;
   } = {}): Promise<void> {
     const mode = opts.mode || "manual";
-    const rethrowOnError = opts.rethrowOnError === true;
-    try {
-      if (mode === "manual") {
-        this.continuationCount += 1;
-        this.continuationWindow += 1;
-      }
-      const continuationAssessment = opts.continuationAssessment ?? this.assessContinuationWindow();
-      this.noProgressStreak = continuationAssessment.progressScore <= 0 ? this.noProgressStreak + 1 : 0;
-      if (continuationAssessment.dominantFingerprint) {
-        this.lastLoopFingerprint = continuationAssessment.dominantFingerprint;
-      }
-      if (mode === "manual") {
-        this.emitEvent("continuation_decision", {
-          policy: this.continuationStrategy,
-          continuationWindow: this.continuationWindow,
-          continuationCount: this.continuationCount,
-          maxAutoContinuations: this.maxAutoContinuations,
-          progressScore: continuationAssessment.progressScore,
-          progressThreshold: this.minProgressScoreForAutoContinue,
-          loopRiskIndex: continuationAssessment.loopRiskIndex,
-          repeatedFingerprintCount: continuationAssessment.repeatedFingerprintCount,
-          dominantFingerprint: continuationAssessment.dominantFingerprint,
-          allowed: true,
-          reason: "Manual continuation requested by user.",
-        });
-      }
-      if (!(mode === "auto" && opts.continuationAssessment)) {
-        await this.maybeCompactBeforeContinuation(continuationAssessment);
-      }
-      this.resetTurnBudgetWindow({
-        mode,
-        reason: "turn_limit_exhausted",
-      });
-
-      if (!this.plan) {
-        throw new Error(
-          "Cannot continue task after budget exhaustion because no execution plan could be restored.",
-        );
-      }
-
-      const pendingSteps = this.plan.steps.filter((s) => s.status === "pending");
-      if (pendingSteps.length === 0) {
-        // All steps were already completed — just finalize
-        console.log(`${this.logTag} All plan steps already completed, finalizing`);
-        this.finalizeTaskWithFallback(this.buildResultSummary());
-        return;
-      }
-
-      const completedSteps = this.plan.steps.filter((s) => s.status === "completed");
-      console.log(
-        `${this.logTag} Continuing after budget exhaustion: ${completedSteps.length} completed, ${pendingSteps.length} pending`,
-      );
-
-      // Inject continuation context so the LLM knows it's picking up where it left off
-      const continuationLines = [
-        "TASK CONTINUATION CONTEXT:",
-        mode === "auto"
-          ? "This task hit the turn window. Auto continuation is enabled and progress checks passed."
-          : "This task was stopped because it reached its turn/budget limit. The user has chosen to continue.",
-        `Plan: ${this.plan.description}`,
-      ];
-      if (completedSteps.length > 0) {
-        continuationLines.push(`Completed steps (${completedSteps.length}):`);
-        for (const s of completedSteps) {
-          continuationLines.push(`  - [DONE] ${s.description}`);
-        }
-      }
-      continuationLines.push(`Remaining steps (${pendingSteps.length}):`);
-      for (const s of pendingSteps) {
-        continuationLines.push(`  - [PENDING] ${s.description}`);
-      }
-      continuationLines.push(
-        "",
-        "Continue execution from where you left off. Do not repeat already-completed steps.",
-      );
-      if (this.pendingLoopStrategySwitchMessage) {
-        continuationLines.push("", this.pendingLoopStrategySwitchMessage);
-        this.pendingLoopStrategySwitchMessage = "";
-      }
-
-      this.appendConversationHistory({
-        role: "user",
-        content: continuationLines.join("\n"),
-      });
-      this.appendConversationHistory({
-        role: "assistant",
-        content: [
-          {
-            type: "text",
-            text: "Understood. Continuing execution from where I left off.",
-          },
-        ],
-      });
-
-      this.daemon.updateTaskStatus(this.task.id, "executing");
-      this.emitEvent("executing", {
-        message:
-          mode === "auto"
-            ? "Auto-continuing execution after turn window"
-            : "Continuing execution after budget limit",
-      });
-
-      await this.executePlan();
-
-      if (this.waitingForUserInput || this.cancelled) {
-        return;
-      }
-
-      if (this.task.successCriteria) {
-        const result = await this.verifySuccessCriteria();
-        if (result.success) {
-          this.emitEvent("verification_passed", {
-            attempt: this.task.currentAttempt || 1,
-            message: result.message,
-          });
-        } else {
-          this.emitEvent("verification_failed", {
-            attempt: this.task.currentAttempt || 1,
-            maxAttempts: this.task.maxAttempts || 1,
-            message: result.message,
-            willRetry: false,
-          });
-          throw new Error(`Failed to meet success criteria: ${result.message}`);
-        }
-      }
-
-      this.finalizeTaskWithFallback(this.buildResultSummary());
-    } catch (error: Any) {
-      if (this.cancelled) {
-        console.log(
-          `${this.logTag} Continued task cancelled (reason: ${this.cancelReason || "unknown"})`,
-        );
-        return;
-      }
-
-      if (rethrowOnError) {
-        throw error;
-      }
-
-      console.error(`${this.logTag} Continued task execution failed:`, error);
-      this.saveConversationSnapshot();
-      const errorPayload: Record<string, unknown> = {
-        message: error?.message || String(error),
-        stack: error?.stack,
-      };
-      // Allow the user to continue again only for turn-limit exhaustion.
-      if (this.isWindowTurnLimitExceededError(error)) {
-        errorPayload.actionHint = {
-          type: "continue_task",
-          label: "Continue",
-        };
-        errorPayload.errorCode = TASK_ERROR_CODES.TURN_LIMIT_EXCEEDED;
-      }
-      this.daemon.updateTask(this.task.id, {
-        status: "failed",
-        error: error?.message || String(error),
-        completedAt: Date.now(),
-        continuationCount: this.continuationCount,
-        continuationWindow: this.continuationWindow,
-        lifetimeTurnsUsed: this.lifetimeTurnCount,
-      });
-      this.emitTerminalFailureOnce(errorPayload);
-    } finally {
-      await this.toolRegistry.cleanup().catch((e) => {
-        console.error("Cleanup error:", e);
-      });
-    }
+    await this.getSessionRuntime().continueAfterBudgetExhausted(
+      mode,
+      opts.continuationAssessment,
+      opts.rethrowOnError === true,
+    );
   }
 
   private getQualityPassCount(): 1 | 2 | 3 {
@@ -26576,7 +26138,7 @@ TASK / CONVERSATION HISTORY:
    * Caller is responsible for emitting the user_message event if immediate UI feedback is needed.
    */
   queueFollowUp(message: string, images?: ImageAttachment[]): void {
-    this.pendingFollowUps.push({ message, images });
+    this.getSessionRuntime().queueFollowUp(message, images);
     console.log(
       `${this.logTag} Follow-up queued for injection into running execution (queue size: ${this.pendingFollowUps.length})`,
     );
@@ -26586,7 +26148,7 @@ TASK / CONVERSATION HISTORY:
    * Whether there are follow-up messages waiting to be processed.
    */
   get hasPendingFollowUps(): boolean {
-    return this.pendingFollowUps.length > 0;
+    return this.getSessionRuntime().hasPendingFollowUps;
   }
 
   /**
@@ -26601,21 +26163,11 @@ TASK / CONVERSATION HISTORY:
     action: "retry" | "skip" | "stop" | "drift",
     message?: string,
   ): void {
-    this.stepFeedbackSignal = { stepId, action, message };
+    this.getSessionRuntime().setStepFeedback(stepId, action, message);
 
     // For stop, immediately pause the executor so it halts even without a plan step
     if (action === "stop") {
       this.paused = true;
-    }
-
-    // For drift, also queue the message as a high-priority follow-up
-    // so the LLM sees it in the conversation context
-    if (action === "drift" && message) {
-      const prefix =
-        stepId === "current" ? "[USER FEEDBACK]" : `[STEP FEEDBACK - Step "${stepId}"]`;
-      this.pendingFollowUps.unshift({
-        message: `${prefix}: ${message}`,
-      });
     }
 
     console.log(
@@ -26629,18 +26181,14 @@ TASK / CONVERSATION HISTORY:
    * Returns null if no signal is pending or if the signal targets a different step.
    */
   private consumeStepFeedback(currentStepId: string): typeof this.stepFeedbackSignal {
-    if (!this.stepFeedbackSignal) return null;
-    if (this.stepFeedbackSignal.stepId !== currentStepId) return null;
-    const signal = this.stepFeedbackSignal;
-    this.stepFeedbackSignal = null;
-    return signal;
+    return this.getSessionRuntime().consumeStepFeedback(currentStepId) as typeof this.stepFeedbackSignal;
   }
 
   /**
    * Drain the first pending follow-up (if any) for injection into the execution loop.
    */
   private drainPendingFollowUp(): { message: string; images?: ImageAttachment[] } | undefined {
-    return this.pendingFollowUps.shift();
+    return this.getSessionRuntime().drainPendingFollowUp();
   }
 
   /**
@@ -26648,9 +26196,7 @@ TASK / CONVERSATION HISTORY:
    * messages after execution completes.
    */
   drainAllPendingFollowUps(): Array<{ message: string; images?: ImageAttachment[] }> {
-    const drained = [...this.pendingFollowUps];
-    this.pendingFollowUps = [];
-    return drained;
+    return this.getSessionRuntime().drainAllPendingFollowUps();
   }
 
   /**
@@ -26947,7 +26493,7 @@ TASK / CONVERSATION HISTORY:
     this.waitingForUserInput = false;
     this.paused = false;
     this.lastUserMessage = message;
-    this.recoveryRequestActive = this.isRecoveryIntent(message);
+    this.getSessionRuntime().setRecoveryRequestActive(this.isRecoveryIntent(message));
     this.capabilityUpgradeRequested = this.isCapabilityUpgradeIntent(message);
     this.redirectRequested = this.isRedirectIntent(message);
 
@@ -27454,15 +27000,8 @@ TASK / CONVERSATION HISTORY:
         `${this.logTag} ▶ Follow-up message processing started | maxIter=${maxIterations}`,
       );
 
-      const followUpKernel = new TurnKernel(
-        {
-          mode: "follow_up",
-          messages,
-          maxIterations,
-          maxEmptyResponses,
-        },
-        {
-          shouldStopBeforeIteration: () => {
+      const followUpKernelPolicy: TurnKernelPolicy = {
+          shouldStopBeforeIteration: (_state: TurnKernelIterationState) => {
             if (this.cancelled) {
               console.log(`${this.logTag} sendMessage loop terminated: cancelled=${this.cancelled}`);
               return { stop: true, reason: "cancelled" };
@@ -27473,7 +27012,7 @@ TASK / CONVERSATION HISTORY:
             }
             return undefined;
           },
-          drainPendingMessages: async () => {
+          drainPendingMessages: async (_state: TurnKernelIterationState) => {
             let pendingMsg = this.drainPendingFollowUp();
             while (pendingMsg) {
               console.log(`${this.logTag} Injecting queued follow-up into sendMessage loop`);
@@ -27484,7 +27023,7 @@ TASK / CONVERSATION HISTORY:
               pendingMsg = this.drainPendingFollowUp();
             }
           },
-          beforeIteration: async (state) => {
+          beforeIteration: async (state: TurnKernelIterationState) => {
             iterationCount = state.iterationCount;
             iterStartTime = Date.now();
             const followUpElapsed = ((iterStartTime - followUpStartTime) / 1000).toFixed(1);
@@ -27514,7 +27053,7 @@ TASK / CONVERSATION HISTORY:
             }));
             state.messages = messages;
           },
-          requestResponse: async (state) => {
+          requestResponse: async (state: TurnKernelIterationState) => {
             iterationCount = state.iterationCount;
             try {
               return await this.requestLLMResponseWithAdaptiveBudget({
@@ -27535,7 +27074,7 @@ TASK / CONVERSATION HISTORY:
                 contextCapacityRecoveryCount += 1;
                 messages = recovery.messages;
                 state.messages = messages;
-                return { recovered: true, messages };
+                return { recovered: true as const, messages };
               }
               if (recovery.exhausted) {
                 throw new Error(
@@ -27545,7 +27084,10 @@ TASK / CONVERSATION HISTORY:
               throw llmError;
             }
           },
-          handleResponse: async ({ response, availableTools }, state) => {
+          handleResponse: async (
+            { response, availableTools }: TurnKernelPreparedResponse,
+            state: TurnKernelIterationState,
+          ) => {
             iterationCount = state.iterationCount;
             messages = state.messages;
             continueLoop = state.continueLoop;
@@ -28471,6 +28013,9 @@ TASK / CONVERSATION HISTORY:
                         const toolSucceeded = !(result && result.success === false);
                         if (toolSucceeded) {
                           this.recordToolUsage(content.name);
+                          if (content.name === "use_skill") {
+                            this.consumeSkillApplicationResult(result, "model");
+                          }
                           this.recordToolResult(content.name, result, content.input);
                           if (content.name === "canvas_create" || content.name === "canvas_push") {
                             this.canvasEvidenceObserved = true;
@@ -28986,12 +28531,17 @@ TASK / CONVERSATION HISTORY:
         if (wantsToEnd && (hasProvidedTextResponse || !hadToolCalls)) {
           continueLoop = false;
         }
-            state.messages = messages;
-            return { continueLoop, emptyResponseCount };
-          },
-        },
-      );
-      const followUpKernelOutcome = await followUpKernel.run();
+        state.messages = messages;
+        return { continueLoop, emptyResponseCount };
+      },
+      };
+      const followUpKernelOutcome = await this.getSessionRuntime().runFollowUpLoop({
+        mode: "follow_up",
+        messages,
+        maxIterations,
+        maxEmptyResponses,
+        policy: followUpKernelPolicy,
+      });
       messages = followUpKernelOutcome.messages;
       iterationCount = followUpKernelOutcome.iterations;
       emptyResponseCount = followUpKernelOutcome.emptyResponseCount;
@@ -29215,11 +28765,7 @@ TASK / CONVERSATION HISTORY:
       console.error("sendMessage failed:", error);
       if (resumeAttempted) {
         this.capturePlaybookOutcome("failure", error?.message || String(error));
-        this.daemon.updateTask(this.task.id, {
-          status: "failed",
-          error: error?.message || String(error),
-          completedAt: Date.now(),
-        });
+        this.finalizeFollowUpFailure(error);
         const errorPayload: Record<string, unknown> = {
           message: error.message,
           stack: error.stack,

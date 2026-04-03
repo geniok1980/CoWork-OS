@@ -1,5 +1,13 @@
 import { useState, useEffect, useMemo, useRef, type ComponentType } from "react";
-import { Task, Workspace, TaskEvent, PlanStep, QueueStatus } from "../../shared/types";
+import {
+  Task,
+  Workspace,
+  TaskEvent,
+  PlanStep,
+  QueueStatus,
+  SessionChecklistItem,
+  SessionChecklistState,
+} from "../../shared/types";
 import { isVerificationStepDescription } from "../../shared/plan-utils";
 import { DocumentAwareFileModal } from "./DocumentAwareFileModal";
 import { useAgentContext } from "../hooks/useAgentContext";
@@ -259,6 +267,7 @@ export function RightPanel({
   );
   const [expandedSections, setExpandedSections] = useState({
     progress: true,
+    checklist: true,
     queue: true,
     folder: true,
     activeContext: true,
@@ -350,6 +359,57 @@ export function RightPanel({
     return steps.filter(
       (step) => !isVerificationStepDescription(step.description) || step.status === "failed",
     );
+  }, [events]);
+
+  const checklistState = useMemo((): SessionChecklistState | null => {
+    const normalizeChecklistState = (payload: Any): SessionChecklistState | null => {
+      const checklist =
+        payload?.checklist && typeof payload.checklist === "object" ? payload.checklist : null;
+      if (!checklist || !Array.isArray(checklist.items)) return null;
+
+      const items: SessionChecklistItem[] = checklist.items
+        .filter((item: Any) => item && typeof item === "object")
+        .map((item: Any) => ({
+          id: typeof item.id === "string" ? item.id : "",
+          title: typeof item.title === "string" ? item.title : "",
+          kind:
+            item.kind === "verification" || item.kind === "other" ? item.kind : "implementation",
+          status:
+            item.status === "in_progress" ||
+            item.status === "completed" ||
+            item.status === "blocked"
+              ? item.status
+              : "pending",
+          createdAt: typeof item.createdAt === "number" ? item.createdAt : 0,
+          updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : 0,
+        }))
+        .filter((item: SessionChecklistItem) => Boolean(item.id && item.title));
+
+      return {
+        items,
+        updatedAt: typeof checklist.updatedAt === "number" ? checklist.updatedAt : 0,
+        verificationNudgeNeeded: checklist.verificationNudgeNeeded === true,
+        nudgeReason:
+          typeof checklist.nudgeReason === "string" && checklist.nudgeReason.trim().length > 0
+            ? checklist.nudgeReason
+            : null,
+      };
+    };
+
+    for (const event of [...events].reverse()) {
+      const effectiveType = getEffectiveTaskEventType(event);
+      if (
+        effectiveType === "task_list_created" ||
+        effectiveType === "task_list_updated" ||
+        effectiveType === "task_list_verification_nudged" ||
+        event.type === "conversation_snapshot"
+      ) {
+        const state = normalizeChecklistState(event.payload);
+        if (state) return state;
+      }
+    }
+
+    return null;
   }, [events]);
 
   // Extract files from events
@@ -655,6 +715,19 @@ export function RightPanel({
     }
   };
 
+  const getChecklistStatusLabel = (status: string) => {
+    switch (status) {
+      case "in_progress":
+        return "In progress";
+      case "completed":
+        return "Completed";
+      case "blocked":
+        return "Blocked";
+      default:
+        return "Pending";
+    }
+  };
+
   const preservedOutputsTooltip =
     "Completed with preserved outputs. Cowork kept the files and summary it produced, even though some checks or steps did not fully finish.";
 
@@ -732,6 +805,53 @@ export function RightPanel({
           </div>
         )}
       </div>
+
+      {checklistState && checklistState.items.length > 0 && (
+        <div className="right-panel-section cli-section">
+          <div className="cli-section-header" onClick={() => toggleSection("checklist")}>
+            <span className="cli-section-prompt">&gt;</span>
+            <span className="cli-section-title">
+              <span className="terminal-only">CHECKLIST</span>
+              <span className="modern-only">Checklist</span>
+            </span>
+            <span className="cli-section-toggle">
+              <span className="terminal-only">{expandedSections.checklist ? "[-]" : "[+]"}</span>
+              <span className="modern-only">{expandedSections.checklist ? "−" : "+"}</span>
+            </span>
+          </div>
+          {expandedSections.checklist && (
+            <div className="cli-section-content">
+              <div className="cli-progress-list">
+                {checklistState.items.map((item, index) => (
+                  <div key={item.id} className={`cli-progress-item ${item.status}`}>
+                    <span className="cli-progress-num">{String(index + 1).padStart(2, "0")}</span>
+                    <span
+                      className={`cli-progress-status ${item.status === "blocked" ? "failed" : item.status}`}
+                    >
+                      {getStatusIndicator(item.status === "blocked" ? "failed" : item.status)}
+                    </span>
+                    <span className="cli-progress-text" title={item.title}>
+                      {item.title}
+                      {item.kind === "verification" ? " [Verification]" : ""}
+                    </span>
+                    <span className="cli-context-key">{getChecklistStatusLabel(item.status)}</span>
+                  </div>
+                ))}
+              </div>
+              {checklistState.verificationNudgeNeeded && (
+                <p className="cli-hint">
+                  <span className="terminal-only">
+                    {checklistState.nudgeReason || "Add and run a verification checklist item before finishing."}
+                  </span>
+                  <span className="modern-only">
+                    {checklistState.nudgeReason || "Add and run a verification checklist item before finishing."}
+                  </span>
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Lineup Section */}
       {totalQueueActive > 0 && (

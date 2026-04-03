@@ -85,21 +85,6 @@ function splitUserToolResultMessage(message: LLMMessage): {
   return { toolResults, trailingContent };
 }
 
-function buildAssistantWithoutToolUse(message: LLMMessage): LLMMessage | null {
-  if (message.role !== "assistant" || !Array.isArray(message.content)) {
-    return cloneMessage(message);
-  }
-
-  const filtered = message.content.filter((block) => !isToolUseBlock(block));
-  if (filtered.length === 0) {
-    return null;
-  }
-  return {
-    role: "assistant",
-    content: filtered as LLMMessage["content"],
-  };
-}
-
 export function normalizeTurnTranscript(messages: LLMMessage[]): NormalizedTurnTranscript {
   const normalized: LLMMessage[] = [];
   const issues: TurnTranscriptIssue[] = [];
@@ -236,12 +221,6 @@ export function normalizeTurnTranscript(messages: LLMMessage[]): NormalizedTurnT
           detail: `Tool use "${toolUseId}" was missing a matching tool_result.`,
         });
       }
-
-      const assistantWithoutToolUse = buildAssistantWithoutToolUse(assistantMessage);
-      if (assistantWithoutToolUse) {
-        normalized.push(assistantWithoutToolUse);
-      }
-      normalized.push(...trailingUserMessages);
       index = cursor - 1;
       continue;
     }

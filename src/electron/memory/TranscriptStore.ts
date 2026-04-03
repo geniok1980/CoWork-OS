@@ -60,6 +60,7 @@ function taskCheckpointPath(workspacePath: string, taskId: string): string {
 function shouldPersistSpan(type: string): boolean {
   return [
     "task_created",
+    "assistant_message",
     "timeline_group_started",
     "timeline_group_finished",
     "timeline_step_started",

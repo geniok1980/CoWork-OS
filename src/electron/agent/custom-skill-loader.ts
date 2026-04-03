@@ -671,7 +671,7 @@ export class CustomSkillLoader {
       (Array.isArray(routing?.examples?.positive) && routing.examples.positive.length > 0) ||
       (Array.isArray(routing?.examples?.negative) && routing.examples.negative.length > 0);
     if (!hasRoutingMetadata) {
-      return false;
+      return true;
     }
 
     const keywords = routing?.keywords;
@@ -850,19 +850,19 @@ export class CustomSkillLoader {
   } {
     const normalizedQuery = this.sanitizeRoutingQuery(String(query || "")).trim();
 
+    if (!normalizedQuery) {
+      return {
+        skills,
+        confidence: 1,
+        totalEligible: skills.length,
+      };
+    }
+
     // Hard gate: skills with routing keywords are hidden from the model unless a keyword matches.
     // This prevents keyword-gated skills (e.g. codex-cli) from appearing in the
     // model's skill list for unrelated tasks.
     const eligibleSkills = skills.filter((skill) => this.matchesSkillRoutingQuery(skill, normalizedQuery));
     logger.info(`shortlistSkillsForQuery: ${skills.length} skills → ${eligibleSkills.length} after keyword gate (query="${normalizedQuery.slice(0, 80)}")`);
-
-    if (!normalizedQuery) {
-      return {
-        skills: eligibleSkills,
-        confidence: 1,
-        totalEligible: eligibleSkills.length,
-      };
-    }
 
     const ranked = this.rankSkillsForQuery(eligibleSkills, normalizedQuery);
 

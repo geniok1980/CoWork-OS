@@ -214,6 +214,24 @@ describeWithSqlite("ControlPlaneCoreService", () => {
     expect(service.getDefaultCompany().id).toBe(created.id);
   });
 
+  it("normalizes canonical prompt fields when task callers omit rawPrompt and userPrompt", () => {
+    const workspace = insertWorkspace();
+
+    const task = taskRepo.create({
+      title: "Canonical prompt test",
+      prompt: "Keep this as the canonical request.",
+      status: "pending",
+      workspaceId: workspace.id,
+      source: "manual",
+    });
+    const reloaded = taskRepo.findById(task.id);
+
+    expect(task.rawPrompt).toBe("Keep this as the canonical request.");
+    expect(task.userPrompt).toBe("Keep this as the canonical request.");
+    expect(reloaded?.rawPrompt).toBe("Keep this as the canonical request.");
+    expect(reloaded?.userPrompt).toBe("Keep this as the canonical request.");
+  });
+
   it("enforces single active issue checkout and syncs task lifecycle into runs", () => {
     const workspace = insertWorkspace();
     const company = service.getDefaultCompany();

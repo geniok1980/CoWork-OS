@@ -45,6 +45,7 @@ export type SettingsCategory =
   | "appearance"
   | "personality"
   | "guardrails"
+  | "permissions"
   | "hooks"
   | "mcp"
   | "controlplane"

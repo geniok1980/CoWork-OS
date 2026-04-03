@@ -57,6 +57,32 @@ describe("TaskStrategyService getRelevantToolSet", () => {
   });
 });
 
+describe("TaskStrategyService decoratePrompt", () => {
+  it("adds checklist guidance for execution-style intents only", () => {
+    const executionRoute = makeRoute({ intent: "execution" });
+    const executionStrategy = TaskStrategyService.derive(executionRoute);
+    const executionPrompt = TaskStrategyService.decoratePrompt(
+      "Implement the feature",
+      executionRoute,
+      executionStrategy,
+      "",
+    );
+
+    const planningRoute = makeRoute({ intent: "planning" });
+    const planningStrategy = TaskStrategyService.derive(planningRoute);
+    const planningPrompt = TaskStrategyService.decoratePrompt(
+      "Plan the feature",
+      planningRoute,
+      planningStrategy,
+      "",
+    );
+
+    expect(executionPrompt).toContain("checklist_contract:");
+    expect(executionPrompt).toContain("task_list_create");
+    expect(planningPrompt).not.toContain("checklist_contract:");
+  });
+});
+
 describe("TaskStrategyService applyToAgentConfig", () => {
   it("adds llmProfileHint when no explicit model override exists", () => {
     const strategy = TaskStrategyService.derive(makeRoute({ intent: "planning" }));

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { deriveCanonicalTaskStatus, normalizeTaskLifecycleState } from "../task-status";
+import {
+  deriveCanonicalTaskStatus,
+  normalizeTaskLifecycleState,
+  resolveTaskStatusUpdateFromEvent,
+} from "../task-status";
 import type { Task } from "../types";
 
 function makeTask(overrides: Partial<Task>): Task {
@@ -58,5 +62,31 @@ describe("task status normalization", () => {
     });
 
     expect(normalizeTaskLifecycleState(task)).toBe(task);
+  });
+
+  it("does not regress a completed task back to executing on trailing step events", () => {
+    expect(
+      resolveTaskStatusUpdateFromEvent(
+        makeTask({
+          status: "completed",
+          completedAt: 123,
+          terminalStatus: "ok",
+        }),
+        "executing",
+      ),
+    ).toBe("completed");
+  });
+
+  it("allows terminal follow-up updates to replace an existing terminal status", () => {
+    expect(
+      resolveTaskStatusUpdateFromEvent(
+        makeTask({
+          status: "completed",
+          completedAt: 123,
+          terminalStatus: "ok",
+        }),
+        "failed",
+      ),
+    ).toBe("failed");
   });
 });

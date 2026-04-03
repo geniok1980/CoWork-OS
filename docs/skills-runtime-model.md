@@ -1,6 +1,6 @@
 # Skills Runtime Model
 
-CoWork OS now uses a Claude-style additive skill model. Skills can still be selected proactively from the task text, but they no longer replace the task itself.
+CoWork OS now uses an additive skill model. Skills can still be selected proactively from the task text, but they no longer replace the task itself.
 
 This redesign exists to enforce one core invariant:
 

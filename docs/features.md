@@ -909,7 +909,7 @@ Configure in **Settings** > **Appearance**.
 
 ## Code Tools
 
-Claude Code-style tools for efficient code navigation and editing:
+Built-in tools for efficient code navigation and editing:
 
 | Tool | Description |
 |------|-------------|

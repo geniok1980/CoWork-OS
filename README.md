@@ -223,7 +223,7 @@ Advanced web scraping powered by [Scrapling](https://github.com/D4Vinci/Scraplin
 
 - **Cloud Storage**: 6 integrations, including Notion, Box, OneDrive, Google Workspace, Dropbox, and SharePoint
 - **44 MCP Connectors**: pre-built enterprise integrations for CRM, support, productivity, analytics, and payments (Salesforce, Jira, HubSpot, Zendesk, Stripe, Tavily, Grafana, Metabase, Socket, and more), with connector notifications available as trigger inputs for automations
-- **Developer Tools**: Claude Code-style `glob`/`grep`/`edit_file`, Playwright browser automation, MCP client/host/registry
+- **Developer Tools**: `glob`/`grep`/`edit_file`, Playwright browser automation, MCP client/host/registry
 
 [Learn more](docs/features.md)
 

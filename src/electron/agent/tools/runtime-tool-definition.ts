@@ -36,6 +36,7 @@ const READ_PARALLEL_TOOLS = new Set([
   "git_blame",
   "git_refs",
   "task_history",
+  "task_list_list",
   "search_memories",
   "scratchpad_read",
   "browser_get_content",
@@ -148,6 +149,13 @@ function inferInterruptBehavior(toolName: string, readOnly: boolean): RuntimeToo
 }
 
 function inferApprovalKind(toolName: string, readOnly: boolean): RuntimeToolApprovalKind {
+  if (
+    toolName === "task_list_create" ||
+    toolName === "task_list_update" ||
+    toolName === "task_list_list"
+  ) {
+    return "none";
+  }
   if (toolName === "run_command") return "shell_sensitive";
   if (toolName === "delete_file" || toolName.endsWith("_action")) return "destructive";
   if (toolName.startsWith("mcp_")) return "external_service";

@@ -255,6 +255,10 @@ function installProcessErrorGuards(): void {
 
 installProcessErrorGuards();
 
+// Use the OS certificate store so Node.js TLS connections (e.g. WhatsApp WebSocket)
+// can verify certificates issued by system-trusted CAs
+app.commandLine.appendSwitch("use-system-cert-store");
+
 // Suppress GPU-related Chromium errors that occur with transparent windows and vibrancy
 // These are cosmetic errors that don't affect functionality
 app.commandLine.appendSwitch("disable-gpu-driver-bug-workarounds");

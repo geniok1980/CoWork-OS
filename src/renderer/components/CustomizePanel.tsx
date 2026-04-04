@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Plug, Zap, Package, Dna } from "lucide-react";
+import type { CapabilitySecurityReport, QuarantinedImportRecord } from "../../shared/types";
 import { getEmojiIcon } from "../utils/emoji-icon-map";
 import { PluginStore } from "./PluginStore";
 
@@ -27,6 +28,7 @@ interface PluginPackData {
   }[];
   state: string;
   enabled: boolean;
+  securityReport?: CapabilitySecurityReport;
 }
 
 type DetailTab = "commands" | "skills" | "agents";
@@ -51,6 +53,9 @@ export function CustomizePanel({
   const [loadKey, setLoadKey] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [packUpdates, setPackUpdates] = useState<Map<string, string>>(new Map());
+  const [quarantinedPacks, setQuarantinedPacks] = useState<QuarantinedImportRecord[]>([]);
+  const [actioningRecordId, setActioningRecordId] = useState<string | null>(null);
+  const [expandedReportId, setExpandedReportId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,8 +64,10 @@ export function CustomizePanel({
       try {
         setLoading(true);
         const data = await window.electronAPI.listPluginPacks();
+        const quarantine = await window.electronAPI.listQuarantinedImports();
         if (cancelled) return;
         setPacks(data);
+        setQuarantinedPacks(quarantine.filter((entry) => entry.bundleKind === "plugin-pack"));
         if (data.length > 0 && !selectedPack) {
           setSelectedPack(data[0].name);
         }
@@ -157,6 +164,37 @@ export function CustomizePanel({
   const handleTryAsking = (prompt: string) => {
     if (onCreateTask) {
       onCreateTask(prompt.slice(0, 60), prompt);
+    }
+  };
+
+  const getSecurityBadge = (report?: CapabilitySecurityReport) => {
+    if (!report || report.verdict === "clean") {
+      return null;
+    }
+    return (
+      <span className={`settings-badge ${report.verdict === "quarantined" ? "settings-badge--error" : "settings-badge--warning"}`}>
+        {report.verdict === "quarantined" ? "Quarantined" : "Security Warning"}
+      </span>
+    );
+  };
+
+  const handleRetryQuarantined = async (recordId: string) => {
+    setActioningRecordId(recordId);
+    try {
+      await window.electronAPI.retryQuarantinedImport(recordId);
+      setLoadKey((k) => k + 1);
+    } finally {
+      setActioningRecordId(null);
+    }
+  };
+
+  const handleRemoveQuarantined = async (recordId: string) => {
+    setActioningRecordId(recordId);
+    try {
+      await window.electronAPI.removeQuarantinedImport(recordId);
+      setLoadKey((k) => k + 1);
+    } finally {
+      setActioningRecordId(null);
     }
   };
 
@@ -297,6 +335,24 @@ export function CustomizePanel({
             ))}
           </>
         )}
+
+        {quarantinedPacks.length > 0 && (
+          <>
+            <div className="cp-sidebar-group-header">
+              <span>Quarantined</span>
+            </div>
+            {quarantinedPacks.map((record) => (
+              <button
+                key={record.id}
+                className="cp-sidebar-item"
+                onClick={() => setExpandedReportId((current) => (current === record.id ? null : record.id))}
+              >
+                <span className="cp-sidebar-icon">🛡️</span>
+                <span>{record.displayName || record.bundleId}</span>
+              </button>
+            ))}
+          </>
+        )}
       </div>
 
       {/* Detail Panel */}
@@ -325,6 +381,12 @@ export function CustomizePanel({
                 </div>
               </div>
               <p className="cp-detail-description">{activePack.description}</p>
+              {getSecurityBadge(activePack.securityReport)}
+              {activePack.securityReport?.verdict === "warning" && (
+                <div className="cp-update-badge">
+                  <span>{activePack.securityReport.summary}</span>
+                </div>
+              )}
               {packUpdates.has(activePack.name) && (
                 <div className="cp-update-badge">
                   <span>Update available: v{packUpdates.get(activePack.name)}</span>
@@ -501,6 +563,58 @@ export function CustomizePanel({
                       <span>{prompt}</span>
                       <span className="cp-try-arrow">&rarr;</span>
                     </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {quarantinedPacks.length > 0 && (
+              <div className="cp-try-asking">
+                <h4>Quarantined Imports</h4>
+                <div className="cp-try-list">
+                  {quarantinedPacks.map((record) => (
+                    <div key={record.id} className="cp-try-item" style={{ display: "block", cursor: "default" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <div>
+                          <strong>{record.displayName || record.bundleId}</strong>
+                          <div>{record.summary}</div>
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button
+                            className="button-secondary button-small"
+                            onClick={() =>
+                              setExpandedReportId((current) => (current === record.id ? null : record.id))
+                            }
+                          >
+                            {expandedReportId === record.id ? "Hide Report" : "View Report"}
+                          </button>
+                          <button
+                            className="button-secondary button-small"
+                            onClick={() => handleRetryQuarantined(record.id)}
+                            disabled={actioningRecordId === record.id}
+                          >
+                            {actioningRecordId === record.id ? "Scanning..." : "Retry Scan"}
+                          </button>
+                          <button
+                            className="button-danger button-small"
+                            onClick={() => handleRemoveQuarantined(record.id)}
+                            disabled={actioningRecordId === record.id}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                      {expandedReportId === record.id && (
+                        <div style={{ marginTop: 8 }}>
+                          {record.report.findings.map((finding, index) => (
+                            <div key={`${record.id}-${index}`}>
+                              <strong>{finding.severity}</strong>: {finding.message}
+                              {finding.path ? ` (${finding.path})` : ""}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   ))}
                 </div>
               </div>

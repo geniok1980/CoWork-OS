@@ -1004,15 +1004,21 @@ export class SessionRuntime {
     };
   }
 
-  private buildRenderedToolAvailabilityCacheKey(params: {
+  private buildToolAvailabilityCacheKey(params: {
     baseKey: string;
-    visibleToolNames: string[];
     renderContext: LLMToolPromptRenderContext;
+    taskTitle: string;
+    taskPrompt: string;
+    lastUserMessage: string;
+    discoveredDeferredToolNames: string[];
   }): string {
     return JSON.stringify({
       baseKey: params.baseKey,
       renderContext: params.renderContext,
-      visibleToolNames: params.visibleToolNames,
+      taskTitle: params.taskTitle,
+      taskPrompt: params.taskPrompt,
+      lastUserMessage: params.lastUserMessage,
+      discoveredDeferredToolNames: params.discoveredDeferredToolNames,
     });
   }
 
@@ -1033,7 +1039,32 @@ export class SessionRuntime {
       webSearchMode: this.deps.getWebSearchMode(),
       shellEnabled: this.deps.getWorkspace().permissions.shell,
     });
+    const task = this.deps.getTask();
+    const renderContext = this.buildToolPromptRenderContext();
+    const renderedCacheKey = this.buildToolAvailabilityCacheKey({
+      baseKey: cacheKey,
+      renderContext,
+      taskTitle: String(task.title || ""),
+      taskPrompt: String(task.prompt || ""),
+      lastUserMessage: String(this.state.transcript.lastUserMessage || ""),
+      discoveredDeferredToolNames: Array.from(this.state.tooling.discoveredDeferredToolNames).sort(),
+    });
+    if (
+      this.state.tooling.availableToolsCacheKey === renderedCacheKey &&
+      this.state.tooling.availableToolsCache
+    ) {
+      return this.state.tooling.availableToolsCache.slice();
+    }
     const toolRegistry = this.deps.getToolRegistry();
+    if ((toolRegistry as Any).__legacyFilteredGetTools === true) {
+      const legacyTools =
+        typeof (toolRegistry as Any).getTools === "function"
+          ? ((toolRegistry as Any).getTools() as Any[])
+          : [];
+      this.state.tooling.availableToolsCacheKey = renderedCacheKey;
+      this.state.tooling.availableToolsCache = legacyTools.slice();
+      return legacyTools;
+    }
     const baseTools =
       typeof toolRegistry.getTools === "function" ? toolRegistry.getTools() : [];
     const deferredTools =
@@ -1041,7 +1072,6 @@ export class SessionRuntime {
 
     this.deferredToolCatalog = new DeferredToolCatalog(baseTools);
     this.toolSearchService = new ToolSearchService(deferredTools);
-    const task = this.deps.getTask();
     const deferredMatches = this.toolSearchService.search(
       [task.title, task.prompt, this.state.transcript.lastUserMessage].filter(Boolean).join(" "),
       8,
@@ -1070,18 +1100,6 @@ export class SessionRuntime {
       finalTools = this.deps.applyAdaptiveToolAvailabilityFilter(
         this.deps.applyStepScopedToolPolicy(this.deps.applyIntentFilter(agentPolicyFiltered)),
       );
-      const renderContext = this.buildToolPromptRenderContext();
-      const renderedCacheKey = this.buildRenderedToolAvailabilityCacheKey({
-        baseKey: cacheKey,
-        renderContext,
-        visibleToolNames: finalTools.map((tool: Any) => String(tool.name || "")),
-      });
-      if (
-        this.state.tooling.availableToolsCacheKey === renderedCacheKey &&
-        this.state.tooling.availableToolsCache
-      ) {
-        return this.state.tooling.availableToolsCache.slice();
-      }
       const renderedTools =
         typeof (toolRegistry as Any).renderToolsForContext === "function"
           ? (toolRegistry as Any).renderToolsForContext(finalTools as LLMTool[], renderContext)
@@ -1106,18 +1124,6 @@ export class SessionRuntime {
     finalTools = this.deps.applyAdaptiveToolAvailabilityFilter(
       this.deps.applyStepScopedToolPolicy(this.deps.applyIntentFilter(agentPolicyFiltered)),
     );
-    const renderContext = this.buildToolPromptRenderContext();
-    const renderedCacheKey = this.buildRenderedToolAvailabilityCacheKey({
-      baseKey: cacheKey,
-      renderContext,
-      visibleToolNames: finalTools.map((tool: Any) => String(tool.name || "")),
-    });
-    if (
-      this.state.tooling.availableToolsCacheKey === renderedCacheKey &&
-      this.state.tooling.availableToolsCache
-    ) {
-      return this.state.tooling.availableToolsCache.slice();
-    }
     const renderedTools =
       typeof (toolRegistry as Any).renderToolsForContext === "function"
         ? (toolRegistry as Any).renderToolsForContext(finalTools as LLMTool[], renderContext)

@@ -13,6 +13,21 @@ describe("LLMProviderFactory model status", () => {
       expectedCurrentModel: "sonnet-4-5",
     },
     {
+      name: "anthropic cached",
+      settings: {
+        providerType: "anthropic",
+        modelKey: "opus-4-6",
+        cachedAnthropicModels: [
+          {
+            key: "opus-4-6",
+            displayName: "Opus 4.6",
+            description: "claude-opus-4-6",
+          },
+        ],
+      } as LLMSettings,
+      expectedCurrentModel: "opus-4-6",
+    },
+    {
       name: "bedrock",
       settings: {
         providerType: "bedrock",
@@ -219,8 +234,18 @@ describe("LLMProviderFactory profile-based task model routing", () => {
 
     expect(resolved.modelSource).toBe("provider_default");
     expect(resolved.modelKey).toBe("sonnet-4-5");
-    expect(resolved.modelId).toBe("claude-sonnet-4-5-20250514");
+    expect(resolved.modelId).toBe("claude-sonnet-4-5");
     expect(resolved.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("normalizes legacy Claude snapshot IDs to current direct API IDs", () => {
+    expect(LLMProviderFactory.getModelId("claude-haiku-4-5-20250514", "anthropic")).toBe(
+      "claude-haiku-4-5",
+    );
+    expect(LLMProviderFactory.getModelId("claude-sonnet-4-5-20250514", "anthropic")).toBe(
+      "claude-sonnet-4-5",
+    );
+    expect(LLMProviderFactory.getModelId("opus-4-6", "anthropic")).toBe("claude-opus-4-6");
   });
 
   it("uses strong profile for verification routing", () => {

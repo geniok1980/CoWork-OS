@@ -43,6 +43,63 @@ When `unrestrictedFileAccess` is enabled:
 - Protected system paths are still blocked
 - Use only for development workflows requiring broad access
 
+## Imported Capability Boundary
+
+```
++------------------------------------------+
+|      Remote / Imported Capability        |
+|  - skill bundle                          |
+|  - plugin pack                           |
+|  - connector manifest                    |
+|  - bundled script content                |
++------------------------------------------+
+         |
+         | Stage before activation
+         v
++------------------------------------------+
+|      Capability Bundle Security          |
+|  - structural validation                 |
+|  - content heuristics                    |
+|  - package intelligence lookups          |
++------------------------------------------+
+         |
+         | clean / warning / quarantined
+         v
++-------------------+   +------------------+
+| Managed Active    |   | Managed Quarantine|
+| - visible to load |   | - excluded from   |
+| - report sidecar  |   |   discovery       |
+| - digest tracked  |   | - report retained |
++-------------------+   +------------------+
+```
+
+Imported skills, plugin packs, declarative connector manifests, and bundled scripts are treated as a separate trust boundary from built-in content.
+
+### Managed Imports
+
+For imported skills and imported packs that CoWork installs into managed storage:
+- the bundle is staged in a temp location before activation
+- structural checks reject path escapes, unsafe manifest references, and unexpected executable/binary payloads
+- content heuristics inspect imported text and script surfaces for high-confidence malicious behavior
+- inferred `npx` and `uvx` package executions can be checked against package-malware intelligence
+- blocking findings move the bundle into quarantine instead of registering it
+- warning-only findings still allow install, but the UI shows a persisted report and warning badge
+- CoWork stores a bundle digest and rechecks it on later discovery so post-install tampering can trigger quarantine
+
+### Unmanaged Local Bundles
+
+Read-only local skill directories and unmanaged local pack folders are treated more conservatively in v1:
+- CoWork can compute a report and surface warning badges
+- those bundles are not auto-quarantined or blocked solely because they are local and unmanaged
+- operators must review and remove or relocate them manually if the findings are unacceptable
+
+### Intelligence Availability
+
+Package-intelligence checks are additive, not the sole gate:
+- if local structural or heuristic checks find a blocking issue, the bundle is quarantined
+- if network-backed package intelligence is temporarily unavailable and local checks are otherwise clean, install can continue with a warning state
+- persisted reports record whether package intelligence was unavailable during the scan
+
 ## Channel Boundary
 
 ```

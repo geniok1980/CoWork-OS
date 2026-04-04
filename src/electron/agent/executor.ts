@@ -31,6 +31,8 @@ import {
   PermissionMode,
   PromptCacheSurface,
   WebSearchMode,
+  LLM_PROVIDER_TYPES,
+  type LLMProviderType,
   type LLMRoutingRuntimeState,
   type LLMRoutingReason,
   type LLMRoutingFallbackStep,
@@ -207,6 +209,7 @@ import {
 } from "./tool-policy-engine";
 
 const DEFAULT_FAILOVER_PRIMARY_RETRY_COOLDOWN_MS = 60_000;
+const VALID_LLM_PROVIDER_TYPES = new Set<string>(LLM_PROVIDER_TYPES as readonly string[]);
 import {
   evaluateDomainCompletion,
   getLoopGuardrailConfig,
@@ -1251,7 +1254,10 @@ export class TaskExecutor {
     assistantIntent?: string,
   ): Promise<{ semanticSummary: string; source?: "model" | "fallback" } | undefined> {
     if (reports.length <= 0) return undefined;
-    return this.toolBatchSummaryGenerator.generateSummary({
+    const generator =
+      this.toolBatchSummaryGenerator ||
+      (this.toolBatchSummaryGenerator = createToolBatchSummaryGenerator());
+    return generator.generateSummary({
       phase,
       callReports: reports,
       assistantIntent,
@@ -4486,7 +4492,7 @@ ${transcript}
       setWorkspace: (workspace: Workspace) => {
         this.workspace = workspace;
       },
-      getToolRegistry: () => this.toolRegistry,
+      getToolRegistry: () => this.getToolRegistryForRuntime(),
       setToolRegistry: (toolRegistry: ToolRegistry) => {
         this.toolRegistry = toolRegistry;
       },
@@ -4497,11 +4503,11 @@ ${transcript}
         tools: LLMTool[];
       }) => this.buildPromptCacheRequestExtras(args),
       getModelMetadata: () => ({
-        providerType: this.provider.type,
-        modelId: this.modelId,
-        modelKey: this.modelKey,
+        providerType: this.getProviderTypeForRuntime(),
+        modelId: String(this.modelId || ""),
+        modelKey: String(this.modelKey || ""),
         llmProfileUsed: this.llmProfileUsed,
-        resolvedModelKey: this.resolvedModelKey,
+        resolvedModelKey: String(this.resolvedModelKey || ""),
       }),
       getWebSearchMode: () => this.webSearchMode,
       getEffectiveTaskDomain: () => this.getEffectiveTaskDomain(),
@@ -4627,6 +4633,45 @@ ${transcript}
     };
   }
 
+  private getProviderTypeForRuntime(): LLMProviderType | "unknown" {
+    const activeProviderType =
+      typeof this.provider?.type === "string" ? this.provider.type.trim() : "";
+    if (activeProviderType && VALID_LLM_PROVIDER_TYPES.has(activeProviderType)) {
+      return activeProviderType as LLMProviderType;
+    }
+    const configuredProviderType =
+      typeof this.task?.agentConfig?.providerType === "string"
+        ? this.task.agentConfig.providerType.trim()
+        : "";
+    if (configuredProviderType && VALID_LLM_PROVIDER_TYPES.has(configuredProviderType)) {
+      return configuredProviderType as LLMProviderType;
+    }
+    return "unknown";
+  }
+
+  private getToolRegistryForRuntime(): ToolRegistry {
+    const toolRegistry = this.toolRegistry as Any;
+    if (typeof toolRegistry?.getTools === "function") {
+      return this.toolRegistry;
+    }
+    const hasLegacyAvailableToolsOverride =
+      Object.prototype.hasOwnProperty.call(this, "getAvailableTools") &&
+      typeof (this as Any).getAvailableTools === "function";
+    if (!hasLegacyAvailableToolsOverride) {
+      return this.toolRegistry;
+    }
+    const getLegacyAvailableTools = (this as Any).getAvailableTools.bind(this);
+    return {
+      ...(toolRegistry || {}),
+      __legacyFilteredGetTools: true,
+      getTools: () => getLegacyAvailableTools(),
+      getDeferredTools:
+        typeof toolRegistry?.getDeferredTools === "function"
+          ? () => toolRegistry.getDeferredTools()
+          : () => [],
+    } as ToolRegistry;
+  }
+
   private initializeSessionRuntime(): SessionRuntime {
     if (this._runtime) {
       return this._runtime;
@@ -4674,7 +4719,10 @@ ${transcript}
       },
       files: {
         fileOperationTracker:
-          self.fileOperationTracker instanceof FileOperationTracker
+          self.fileOperationTracker instanceof FileOperationTracker ||
+          (self.fileOperationTracker &&
+            typeof self.fileOperationTracker.getKnowledgeSummary === "function" &&
+            typeof self.fileOperationTracker.getCreatedFiles === "function")
             ? self.fileOperationTracker
             : new FileOperationTracker(),
         filesReadTracker:
@@ -5666,7 +5714,7 @@ ${transcript}
     const HIGH_CONFIDENCE_THRESHOLD = 0.70;
     try {
       const skillLoader = getCustomSkillLoader();
-      const availableToolNames = new Set(this.getAvailableTools().map((tool) => tool.name));
+      const availableToolNames = this.buildAvailableToolNameSet(this.getAvailableTools());
       if (!availableToolNames.has("Skill")) return "";
 
       const scored = skillLoader
@@ -7150,13 +7198,10 @@ ${transcript}
     ) {
       return false;
     }
-    // Block hard evidence-requirement guards from falling back to partial success.
-    // "Task missing direct answer" is intentionally excluded: when a task is resumed
-    // after an app restart with no snapshot, the answer may have already been delivered
-    // but can no longer be reconstructed, so we allow partial success when substantive
-    // evidence of completed work exists.
+    // Block hard completion-contract guards from falling back to partial success.
     if (
-      /^Task missing (artifact|execution|verification) evidence/i.test(message) &&
+      (/^Task missing direct answer\b/i.test(message) ||
+        /^Task missing (artifact|execution|required tool|verification) evidence/i.test(message)) &&
       !this.isSourceValidationGuardError(error)
     ) {
       return false;
@@ -8164,6 +8209,23 @@ ${transcript}
     );
   }
 
+  private buildAvailableToolNameSet(tools: Any[]): Set<string> {
+    const availableToolNames = new Set<string>();
+    for (const tool of tools || []) {
+      const rawName = typeof tool?.name === "string" ? tool.name.trim() : "";
+      if (!rawName) continue;
+      availableToolNames.add(rawName);
+      const canonicalName = canonicalizeToolNameUtil(rawName);
+      if (canonicalName) {
+        availableToolNames.add(canonicalName);
+        for (const alias of getAliasesForCanonicalToolUtil(canonicalName)) {
+          availableToolNames.add(alias);
+        }
+      }
+    }
+    return availableToolNames;
+  }
+
   private hasRequiredMutationToolContract(stepContract: StepExecutionContract): boolean {
     for (const toolName of stepContract.requiredTools.values()) {
       if (this.isMutationSatisfyingTool(toolName)) return true;
@@ -8583,10 +8645,9 @@ ${transcript}
     if (observedFiles.length === 0) return false;
 
     const webArtifactPatterns = [
-      /(^|\/)package\.json$/,
       /(^|\/)index\.html$/,
       /(^|\/)(vite|webpack|rollup|next|nuxt|astro|svelte)\.config\.[jt]s$/,
-      /(^|\/)src\/(main|app)\.[jt]sx?$/,
+      /(^|\/)src\/main\.[jt]sx?$/,
       /(^|\/)app\/page\.[jt]sx?$/,
       /(^|\/)pages\/index\.[jt]sx?$/,
       /(^|\/)(portal|dashboard|site|web|public)\/.*\.(html|css|js|jsx|ts|tsx)$/,
@@ -9936,6 +9997,13 @@ ${transcript}
       .getTaskEvents(this.task.id, { types: ["file_modified"] })
       .map((event) => String(event.payload?.path || event.payload?.to || event.payload?.from || ""))
       .filter((file) => file.length > 0);
+    if (
+      this.requiresVisualQARun &&
+      contract.artifactKind === "canvas" &&
+      contract.requiredSuccessfulTools.length === 0
+    ) {
+      return this.hasMaterializedWebAppArtifacts();
+    }
     return hasArtifactEvidenceUtil({ contract, createdFiles, modifiedFiles });
   }
 
@@ -11376,11 +11444,12 @@ ${transcript}
     const candidateStableBlocks = normalizedBlocks.filter(
       (block) => block.scope === "session" && block.cacheable,
     );
+    const existingStableBlocks = Array.isArray(this.stableSystemBlocks) ? this.stableSystemBlocks : [];
     const reusableStableBlocks =
       settings.strictStablePrefix &&
-      this.stableSystemBlocks.length > 0 &&
-      areSystemBlocksEquivalent(candidateStableBlocks, this.stableSystemBlocks)
-        ? this.stableSystemBlocks
+      existingStableBlocks.length > 0 &&
+      areSystemBlocksEquivalent(candidateStableBlocks, existingStableBlocks)
+        ? existingStableBlocks
         : candidateStableBlocks;
 
     this.stableSystemBlocks = reusableStableBlocks;
@@ -11432,7 +11501,11 @@ ${transcript}
     }
 
     const settings = this.getEffectivePromptCachingSettings();
-    const providerFamily = resolvePromptCacheProviderFamily(this.provider.type, this.modelId);
+    const providerType = this.getProviderTypeForRuntime();
+    if (providerType === "unknown") {
+      return {};
+    }
+    const providerFamily = resolvePromptCacheProviderFamily(providerType, this.modelId);
     const promptCacheMode: LLMPromptCacheMode =
       settings.mode === "off" || !settings.surfaceCoverage[context.surface]
         ? "disabled"
@@ -17486,7 +17559,7 @@ You are continuing a previous conversation. The context from the previous conver
     const normalizedQuery = this.normalizeSkillInvocationQuery(query);
     if (!normalizedQuery) return null;
 
-    const availableToolNames = new Set(this.getAvailableTools().map((tool) => tool.name));
+    const availableToolNames = this.buildAvailableToolNameSet(this.getAvailableTools());
     if (!availableToolNames.has("Skill")) {
       return null;
     }
@@ -21380,9 +21453,7 @@ Return ONLY a JSON object:
             continueLoop = state.continueLoop;
             emptyResponseCount = state.emptyResponseCount;
 
-            const availableToolNames = new Set<string>(
-              availableTools.map((tool: Any) => String(tool.name)),
-            );
+            const availableToolNames = this.buildAvailableToolNameSet(availableTools);
 
         const responseHasToolUse = (response.content || []).some(
           (c: Any) => c && c.type === "tool_use",
@@ -27491,9 +27562,7 @@ Return ONLY a JSON object:
             continueLoop = state.continueLoop;
             emptyResponseCount = state.emptyResponseCount;
 
-            const availableToolNames = new Set<string>(
-              availableTools.map((tool: Any) => String(tool.name)),
-            );
+            const availableToolNames = this.buildAvailableToolNameSet(availableTools);
         const responseHasToolUse = (response.content || []).some(
           (item: Any) => item?.type === "tool_use",
         );

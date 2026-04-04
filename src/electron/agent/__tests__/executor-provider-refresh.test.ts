@@ -220,6 +220,153 @@ describe("TaskExecutor provider refresh", () => {
     expect(executor.llmProfileUsed).toBe("cheap");
   });
 
+  it("does not revert an active failover route back to the primary settings route", () => {
+    vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue({
+      providerType: "openrouter",
+      modelKey: "openrouter/free",
+      openrouter: {
+        apiKey: "openrouter-key",
+        model: "minimax/minimax-m2.5:free",
+      },
+    } as Any);
+    vi.spyOn(LLMProviderFactory, "resolveTaskModelSelection").mockReturnValue({
+      providerType: "openrouter",
+      modelId: "minimax/minimax-m2.5:free",
+      modelKey: "minimax/minimax-m2.5:free",
+      llmProfileUsed: "cheap",
+      resolvedModelKey: "minimax/minimax-m2.5:free",
+      modelSource: "provider_default",
+      warnings: [],
+    } as Any);
+
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      id: "task-failover-refresh",
+      title: "Automatic task",
+      agentConfig: {},
+    };
+    executor.provider = { type: "openrouter", createMessage: vi.fn() };
+    executor.modelId = "qwen/qwen3.6-plus:free";
+    executor.modelKey = "qwen/qwen3.6-plus:free";
+    executor.llmProfileUsed = "cheap";
+    executor.resolvedModelKey = "qwen/qwen3.6-plus:free";
+    executor.providerFailoverSelections = [
+      {
+        providerType: "openrouter",
+        modelId: "minimax/minimax-m2.5:free",
+        modelKey: "minimax/minimax-m2.5:free",
+        llmProfileUsed: "cheap",
+        resolvedModelKey: "minimax/minimax-m2.5:free",
+        modelSource: "provider_default",
+        warnings: [],
+      },
+      {
+        providerType: "openrouter",
+        modelId: "qwen/qwen3.6-plus:free",
+        modelKey: "qwen/qwen3.6-plus:free",
+        llmProfileUsed: "cheap",
+        resolvedModelKey: "qwen/qwen3.6-plus:free",
+        modelSource: "explicit_override",
+        warnings: [],
+      },
+    ];
+    executor.providerFailoverIndex = 1;
+    executor.providerFailoverPreserveUntil = Date.now() + 60_000;
+    executor.cachedLlmSettings = null;
+    executor.logTag = "[Executor:test]";
+    executor.emitEvent = vi.fn();
+    executor.emitRoutingState = vi.fn();
+    executor.applyResolvedProviderSelection = vi.fn();
+    executor.rebuildProviderFailoverSelections = vi.fn();
+    executor.isVerificationTaskRoute = vi.fn(() => false);
+    executor.hasExplicitTaskRouteOverride = vi.fn(() => false);
+
+    executor.refreshProviderIfSettingsChanged();
+
+    expect(executor.applyResolvedProviderSelection).not.toHaveBeenCalled();
+    expect(executor.rebuildProviderFailoverSelections).not.toHaveBeenCalled();
+    expect(executor.provider.type).toBe("openrouter");
+    expect(executor.modelId).toBe("qwen/qwen3.6-plus:free");
+  });
+
+  it("returns to the primary route after the failover cooldown expires", () => {
+    vi.spyOn(LLMProviderFactory, "loadSettings").mockReturnValue({
+      providerType: "openrouter",
+      modelKey: "openrouter/free",
+      openrouter: {
+        apiKey: "openrouter-key",
+        model: "minimax/minimax-m2.5:free",
+      },
+    } as Any);
+    vi.spyOn(LLMProviderFactory, "resolveTaskModelSelection").mockReturnValue({
+      providerType: "openrouter",
+      modelId: "minimax/minimax-m2.5:free",
+      modelKey: "minimax/minimax-m2.5:free",
+      llmProfileUsed: "cheap",
+      resolvedModelKey: "minimax/minimax-m2.5:free",
+      modelSource: "provider_default",
+      warnings: [],
+    } as Any);
+
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      id: "task-failover-retry-primary",
+      title: "Automatic task",
+      agentConfig: {},
+    };
+    executor.provider = { type: "openrouter", createMessage: vi.fn() };
+    executor.modelId = "qwen/qwen3.6-plus:free";
+    executor.modelKey = "qwen/qwen3.6-plus:free";
+    executor.llmProfileUsed = "cheap";
+    executor.resolvedModelKey = "qwen/qwen3.6-plus:free";
+    executor.providerFailoverSelections = [
+      {
+        providerType: "openrouter",
+        modelId: "minimax/minimax-m2.5:free",
+        modelKey: "minimax/minimax-m2.5:free",
+        llmProfileUsed: "cheap",
+        resolvedModelKey: "minimax/minimax-m2.5:free",
+        modelSource: "provider_default",
+        warnings: [],
+      },
+      {
+        providerType: "openrouter",
+        modelId: "qwen/qwen3.6-plus:free",
+        modelKey: "qwen/qwen3.6-plus:free",
+        llmProfileUsed: "cheap",
+        resolvedModelKey: "qwen/qwen3.6-plus:free",
+        modelSource: "explicit_override",
+        warnings: [],
+      },
+    ];
+    executor.providerFailoverIndex = 1;
+    executor.providerFailoverPreserveUntil = Date.now() - 1;
+    executor.cachedLlmSettings = null;
+    executor.logTag = "[Executor:test]";
+    executor.emitEvent = vi.fn();
+    executor.emitRoutingState = vi.fn();
+    executor.applyResolvedProviderSelection = vi.fn();
+    executor.rebuildProviderFailoverSelections = vi.fn();
+    executor.isVerificationTaskRoute = vi.fn(() => false);
+    executor.hasExplicitTaskRouteOverride = vi.fn(() => false);
+
+    executor.refreshProviderIfSettingsChanged();
+
+    expect(executor.applyResolvedProviderSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerType: "openrouter",
+        modelId: "minimax/minimax-m2.5:free",
+      }),
+    );
+    expect(executor.rebuildProviderFailoverSelections).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerType: "openrouter",
+        modelId: "minimax/minimax-m2.5:free",
+      }),
+      "cheap",
+    );
+  });
+
   it("only passes stream callbacks for Azure chat mode", async () => {
     const makeExecutor = (providerType: string, executionMode: string) => {
       const provider = {

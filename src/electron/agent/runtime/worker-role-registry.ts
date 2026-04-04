@@ -1,6 +1,7 @@
 import type {
   AgentConfig,
   ConversationMode,
+  DelegationWorkerRole,
   ExecutionMode,
   LlmProfile,
   VerificationVerdict,
@@ -147,8 +148,64 @@ export function resolveWorkerRoleKind(value?: string | null): WorkerRoleKind | u
   return undefined;
 }
 
+export function resolveDelegationWorkerRoleInput(
+  value?: string | null,
+): DelegationWorkerRole | undefined {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "auto") return "auto";
+  return resolveWorkerRoleKind(normalized);
+}
+
 export function resolveDefaultWorkerRoleKind(): WorkerRoleKind {
   return "implementer";
+}
+
+export function inferWorkerRoleKindFromPrompt(prompt: string): WorkerRoleKind {
+  const normalized = String(prompt || "").trim().toLowerCase();
+  if (!normalized) return resolveDefaultWorkerRoleKind();
+
+  if (
+    /\b(merge|combine|consolidat|synthesi[sz]e|synthesizer|roll\s*up|compare and summarize)\b/i.test(
+      normalized,
+    ) ||
+    /\bsummari[sz]e\b.*\b(outputs?|results?|predecessors?|agents?|branches?|reports?)\b/i.test(
+      normalized,
+    )
+  ) {
+    return "synthesizer";
+  }
+
+  if (
+    /\b(review|verify|verification|validate|validation|check|qa|second opinion|double-check|audit|run tests?|test the)\b/i.test(
+      normalized,
+    ) &&
+    !/\b(investigat|research|analy[sz]e|inspect|read|search|summari[sz]e|find out|failing test)\b/i.test(
+      normalized,
+    ) &&
+    !/\b(fix|implement|write|edit|change|build|create|update|refactor)\b/i.test(normalized)
+  ) {
+    return "verifier";
+  }
+
+  if (
+    /\b(read|search|investigat|inspect|analy[sz]e|analysis|research|find out|look up|explore|summari[sz]e|audit)\b/i.test(
+      normalized,
+    ) &&
+    !/\b(fix|implement|write|edit|change|build|create|update|refactor)\b/i.test(normalized)
+  ) {
+    return "researcher";
+  }
+
+  return "implementer";
+}
+
+export function resolveDelegationWorkerRole(params: {
+  requestedRole?: string | null;
+  prompt: string;
+}): WorkerRoleKind {
+  const requested = resolveDelegationWorkerRoleInput(params.requestedRole);
+  if (requested && requested !== "auto") return requested;
+  return inferWorkerRoleKindFromPrompt(params.prompt);
 }
 
 export function resolveWorkerRoleAgentConfig(

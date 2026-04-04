@@ -503,4 +503,4 @@ Access CoWork OS from mobile devices via local network.
 
 ## Comparison with Alternative Implementations
 
-See [Channel Comparison](channel-comparison.md) for how CoWork OS channel integrations compare to alternative implementations (e.g. Anthropic Claude Code plugins).
+See [Channel Comparison](channel-comparison.md) for how CoWork OS channel integrations compare to alternative plugin-based implementations.

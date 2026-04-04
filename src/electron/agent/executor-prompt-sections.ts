@@ -1,12 +1,17 @@
 import { ExecutionMode, TaskDomain } from "../../shared/types";
 import { estimateTokens, truncateToTokens } from "./context-manager";
 
+import { createHash } from "crypto";
+
 export interface PromptSection {
   key: string;
-  text: string;
+  text?: string;
+  resolve?: () => string | Promise<string>;
   maxTokens?: number;
   required?: boolean;
   layerKind?: "always" | "optional" | "on_demand";
+  cacheScope?: "session" | "turn";
+  stableInputHash?: string;
   // Larger value means drop earlier when total budget is exceeded.
   dropPriority?: number;
 }
@@ -16,6 +21,50 @@ export interface PromptCompositionResult {
   totalTokens: number;
   droppedSections: string[];
   truncatedSections: string[];
+  sections: PromptSection[];
+}
+
+export function hashPromptSectionInput(value: unknown): string {
+  return createHash("sha1").update(String(value ?? "")).digest("hex");
+}
+
+function buildPromptSectionCacheKey(section: PromptSection): string | null {
+  if (section.cacheScope !== "session") return null;
+  const hashSource =
+    section.stableInputHash ||
+    (typeof section.text === "string" && section.text.trim().length > 0
+      ? hashPromptSectionInput(section.text)
+      : null);
+  if (!hashSource) return null;
+  return `${section.key}:${hashSource}`;
+}
+
+export async function resolvePromptSections(
+  sections: PromptSection[],
+  sessionCache?: Map<string, string | null>,
+): Promise<PromptSection[]> {
+  return Promise.all(
+    sections.map(async (section) => {
+      const cacheKey = buildPromptSectionCacheKey(section);
+      if (cacheKey && sessionCache?.has(cacheKey)) {
+        return {
+          ...section,
+          text: String(sessionCache.get(cacheKey) || "").trim(),
+        };
+      }
+
+      const computed =
+        typeof section.resolve === "function" ? await section.resolve() : section.text || "";
+      const text = String(computed || "").trim();
+      if (cacheKey && sessionCache) {
+        sessionCache.set(cacheKey, text || null);
+      }
+      return {
+        ...section,
+        text,
+      };
+    }),
+  );
 }
 
 export const SHARED_PROMPT_POLICY_CORE = `
@@ -107,6 +156,7 @@ export function composePromptSections(
       totalTokens: estimateTokens(prompt),
       droppedSections,
       truncatedSections,
+      sections: prepared.map(({ index: _index, tokens: _tokens, ...section }) => section),
     };
   }
 
@@ -151,5 +201,6 @@ export function composePromptSections(
     totalTokens: estimateTokens(prompt),
     droppedSections,
     truncatedSections,
+    sections: working.map(({ index: _index, tokens: _tokens, ...section }) => section),
   };
 }

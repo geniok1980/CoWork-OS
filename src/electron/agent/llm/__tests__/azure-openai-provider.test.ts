@@ -198,6 +198,70 @@ describe("AzureOpenAIProvider", () => {
     expect(body.reasoning_effort).toBe("xhigh");
   });
 
+  it("sends prompt_cache_key and splits stable versus turn system prefix on chat completions", async () => {
+    mockFetch.mockResolvedValue(
+      createOkResponse({
+        choices: [{ message: { content: "hello" }, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 5,
+          completion_tokens: 7,
+          prompt_tokens_details: {
+            cached_tokens: 3,
+            cache_creation_input_tokens: 2,
+          },
+        },
+      }),
+    );
+
+    const provider = new AzureOpenAIProvider(baseConfig);
+    const request: LLMRequest = {
+      model: "gpt-4o",
+      maxTokens: 20,
+      system: "Stable instructions\n\nCurrent time: 2026-04-04T10:00:00Z",
+      systemBlocks: [
+        {
+          text: "Stable instructions",
+          scope: "session",
+          cacheable: true,
+          stableKey: "identity:1",
+        },
+        {
+          text: "Current time: 2026-04-04T10:00:00Z",
+          scope: "turn",
+          cacheable: false,
+          stableKey: "time:1",
+        },
+      ],
+      promptCache: {
+        mode: "openai_key",
+        ttl: "1h",
+        explicitRecentMessages: 3,
+        cacheKey: "stable-prefix-hash",
+        retention: "24h",
+      },
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    const response = await provider.createMessage(request);
+
+    expect(response.usage).toEqual({
+      inputTokens: 5,
+      outputTokens: 7,
+      cachedTokens: 3,
+      cacheWriteTokens: 2,
+    });
+
+    const [, options] = mockFetch.mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.prompt_cache_key).toBe("stable-prefix-hash");
+    expect(body.prompt_cache_retention).toBe("24h");
+    expect(body.messages).toEqual([
+      { role: "system", content: "Stable instructions" },
+      { role: "system", content: "Current time: 2026-04-04T10:00:00Z" },
+      { role: "user", content: "hi" },
+    ]);
+  });
+
   it("streams chat completions when a stream callback is provided", async () => {
     mockFetch.mockResolvedValue(
       createStreamingResponse([
@@ -280,6 +344,151 @@ describe("AzureOpenAIProvider", () => {
     expect(body.model).toBe("gpt-5.2-codex");
     expect(body.input[0].content[0].text).toBe("hi");
     expect(body.reasoning).toEqual({ effort: "xhigh" });
+  });
+
+  it("sends prompt_cache_key with stable instructions and volatile system input on Responses fallback", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        createErrorResponse(400, "Bad Request", {
+          error: {
+            message: "The chatCompletion operation does not work with the specified model.",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createErrorResponse(400, "Bad Request", {
+          error: {
+            message: "The chatCompletion operation does not work with the specified model.",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createOkResponse({
+          output: [{ type: "message", content: [{ type: "output_text", text: "hello" }] }],
+          usage: {
+            input_tokens: 2,
+            output_tokens: 3,
+            input_tokens_details: {
+              cached_tokens: 1,
+              cache_creation_input_tokens: 4,
+            },
+          },
+        }),
+      );
+
+    const provider = new AzureOpenAIProvider(baseConfig);
+    const request: LLMRequest = {
+      model: "gpt-5.4",
+      maxTokens: 20,
+      system: "Stable instructions\n\nCurrent time: 2026-04-04T10:00:00Z",
+      systemBlocks: [
+        {
+          text: "Stable instructions",
+          scope: "session",
+          cacheable: true,
+          stableKey: "identity:1",
+        },
+        {
+          text: "Current time: 2026-04-04T10:00:00Z",
+          scope: "turn",
+          cacheable: false,
+          stableKey: "time:1",
+        },
+      ],
+      promptCache: {
+        mode: "openai_key",
+        ttl: "5m",
+        explicitRecentMessages: 3,
+        cacheKey: "stable-prefix-hash",
+      },
+      messages: [{ role: "user", content: "hi" }],
+    };
+
+    const response = await provider.createMessage(request);
+
+    expect(response.usage).toEqual({
+      inputTokens: 2,
+      outputTokens: 3,
+      cachedTokens: 1,
+      cacheWriteTokens: 4,
+    });
+
+    const [responsesUrl, responsesOptions] = mockFetch.mock.calls[2];
+    expect(responsesUrl).toBe("https://example.openai.azure.com/openai/v1/responses");
+    const body = JSON.parse(responsesOptions.body);
+    expect(body.prompt_cache_key).toBe("stable-prefix-hash");
+    expect(body.prompt_cache_retention).toBeUndefined();
+    expect(body.instructions).toBe("Stable instructions");
+    expect(body.input[0]).toEqual({
+      type: "message",
+      role: "system",
+      content: [{ type: "input_text", text: "Current time: 2026-04-04T10:00:00Z" }],
+    });
+    expect(body.input[1].role).toBe("user");
+  });
+
+  it("honors toolChoice=none on chat completions and Responses requests", async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        createOkResponse({
+          choices: [{ message: { content: "hello" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 5, completion_tokens: 7 },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createErrorResponse(400, "Bad Request", {
+          error: {
+            message: "The chatCompletion operation does not work with the specified model.",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createErrorResponse(400, "Bad Request", {
+          error: {
+            message: "The chatCompletion operation does not work with the specified model.",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        createOkResponse({
+          output: [{ type: "message", content: [{ type: "output_text", text: "hello" }] }],
+          usage: { input_tokens: 2, output_tokens: 3 },
+        }),
+      );
+
+    const provider = new AzureOpenAIProvider(baseConfig);
+    const request: LLMRequest = {
+      model: "gpt-5.4",
+      maxTokens: 20,
+      system: "system prompt",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          name: "write_file",
+          description: "Write a file",
+          input_schema: {
+            type: "object",
+            properties: {
+              path: { type: "string" },
+              content: { type: "string" },
+            },
+            required: ["path", "content"],
+          },
+        },
+      ],
+      toolChoice: "none",
+    };
+
+    await provider.createMessage(request);
+    const chatBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(chatBody.tool_choice).toBe("none");
+
+    await provider.createMessage({
+      ...request,
+      model: "gpt-5.2-codex",
+    });
+    const responsesBody = JSON.parse(mockFetch.mock.calls[3][1].body);
+    expect(responsesBody.tool_choice).toBe("none");
   });
 
   it("streams the Responses API fallback when a stream callback is provided", async () => {

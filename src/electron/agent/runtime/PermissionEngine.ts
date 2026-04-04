@@ -19,6 +19,11 @@ import {
   normalizeServerName,
   summarizePermissionScope,
 } from "../../security/permission-utils";
+import {
+  canonicalizeToolName,
+  isArtifactGenerationToolName,
+  isFileMutationToolName,
+} from "../tool-semantics";
 
 const SOURCE_PRECEDENCE: Record<string, number> = {
   session: 600,
@@ -59,11 +64,35 @@ type PermissionFacts = {
   normalizedServerName: string;
   isReadOnly: boolean;
   isWriteLike: boolean;
+  isWorkspaceWriteLike: boolean;
   isDeleteLike: boolean;
   isShell: boolean;
   isExternalSideEffect: boolean;
+  isNetworkAccess: boolean;
+  isNonWorkspaceInteraction: boolean;
   isMcp: boolean;
 };
+
+const NETWORK_READ_TOOLS = new Set(["web_search", "web_fetch"]);
+const READ_ONLY_BROWSER_TOOLS = new Set([
+  "browser_get_content",
+  "browser_get_text",
+  "browser_screenshot",
+  "browser_wait",
+]);
+const READ_ONLY_CANVAS_TOOLS = new Set(["canvas_list", "canvas_snapshot", "canvas_checkpoints"]);
+const NON_WORKSPACE_SYSTEM_TOOLS = new Set([
+  "read_clipboard",
+  "write_clipboard",
+  "take_screenshot",
+  "open_application",
+  "open_url",
+  "open_path",
+  "show_in_folder",
+  "get_env",
+  "get_app_paths",
+  "run_applescript",
+]);
 
 export class PermissionEngine {
   static evaluate(request: PermissionEngineRequest): PermissionEvaluationResult {
@@ -178,14 +207,7 @@ export class PermissionEngine {
       };
     }
 
-    if (
-      facts.isWriteLike &&
-      !facts.isDeleteLike &&
-      !facts.isShell &&
-      !facts.isExternalSideEffect &&
-      !facts.isMcp &&
-      permissions.write === false
-    ) {
+    if (facts.isWorkspaceWriteLike && permissions.write === false) {
       return {
         decision: "deny",
         reason: {
@@ -196,7 +218,7 @@ export class PermissionEngine {
       };
     }
 
-    if ((facts.isExternalSideEffect || facts.isMcp) && permissions.network === false) {
+    if ((facts.isExternalSideEffect || facts.isNetworkAccess || facts.isMcp) && permissions.network === false) {
       return {
         decision: "deny",
         reason: {
@@ -235,13 +257,20 @@ export class PermissionEngine {
           },
         };
       case "accept_edits":
-        if (facts.isShell || facts.isDeleteLike || facts.isExternalSideEffect || facts.isMcp) {
+        if (
+          facts.isShell ||
+          facts.isDeleteLike ||
+          facts.isExternalSideEffect ||
+          facts.isNonWorkspaceInteraction ||
+          facts.isMcp
+        ) {
           return {
             decision: "ask",
             reason: {
               type: "mode",
               mode,
-              summary: "Accept-edits mode still prompts for shell, delete, and external actions.",
+              summary:
+                "Accept-edits mode still prompts for shell, delete, browser/system, and external actions.",
             },
           };
         }
@@ -265,7 +294,12 @@ export class PermissionEngine {
         };
       case "default":
       default:
-        if (facts.isReadOnly && !facts.isExternalSideEffect && !facts.isMcp) {
+        if (
+          facts.isReadOnly &&
+          !facts.isExternalSideEffect &&
+          !facts.isNonWorkspaceInteraction &&
+          !facts.isMcp
+        ) {
           return {
             decision: "allow",
             reason: {
@@ -287,11 +321,12 @@ export class PermissionEngine {
   }
 
   private static buildFacts(request: PermissionEngineRequest): PermissionFacts {
-    const toolName = String(request.toolName || "").trim();
+    const toolName = canonicalizeToolName(String(request.toolName || "").trim());
     const approvalType = request.approvalType;
     const normalizedCommand = normalizeCommandPrefix(request.command || this.extractCommand(request.toolInput));
     const normalizedPath = normalizePermissionPath(request.path || this.extractPath(request.toolInput));
     const normalizedServerName = normalizeServerName(request.serverName || "");
+    const isHttpRequestReadOnly = this.isReadOnlyHttpRequest(request.toolInput, toolName);
     const isShell = approvalType === "run_command" || toolName === "run_command";
     const isDeleteLike =
       approvalType === "delete_file" ||
@@ -299,12 +334,19 @@ export class PermissionEngine {
       toolName === "delete_file";
     const isExternalSideEffect =
       approvalType === "external_service" ||
-      approvalType === "network_access" ||
+      (toolName === "http_request" && !isHttpRequestReadOnly) ||
       toolName.endsWith("_action") ||
       toolName === "voice_call";
+    const isNetworkAccess =
+      approvalType === "network_access" ||
+      NETWORK_READ_TOOLS.has(toolName) ||
+      (toolName === "http_request" && isHttpRequestReadOnly);
+    const isNonWorkspaceInteraction = this.isNonWorkspaceInteractionTool(toolName, approvalType);
     const isMcp = toolName.startsWith("mcp_");
-    const isWriteLike = isDeleteLike || isShell || isExternalSideEffect || this.isWriteTool(toolName);
-    const isReadOnly = !isWriteLike && !this.isWriteTool(toolName);
+    const isWorkspaceWriteLike = this.isWorkspaceWriteTool(toolName);
+    const isMutatingTool = this.isMutatingTool(toolName);
+    const isWriteLike = isDeleteLike || isShell || isExternalSideEffect || isMutatingTool;
+    const isReadOnly = !isWriteLike;
 
     return {
       toolName,
@@ -313,28 +355,69 @@ export class PermissionEngine {
       normalizedServerName,
       isReadOnly,
       isWriteLike,
+      isWorkspaceWriteLike,
       isDeleteLike,
       isShell,
       isExternalSideEffect,
+      isNetworkAccess,
+      isNonWorkspaceInteraction,
       isMcp,
     };
   }
 
-  private static isWriteTool(toolName: string): boolean {
+  private static isWorkspaceWriteTool(toolName: string): boolean {
+    const canonicalToolName = canonicalizeToolName(toolName);
+    if (isArtifactGenerationToolName(canonicalToolName) || isFileMutationToolName(canonicalToolName)) {
+      return true;
+    }
+    return canonicalToolName === "take_screenshot";
+  }
+
+  private static isMutatingTool(toolName: string): boolean {
+    const canonicalToolName = canonicalizeToolName(toolName);
+    if (this.isWorkspaceWriteTool(canonicalToolName)) {
+      return true;
+    }
+    if (canonicalToolName.startsWith("browser_")) {
+      return !READ_ONLY_BROWSER_TOOLS.has(canonicalToolName);
+    }
+    if (canonicalToolName.startsWith("canvas_")) {
+      return !READ_ONLY_CANVAS_TOOLS.has(canonicalToolName);
+    }
     return [
-      "write_file",
-      "edit_file",
-      "copy_file",
-      "rename_file",
-      "create_directory",
       "open_url",
       "open_application",
+      "open_path",
+      "show_in_folder",
       "write_clipboard",
       "computer_click",
       "computer_type",
       "computer_key",
       "computer_move_mouse",
-    ].includes(toolName);
+    ].includes(canonicalToolName);
+  }
+
+  private static isNonWorkspaceInteractionTool(toolName: string, approvalType?: ApprovalType): boolean {
+    const canonicalToolName = canonicalizeToolName(toolName);
+    if (approvalType === "computer_use") return true;
+    if (canonicalToolName.startsWith("browser_")) return true;
+    if (canonicalToolName.startsWith("canvas_")) return true;
+    if (canonicalToolName.startsWith("computer_")) return true;
+    return NON_WORKSPACE_SYSTEM_TOOLS.has(canonicalToolName);
+  }
+
+  private static isReadOnlyHttpRequest(toolInput: unknown, toolName: string): boolean {
+    if (canonicalizeToolName(toolName) !== "http_request") {
+      return false;
+    }
+    const method = this.extractHttpMethod(toolInput);
+    return method === "GET" || method === "HEAD";
+  }
+
+  private static extractHttpMethod(toolInput: unknown): string {
+    const obj = toolInput && typeof toolInput === "object" ? (toolInput as Record<string, unknown>) : null;
+    const rawMethod = typeof obj?.method === "string" ? obj.method.trim() : "";
+    return rawMethod ? rawMethod.toUpperCase() : "GET";
   }
 
   private static extractCommand(toolInput: unknown): string {

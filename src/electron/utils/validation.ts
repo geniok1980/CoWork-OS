@@ -6,7 +6,12 @@
 import * as os from "os";
 import * as path from "path";
 import { z } from "zod";
-import { LLM_PROVIDER_TYPES, isTempWorkspaceId, PersonalityId } from "../../shared/types";
+import {
+  LLM_PROVIDER_TYPES,
+  isTempWorkspaceId,
+  PersonalityId,
+} from "../../shared/types";
+import { SUBCONSCIOUS_TARGET_KINDS } from "../../shared/subconscious";
 import { getUserDataDir } from "./user-data-dir";
 import { assertSafeLoomMailboxFolder, isSecureOrLocalLoomUrl } from "./loom";
 
@@ -17,7 +22,8 @@ const MAX_TITLE_LENGTH = 500;
 const MAX_PROMPT_LENGTH = 500000; // ~125K tokens; fits within 200K-token model context
 const MAX_IMAGES_PER_MESSAGE = 5;
 const MAX_TOTAL_TASK_IMAGE_BYTES = 125 * 1024 * 1024;
-const LOOM_MAILBOX_FOLDER_ERROR = "LOOM mailbox folder contains invalid characters";
+const LOOM_MAILBOX_FOLDER_ERROR =
+  "LOOM mailbox folder contains invalid characters";
 
 const PersonalityIdSchema = z.preprocess(
   (value) => (typeof value === "string" ? value.trim() : value),
@@ -141,10 +147,24 @@ export const AgentConfigSchema = z
     autoApproveTypes: z.array(z.string().min(1).max(200)).max(50).optional(),
     allowSharedContextMemory: z.boolean().optional(),
     conversationMode: z.enum(["task", "chat", "hybrid"]).optional(),
-    executionMode: z.enum(["execute", "chat", "plan", "analyze", "verified", "debug"]).optional(),
-    taskDomain: z.enum(["auto", "code", "research", "operations", "writing", "general", "media"]).optional(),
+    executionMode: z
+      .enum(["execute", "chat", "plan", "analyze", "verified", "debug"])
+      .optional(),
+    taskDomain: z
+      .enum([
+        "auto",
+        "code",
+        "research",
+        "operations",
+        "writing",
+        "general",
+        "media",
+      ])
+      .optional(),
     autonomousMode: z.boolean().optional(),
-    qualityPasses: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
+    qualityPasses: z
+      .union([z.literal(1), z.literal(2), z.literal(3)])
+      .optional(),
     collaborativeMode: z.boolean().optional(),
     multiLlmMode: z.boolean().optional(),
     multiLlmConfig: z
@@ -213,13 +233,22 @@ export const AgentConfigSchema = z
     autoContinueOnTurnLimit: z.boolean().optional(),
     maxAutoContinuations: z.number().int().min(0).max(20).optional(),
     minProgressScoreForAutoContinue: z.number().min(-1).max(1).optional(),
-    continuationStrategy: z.enum(["adaptive_progress", "fixed_caps"]).optional(),
+    continuationStrategy: z
+      .enum(["adaptive_progress", "fixed_caps"])
+      .optional(),
     compactOnContinuation: z.boolean().optional(),
     compactionThresholdRatio: z.number().min(0.5).max(0.95).optional(),
     loopWarningThreshold: z.number().int().min(1).max(200).optional(),
     loopCriticalThreshold: z.number().int().min(1).max(400).optional(),
-    globalNoProgressCircuitBreaker: z.number().int().min(1).max(1000).optional(),
-    sideChannelDuringExecution: z.enum(["paused", "limited", "enabled"]).optional(),
+    globalNoProgressCircuitBreaker: z
+      .number()
+      .int()
+      .min(1)
+      .max(1000)
+      .optional(),
+    sideChannelDuringExecution: z
+      .enum(["paused", "limited", "enabled"])
+      .optional(),
     sideChannelMaxCallsPerWindow: z.number().int().min(0).max(100).optional(),
     externalRuntime: z
       .object({
@@ -237,11 +266,14 @@ export const AgentConfigSchema = z
   .strict();
 
 const isValidWorkspaceId = (workspaceId: string): boolean =>
-  isTempWorkspaceId(workspaceId) || z.string().uuid().safeParse(workspaceId).success;
+  isTempWorkspaceId(workspaceId) ||
+  z.string().uuid().safeParse(workspaceId).success;
 
 export const WorkspaceIdSchema = z
   .string()
-  .refine(isValidWorkspaceId, { message: "Must be a valid UUID or temp workspace ID" });
+  .refine(isValidWorkspaceId, {
+    message: "Must be a valid UUID or temp workspace ID",
+  });
 
 export const ImageAttachmentSchema = z
   .object({
@@ -257,13 +289,16 @@ export const ImageAttachmentSchema = z
     tempFile: z.boolean().optional(),
   })
   .superRefine((data, ctx) => {
-    const hasData = typeof data.data === "string" && data.data.trim().length > 0;
-    const hasFilePath = typeof data.filePath === "string" && data.filePath.trim().length > 0;
+    const hasData =
+      typeof data.data === "string" && data.data.trim().length > 0;
+    const hasFilePath =
+      typeof data.filePath === "string" && data.filePath.trim().length > 0;
     if (hasData === hasFilePath) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["data"],
-        message: 'Image attachment must provide exactly one of "data" or "filePath".',
+        message:
+          'Image attachment must provide exactly one of "data" or "filePath".',
       });
       return;
     }
@@ -279,7 +314,13 @@ export const ImageAttachmentSchema = z
       }
 
       const ext = path.extname(data.filePath).toLowerCase();
-      const supportedExtensions = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
+      const supportedExtensions = new Set([
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".webp",
+      ]);
       if (!supportedExtensions.has(ext)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -309,7 +350,10 @@ export const TaskMessageSchema = z
   .object({
     taskId: z.string().uuid(),
     message: z.string().min(1).max(MAX_PROMPT_LENGTH),
-    images: z.array(ImageAttachmentSchema).max(MAX_IMAGES_PER_MESSAGE).optional(),
+    images: z
+      .array(ImageAttachmentSchema)
+      .max(MAX_IMAGES_PER_MESSAGE)
+      .optional(),
   })
   .superRefine((data, ctx) => {
     if (!data.images || data.images.length === 0) {
@@ -318,7 +362,9 @@ export const TaskMessageSchema = z
 
     const totalImageBytes = data.images.reduce((sum, image) => {
       const sizeBytes = Number(image.sizeBytes);
-      return Number.isFinite(sizeBytes) && sizeBytes > 0 ? sum + sizeBytes : sum;
+      return Number.isFinite(sizeBytes) && sizeBytes > 0
+        ? sum + sizeBytes
+        : sum;
     }, 0);
 
     if (totalImageBytes > MAX_TOTAL_TASK_IMAGE_BYTES) {
@@ -357,8 +403,14 @@ export const FileImportDataSchema = z.object({
 });
 
 export const DocumentEditorOpenSessionSchema = z.object({
-  filePath: z.string().min(1).max(MAX_PATH_LENGTH * 4),
-  workspacePath: z.string().max(MAX_PATH_LENGTH * 4).optional(),
+  filePath: z
+    .string()
+    .min(1)
+    .max(MAX_PATH_LENGTH * 4),
+  workspacePath: z
+    .string()
+    .max(MAX_PATH_LENGTH * 4)
+    .optional(),
 });
 
 export const DocumentEditorListVersionsSchema = DocumentEditorOpenSessionSchema;
@@ -388,24 +440,30 @@ export const DocumentEditRequestSchema = z.object({
 
 // ============ Approval Schemas ============
 
-export const ApprovalResponseSchema = z.object({
-  approvalId: z.string().uuid(),
-  approved: z.boolean().optional(),
-  action: z
-    .enum([
-      "allow_once",
-      "deny_once",
-      "allow_session",
-      "deny_session",
-      "allow_workspace",
-      "deny_workspace",
-      "allow_profile",
-      "deny_profile",
-    ])
-    .optional(),
-}).refine((data) => typeof data.approved === "boolean" || typeof data.action === "string", {
-  message: "Either approved or action must be provided",
-});
+export const ApprovalResponseSchema = z
+  .object({
+    approvalId: z.string().uuid(),
+    approved: z.boolean().optional(),
+    action: z
+      .enum([
+        "allow_once",
+        "deny_once",
+        "allow_session",
+        "deny_session",
+        "allow_workspace",
+        "deny_workspace",
+        "allow_profile",
+        "deny_profile",
+      ])
+      .optional(),
+  })
+  .refine(
+    (data) =>
+      typeof data.approved === "boolean" || typeof data.action === "string",
+    {
+      message: "Either approved or action must be provided",
+    },
+  );
 
 export const PermissionSettingsSchema = z.object({
   version: z.literal(1),
@@ -421,7 +479,9 @@ const InputRequestAnswerSchema = z.object({
 export const InputRequestResponseSchema = z.object({
   requestId: z.string().uuid(),
   status: z.enum(["submitted", "dismissed"]),
-  answers: z.record(z.string().regex(/^[a-z][a-z0-9_]*$/), InputRequestAnswerSchema).optional(),
+  answers: z
+    .record(z.string().regex(/^[a-z][a-z0-9_]*$/), InputRequestAnswerSchema)
+    .optional(),
 });
 
 // ============ LLM Settings Schemas ============
@@ -439,6 +499,8 @@ const ProviderRoutingSettingsSchema = {
 export const AnthropicSettingsSchema = z
   .object({
     apiKey: z.string().max(500).optional(),
+    subscriptionToken: z.string().max(2000).optional(),
+    authMethod: z.enum(["api_key", "subscription"]).optional(),
     ...ProviderRoutingSettingsSchema,
   })
   .optional();
@@ -572,14 +634,20 @@ export const CustomProviderConfigSchema = z.object({
   ...ProviderRoutingSettingsSchema,
 });
 
-export const CustomProvidersSchema = z.record(z.string(), CustomProviderConfigSchema).optional();
+export const CustomProvidersSchema = z
+  .record(z.string(), CustomProviderConfigSchema)
+  .optional();
 
 // ============ Video Generation Settings Schema ============
 
 export const VideoGenerationSettingsSchema = z
   .object({
-    defaultProvider: z.enum(["openai", "azure", "gemini", "vertex", "kling"]).optional(),
-    fallbackProvider: z.enum(["openai", "azure", "gemini", "vertex", "kling"]).optional(),
+    defaultProvider: z
+      .enum(["openai", "azure", "gemini", "vertex", "kling"])
+      .optional(),
+    fallbackProvider: z
+      .enum(["openai", "azure", "gemini", "vertex", "kling"])
+      .optional(),
     openai: z
       .object({
         defaultModel: z.string().max(200).optional(),
@@ -631,6 +699,23 @@ export const VideoGenerationSettingsSchema = z
   })
   .optional();
 
+export const PromptCachingSettingsSchema = z
+  .object({
+    mode: z.enum(["auto", "off"]).optional(),
+    ttl: z.enum(["5m", "1h"]).optional(),
+    openRouterClaudeStrategy: z.enum(["explicit_system_and_3"]).optional(),
+    strictStablePrefix: z.boolean().optional(),
+    surfaceCoverage: z
+      .object({
+        executor: z.boolean().optional(),
+        followUps: z.boolean().optional(),
+        chatMode: z.boolean().optional(),
+        sideCalls: z.boolean().optional(),
+      })
+      .optional(),
+  })
+  .optional();
+
 export const LLMSettingsSchema = z.object({
   providerType: LLMProviderTypeSchema,
   modelKey: z.string().max(200),
@@ -643,6 +728,13 @@ export const LLMSettingsSchema = z.object({
     )
     .max(5)
     .optional(),
+  failoverPrimaryRetryCooldownSeconds: z
+    .number()
+    .int()
+    .min(0)
+    .max(3600)
+    .optional(),
+  promptCaching: PromptCachingSettingsSchema,
   anthropic: AnthropicSettingsSchema,
   bedrock: BedrockSettingsSchema,
   ollama: OllamaSettingsSchema,
@@ -721,7 +813,10 @@ export const XSettingsSchema = z
       .object({
         enabled: z.boolean().default(false),
         commandPrefix: z.string().trim().min(1).max(50).default("do:"),
-        allowedAuthors: z.array(z.string().trim().min(1).max(50)).max(200).default([]),
+        allowedAuthors: z
+          .array(z.string().trim().min(1).max(50))
+          .max(200)
+          .default([]),
         pollIntervalSec: z.number().int().min(30).max(3600).default(120),
         fetchCount: z.number().int().min(1).max(200).default(25),
         workspaceMode: z.enum(["temporary"]).default("temporary"),
@@ -736,11 +831,15 @@ export const XSettingsSchema = z
       }),
   })
   .superRefine((data, ctx) => {
-    if (data.mentionTrigger.enabled && data.mentionTrigger.allowedAuthors.length === 0) {
+    if (
+      data.mentionTrigger.enabled &&
+      data.mentionTrigger.allowedAuthors.length === 0
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["mentionTrigger", "allowedAuthors"],
-        message: "At least one allowed author is required when mention trigger is enabled",
+        message:
+          "At least one allowed author is required when mention trigger is enabled",
       });
     }
   });
@@ -852,7 +951,9 @@ export const GuardrailSettingsSchema = z.object({
   loopWarningThreshold: z.number().int().min(1).max(200).default(8),
   loopCriticalThreshold: z.number().int().min(1).max(400).default(14),
   globalNoProgressCircuitBreaker: z.number().int().min(1).max(1000).default(20),
-  sideChannelDuringExecution: z.enum(["paused", "limited", "enabled"]).default("paused"),
+  sideChannelDuringExecution: z
+    .enum(["paused", "limited", "enabled"])
+    .default("paused"),
   sideChannelMaxCallsPerWindow: z.number().int().min(0).max(100).default(2),
 
   // Adaptive Style Engine
@@ -910,7 +1011,10 @@ export const SecurityModeSchema = z.enum(["pairing", "allowlist", "open"]);
 const DISCORD_SUPERVISOR_CONFIG_SHAPE = {
   enabled: z.boolean(),
   coordinationChannelId: z.string().trim().min(1).max(100).optional(),
-  watchedChannelIds: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
+  watchedChannelIds: z
+    .array(z.string().trim().min(1).max(100))
+    .max(100)
+    .optional(),
   workerAgentRoleId: z.string().uuid().optional(),
   supervisorAgentRoleId: z.string().uuid().optional(),
   humanEscalationChannelId: z.string().trim().min(1).max(100).optional(),
@@ -938,28 +1042,32 @@ function addDiscordSupervisorConfigRefinement(
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["coordinationChannelId"],
-        message: "Coordination channel ID is required when supervisor mode is enabled",
+        message:
+          "Coordination channel ID is required when supervisor mode is enabled",
       });
     }
     if (!config.workerAgentRoleId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["workerAgentRoleId"],
-        message: "Worker agent role is required when supervisor mode is enabled",
+        message:
+          "Worker agent role is required when supervisor mode is enabled",
       });
     }
     if (!config.supervisorAgentRoleId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["supervisorAgentRoleId"],
-        message: "Supervisor agent role is required when supervisor mode is enabled",
+        message:
+          "Supervisor agent role is required when supervisor mode is enabled",
       });
     }
     if (!config.peerBotUserIds || config.peerBotUserIds.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["peerBotUserIds"],
-        message: "At least one peer bot user ID is required when supervisor mode is enabled",
+        message:
+          "At least one peer bot user ID is required when supervisor mode is enabled",
       });
     }
   });
@@ -1024,7 +1132,12 @@ export const AddWhatsAppChannelSchema = z.object({
   ingestNonSelfChatsInSelfChatMode: z.boolean().optional(),
 });
 
-export const DmPolicySchema = z.enum(["open", "allowlist", "pairing", "disabled"]);
+export const DmPolicySchema = z.enum([
+  "open",
+  "allowlist",
+  "pairing",
+  "disabled",
+]);
 export const GroupPolicySchema = z.enum(["open", "allowlist", "disabled"]);
 export const SignalModeSchema = z.enum(["native", "daemon"]);
 export const SignalTrustModeSchema = z.enum(["tofu", "always", "manual"]);
@@ -1116,7 +1229,10 @@ export const AddXChannelSchema = z.object({
   name: z.string().min(1).max(MAX_TITLE_LENGTH),
   securityMode: SecurityModeSchema.optional(),
   xCommandPrefix: z.string().trim().min(1).max(50).optional(),
-  xAllowedAuthors: z.array(z.string().trim().min(1).max(50)).max(200).optional(),
+  xAllowedAuthors: z
+    .array(z.string().trim().min(1).max(50))
+    .max(200)
+    .optional(),
   xPollIntervalSec: z.number().int().min(30).max(3600).optional(),
   xFetchCount: z.number().int().min(1).max(200).optional(),
   xOutboundEnabled: z.boolean().optional(),
@@ -1202,44 +1318,140 @@ type _EmailFieldKeys = (typeof EMAIL_FIELD_KEY_MAP)[EmailSchemaMode];
 
 const EMAIL_TRANSPORT_BASE_SHAPES: Record<EmailSchemaMode, z.ZodRawShape> = {
   add: {
-    [EMAIL_FIELD_KEY_MAP.add.protocol]: z.enum(["imap-smtp", "loom"]).optional(),
-    [EMAIL_FIELD_KEY_MAP.add.authMethod]: z.enum(["password", "oauth"]).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.protocol]: z
+      .enum(["imap-smtp", "loom"])
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.add.authMethod]: z
+      .enum(["password", "oauth"])
+      .optional(),
     [EMAIL_FIELD_KEY_MAP.add.oauthProvider]: z.enum(["microsoft"]).optional(),
-    [EMAIL_FIELD_KEY_MAP.add.oauthClientId]: z.string().min(1).max(500).optional(),
-    [EMAIL_FIELD_KEY_MAP.add.accessToken]: z.string().min(1).max(4000).optional(),
-    [EMAIL_FIELD_KEY_MAP.add.refreshToken]: z.string().min(1).max(4000).optional(),
-    [EMAIL_FIELD_KEY_MAP.add.email]: z.string().email().min(1).max(200).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.oauthClientId]: z
+      .string()
+      .min(1)
+      .max(500)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.add.accessToken]: z
+      .string()
+      .min(1)
+      .max(4000)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.add.refreshToken]: z
+      .string()
+      .min(1)
+      .max(4000)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.add.email]: z
+      .string()
+      .email()
+      .min(1)
+      .max(200)
+      .optional(),
     [EMAIL_FIELD_KEY_MAP.add.password]: z.string().min(1).max(500).optional(),
     [EMAIL_FIELD_KEY_MAP.add.imapHost]: z.string().min(1).max(200).optional(),
-    [EMAIL_FIELD_KEY_MAP.add.imapPort]: z.number().int().min(1).max(65535).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.imapPort]: z
+      .number()
+      .int()
+      .min(1)
+      .max(65535)
+      .optional(),
     [EMAIL_FIELD_KEY_MAP.add.smtpHost]: z.string().min(1).max(200).optional(),
-    [EMAIL_FIELD_KEY_MAP.add.smtpPort]: z.number().int().min(1).max(65535).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.smtpPort]: z
+      .number()
+      .int()
+      .min(1)
+      .max(65535)
+      .optional(),
     [EMAIL_FIELD_KEY_MAP.add.loomBaseUrl]: z.string().url().max(500).optional(),
-    [EMAIL_FIELD_KEY_MAP.add.loomAccessToken]: z.string().min(1).max(4000).optional(),
+    [EMAIL_FIELD_KEY_MAP.add.loomAccessToken]: z
+      .string()
+      .min(1)
+      .max(4000)
+      .optional(),
   },
   update: {
-    [EMAIL_FIELD_KEY_MAP.update.protocol]: z.enum(["imap-smtp", "loom"]).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.authMethod]: z.enum(["password", "oauth"]).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.oauthProvider]: z.enum(["microsoft"]).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.oauthClientId]: z.string().min(1).max(500).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.accessToken]: z.string().min(1).max(4000).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.refreshToken]: z.string().min(1).max(4000).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.email]: z.string().email().min(1).max(200).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.password]: z.string().min(1).max(500).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.imapHost]: z.string().min(1).max(200).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.imapPort]: z.number().int().min(1).max(65535).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.smtpHost]: z.string().min(1).max(200).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.smtpPort]: z.number().int().min(1).max(65535).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.loomBaseUrl]: z.string().url().max(500).optional(),
-    [EMAIL_FIELD_KEY_MAP.update.loomAccessToken]: z.string().min(1).max(4000).optional(),
+    [EMAIL_FIELD_KEY_MAP.update.protocol]: z
+      .enum(["imap-smtp", "loom"])
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.authMethod]: z
+      .enum(["password", "oauth"])
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.oauthProvider]: z
+      .enum(["microsoft"])
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.oauthClientId]: z
+      .string()
+      .min(1)
+      .max(500)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.accessToken]: z
+      .string()
+      .min(1)
+      .max(4000)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.refreshToken]: z
+      .string()
+      .min(1)
+      .max(4000)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.email]: z
+      .string()
+      .email()
+      .min(1)
+      .max(200)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.password]: z
+      .string()
+      .min(1)
+      .max(500)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.imapHost]: z
+      .string()
+      .min(1)
+      .max(200)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.imapPort]: z
+      .number()
+      .int()
+      .min(1)
+      .max(65535)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.smtpHost]: z
+      .string()
+      .min(1)
+      .max(200)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.smtpPort]: z
+      .number()
+      .int()
+      .min(1)
+      .max(65535)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.loomBaseUrl]: z
+      .string()
+      .url()
+      .max(500)
+      .optional(),
+    [EMAIL_FIELD_KEY_MAP.update.loomAccessToken]: z
+      .string()
+      .min(1)
+      .max(4000)
+      .optional(),
   },
 };
 
-const createEmailTransportSchema = (mode: EmailSchemaMode): z.ZodObject<z.ZodRawShape> => {
+const createEmailTransportSchema = (
+  mode: EmailSchemaMode,
+): z.ZodObject<z.ZodRawShape> => {
   const fieldMap = EMAIL_FIELD_KEY_MAP[mode];
-  return z.object(EMAIL_TRANSPORT_BASE_SHAPES[mode]).superRefine((data, ctx) => {
-    validateEmailChannelConfigByProtocol(data as Record<string, unknown>, ctx, fieldMap);
-  });
+  return z
+    .object(EMAIL_TRANSPORT_BASE_SHAPES[mode])
+    .superRefine((data, ctx) => {
+      validateEmailChannelConfigByProtocol(
+        data as Record<string, unknown>,
+        ctx,
+        fieldMap,
+      );
+    });
 };
 
 const createEmailAddExtras = (): z.ZodRawShape => ({
@@ -1327,7 +1539,8 @@ const validateEmailChannelConfigByProtocol = (
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [fieldMap.loomBaseUrl],
-        message: "LOOM base URL must use HTTPS unless it points to localhost/127.0.0.1/::1",
+        message:
+          "LOOM base URL must use HTTPS unless it points to localhost/127.0.0.1/::1",
       });
     }
 
@@ -1467,6 +1680,85 @@ export const GeneratePairingSchema = z.object({
 
 export const UUIDSchema = z.string().uuid();
 export const StringIdSchema = z.string().min(1).max(100);
+export const TargetKeySchema = z.string().trim().min(1).max(1024);
+export const ProviderApiKeySchema = z.string().max(4000).optional();
+export const ProviderBaseUrlSchema = z.string().url().max(500).optional();
+export const SubconsciousSettingsSchema = z
+  .object({
+    enabled: z.boolean(),
+    autoRun: z.boolean(),
+    cadenceMinutes: z.number().int().min(15).max(7 * 24 * 60),
+    enabledTargetKinds: z
+      .array(
+        z.string().refine(
+          (value) => SUBCONSCIOUS_TARGET_KINDS.includes(value as (typeof SUBCONSCIOUS_TARGET_KINDS)[number]),
+          "Invalid subconscious target kind",
+        ),
+      )
+      .min(1)
+      .max(SUBCONSCIOUS_TARGET_KINDS.length),
+    phaseModels: z
+      .object({
+        collectingEvidence: z.string().max(200).optional(),
+        ideation: z.string().max(200).optional(),
+        critique: z.string().max(200).optional(),
+        synthesis: z.string().max(200).optional(),
+      })
+      .strict(),
+    dispatchDefaults: z
+      .object({
+        autoDispatch: z.boolean(),
+        defaultKinds: z.record(z.string(), z.string().max(200)),
+      })
+      .strict(),
+    artifactRetentionDays: z.number().int().min(1).max(365),
+    maxHypothesesPerRun: z.number().int().min(3).max(5),
+    perExecutorPolicy: z
+      .object({
+        task: z.object({ enabled: z.boolean() }).strict(),
+        suggestion: z.object({ enabled: z.boolean() }).strict(),
+        scheduledTask: z.object({ enabled: z.boolean() }).strict(),
+        briefing: z.object({ enabled: z.boolean() }).strict(),
+        eventTriggerUpdate: z.object({ enabled: z.boolean() }).strict(),
+        mailboxAutomation: z.object({ enabled: z.boolean() }).strict(),
+        codeChangeTask: z
+          .object({
+            enabled: z.boolean(),
+            requireWorktree: z.boolean(),
+            strictReview: z.boolean(),
+            verificationRequired: z.boolean(),
+          })
+          .strict(),
+      })
+      .strict(),
+  })
+  .strict();
+export const ImprovementLoopSettingsSchema = z
+  .object({
+    enabled: z.boolean(),
+    autoRun: z.boolean(),
+    includeDevLogs: z.boolean(),
+    intervalMinutes: z.number().int().min(15).max(7 * 24 * 60),
+    variantsPerCampaign: z.number().int().min(1).max(10),
+    maxConcurrentCampaigns: z.number().int().min(1).max(20),
+    maxConcurrentImprovementExecutors: z.number().int().min(1).max(20),
+    maxQueuedImprovementCampaigns: z.number().int().min(1).max(100),
+    maxOpenCandidatesPerWorkspace: z.number().int().min(1).max(500),
+    requireWorktree: z.boolean(),
+    requireRepoChecks: z.boolean(),
+    enforcePatchScope: z.boolean(),
+    maxPatchFiles: z.number().int().min(1).max(500),
+    reviewRequired: z.boolean(),
+    judgeRequired: z.boolean(),
+    promotionMode: z.enum(["merge", "github_pr"]),
+    evalWindowDays: z.number().int().min(1).max(365),
+    replaySetSize: z.number().int().min(1).max(100),
+    campaignTimeoutMinutes: z.number().int().min(1).max(24 * 60),
+    campaignTokenBudget: z.number().int().min(1).max(5_000_000),
+    campaignCostBudget: z.number().min(0).max(10_000),
+    improvementProgramPath: z.string().max(MAX_PATH_LENGTH).optional(),
+  })
+  .strict();
 
 // ============ ChatGPT Import Schema ============
 
@@ -1476,8 +1768,12 @@ export const ChatGPTImportSchema = z.object({
     .string()
     .min(1)
     .max(MAX_PATH_LENGTH)
-    .refine((p) => path.isAbsolute(p), { message: "File path must be absolute" })
-    .refine((p) => p.endsWith(".json"), { message: "File must be a .json file" }),
+    .refine((p) => path.isAbsolute(p), {
+      message: "File path must be absolute",
+    })
+    .refine((p) => p.endsWith(".json"), {
+      message: "File must be a .json file",
+    }),
   maxConversations: z.number().int().min(0).max(10000).optional(),
   minMessages: z.number().int().min(1).max(100).optional(),
   forcePrivate: z.boolean().optional(),
@@ -1492,7 +1788,10 @@ export const MAX_PERSONALITY_PREVIEW_BYTES = MAX_PERSONALITY_CONFIG_BYTES;
 export const PersonalityImportSchema = z
   .string()
   .min(1, "Personality import data cannot be empty")
-  .max(MAX_PERSONALITY_IMPORT_BYTES, `Personality import must be under ${MAX_PERSONALITY_IMPORT_BYTES / 1024}KB`)
+  .max(
+    MAX_PERSONALITY_IMPORT_BYTES,
+    `Personality import must be under ${MAX_PERSONALITY_IMPORT_BYTES / 1024}KB`,
+  )
   .refine(
     (data) => {
       const trimmed = data.trim();
@@ -1616,7 +1915,9 @@ export const MCPServerConfigSchema = z.object({
   license: z.string().max(100).optional(),
 });
 
-export const MCPServerUpdateSchema = MCPServerConfigSchema.partial().omit({ id: true });
+export const MCPServerUpdateSchema = MCPServerConfigSchema.partial().omit({
+  id: true,
+});
 
 export const MCPSettingsSchema = z.object({
   servers: z.array(MCPServerConfigSchema).max(50),
@@ -1751,7 +2052,9 @@ function getAllowedHealthImportRoots(): string[] {
 function isPathAllowedForHealthImport(filePath: string): boolean {
   const resolved = path.resolve(filePath);
   const roots = getAllowedHealthImportRoots();
-  return roots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+  return roots.some(
+    (root) => resolved === root || resolved.startsWith(root + path.sep),
+  );
 }
 
 export const HealthImportFilesSchema = z
@@ -1780,11 +2083,25 @@ export const HealthImportFilesSchema = z
   });
 
 const AwarenessSourceSchema = z.enum([
-  "conversation", "feedback", "files", "git", "apps", "browser", "calendar", "notifications", "clipboard", "tasks",
+  "conversation",
+  "feedback",
+  "files",
+  "git",
+  "apps",
+  "browser",
+  "calendar",
+  "notifications",
+  "clipboard",
+  "tasks",
 ]);
 const AwarenessSourcePolicySchema = z.object({
   enabled: z.boolean().optional(),
-  ttlMinutes: z.number().int().min(1).max(60 * 24 * 7).optional(),
+  ttlMinutes: z
+    .number()
+    .int()
+    .min(1)
+    .max(60 * 24 * 7)
+    .optional(),
   allowPromotion: z.boolean().optional(),
   allowPromptInjection: z.boolean().optional(),
   allowHeartbeat: z.boolean().optional(),
@@ -1792,16 +2109,33 @@ const AwarenessSourcePolicySchema = z.object({
 
 export const AwarenessConfigSchema = z.object({
   privateModeEnabled: z.boolean().optional(),
-  defaultTtlMinutes: z.number().int().min(1).max(60 * 24 * 7).optional(),
-  sources: z.record(AwarenessSourceSchema, AwarenessSourcePolicySchema).optional(),
+  defaultTtlMinutes: z
+    .number()
+    .int()
+    .min(1)
+    .max(60 * 24 * 7)
+    .optional(),
+  sources: z
+    .record(AwarenessSourceSchema, AwarenessSourcePolicySchema)
+    .optional(),
 });
 
 const ChiefOfStaffActionTypeSchema = z.enum([
-  "prepare_briefing", "create_task", "schedule_follow_up", "draft_message", "draft_agenda",
-  "organize_work_session", "nudge_user", "execute_local_action",
+  "prepare_briefing",
+  "create_task",
+  "schedule_follow_up",
+  "draft_message",
+  "draft_agenda",
+  "organize_work_session",
+  "nudge_user",
+  "execute_local_action",
 ]);
 const AutonomyPolicyLevelSchema = z.enum([
-  "observe_only", "suggest_only", "execute_local", "execute_with_approval", "never",
+  "observe_only",
+  "suggest_only",
+  "execute_local",
+  "execute_with_approval",
+  "never",
 ]);
 const ActionPolicySchema = z.object({
   actionType: ChiefOfStaffActionTypeSchema.optional(),
@@ -1814,7 +2148,9 @@ export const AutonomyConfigSchema = z.object({
   enabled: z.boolean().optional(),
   autoEvaluate: z.boolean().optional(),
   maxPendingDecisions: z.number().int().min(1).max(100).optional(),
-  actionPolicies: z.record(ChiefOfStaffActionTypeSchema, ActionPolicySchema).optional(),
+  actionPolicies: z
+    .record(ChiefOfStaffActionTypeSchema, ActionPolicySchema)
+    .optional(),
 });
 
 export const QAStartRunSchema = z.object({
@@ -1835,9 +2171,24 @@ export const QAStartRunSchema = z.object({
 
 // ============ Personality V2 Schemas ============
 
-export const ContextModeSchema = z.enum(["coding", "chat", "planning", "writing", "research", "all"]);
+export const ContextModeSchema = z.enum([
+  "coding",
+  "chat",
+  "planning",
+  "writing",
+  "research",
+  "all",
+]);
 const PersonaIdSchema = z.enum([
-  "none", "jarvis", "friday", "hal", "computer", "alfred", "intern", "sensei", "companion",
+  "none",
+  "jarvis",
+  "friday",
+  "hal",
+  "computer",
+  "alfred",
+  "intern",
+  "sensei",
+  "companion",
 ]);
 
 const PersonalityTraitSchema = z.object({
@@ -1877,7 +2228,9 @@ const ConversationExampleSchema = z.object({
 });
 const ContextOverrideSchema = z.object({
   mode: ContextModeSchema,
-  traitOverrides: z.record(z.string(), z.number().int().min(0).max(100)).optional(),
+  traitOverrides: z
+    .record(z.string(), z.number().int().min(0).max(100))
+    .optional(),
   additionalRules: z.array(BehavioralRuleSchema).max(20).optional(),
   styleOverrides: CommunicationStyleSchema.partial().optional(),
 });
@@ -1940,7 +2293,9 @@ export const PersonalityConfigV2Schema = z
         return false;
       }
     },
-    { message: `Personality config must be under ${MAX_PERSONALITY_CONFIG_BYTES / 1024}KB` },
+    {
+      message: `Personality config must be under ${MAX_PERSONALITY_CONFIG_BYTES / 1024}KB`,
+    },
   );
 
 export const AwarenessUpdateBeliefSchema = z.object({
@@ -1949,7 +2304,9 @@ export const AwarenessUpdateBeliefSchema = z.object({
     .record(z.string(), z.unknown())
     .optional()
     .refine(
-      (p) => p == null || (typeof p === "object" && JSON.stringify(p).length <= 50000),
+      (p) =>
+        p == null ||
+        (typeof p === "object" && JSON.stringify(p).length <= 50000),
       { message: "Patch must be under 50KB" },
     ),
 });
@@ -1960,7 +2317,9 @@ export const AutonomyUpdateDecisionSchema = z.object({
     .record(z.string(), z.unknown())
     .optional()
     .refine(
-      (p) => p == null || (typeof p === "object" && JSON.stringify(p).length <= 50000),
+      (p) =>
+        p == null ||
+        (typeof p === "object" && JSON.stringify(p).length <= 50000),
       { message: "Patch must be under 50KB" },
     ),
 });
@@ -2040,7 +2399,11 @@ export const HookMappingSchema = z.object({
 /**
  * Validate input against a schema and throw a user-friendly error if invalid
  */
-export function validateInput<T>(schema: z.ZodSchema<T>, input: unknown, context?: string): T {
+export function validateInput<T>(
+  schema: z.ZodSchema<T>,
+  input: unknown,
+  context?: string,
+): T {
   const result = schema.safeParse(input);
   if (!result.success) {
     // Zod v4 uses 'issues' instead of 'errors'

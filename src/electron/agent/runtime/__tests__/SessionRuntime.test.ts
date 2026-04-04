@@ -100,6 +100,14 @@ function createBaseState(): SessionRuntimeState {
       verificationNudgeNeeded: false,
       nudgeReason: null,
     },
+    promptCache: {
+      stableSystemBlocks: [],
+      stablePrefixHash: "",
+      toolSchemaHash: "",
+      promptCacheMode: "disabled",
+      promptCacheProviderFamily: "unsupported",
+      promptCacheInvalidationReason: null,
+    },
     usage: {
       totalInputTokens: 0,
       totalOutputTokens: 0,
@@ -206,6 +214,14 @@ function createV2Snapshot(
       verificationNudgeNeeded: false,
       nudgeReason: null,
     },
+    promptCache: {
+      stableSystemBlocks: [],
+      stablePrefixHash: "",
+      toolSchemaHash: "",
+      promptCacheMode: "disabled",
+      promptCacheProviderFamily: "unsupported",
+      promptCacheInvalidationReason: null,
+    },
     usageTotals: {
       inputTokens: 11,
       outputTokens: 7,
@@ -229,6 +245,7 @@ function createHarness() {
   };
   let checkpointPayload: Any = null;
   let toolCatalogVersion = "catalog:v1";
+  let taskDomain = "general";
   let currentPlan: Any = {
     description: "Plan",
     steps: [{ id: "step-1", description: "Do work", status: "pending" }],
@@ -285,6 +302,7 @@ function createHarness() {
       }) as Any,
     getSystemPrompt: () => "system",
     getModelMetadata: () => ({
+      providerType: "anthropic",
       modelId: "gpt-test",
       modelKey: "gpt-test",
       llmProfileUsed: "strong" as const,
@@ -370,6 +388,7 @@ function createHarness() {
     getCompactionThresholdRatio: () => 0.8,
     getPlan: () => currentPlan,
     getEffectiveExecutionMode: () => task.agentConfig?.executionMode ?? "execute",
+    getEffectiveTaskDomain: () => taskDomain as Any,
     setTerminalStatus: () => {},
     setFailureClass: () => {},
     isCancelled: () => false,
@@ -416,10 +435,34 @@ function createHarness() {
         delete task.agentConfig.executionMode;
       }
     },
+    setTaskDomain: (nextDomain: string) => {
+      taskDomain = nextDomain;
+    },
   };
 }
 
 describe("SessionRuntime", () => {
+  it("emits llm_usage with structured provider metadata from model selection", () => {
+    const harness = createHarness();
+
+    harness.runtime.updateTracking(120, 45, 10);
+
+    expect(harness.emittedEvents).toContainEqual(
+      expect.objectContaining({
+        type: "llm_usage",
+        payload: expect.objectContaining({
+          providerType: "anthropic",
+          modelId: "gpt-test",
+          delta: expect.objectContaining({
+            inputTokens: 120,
+            outputTokens: 45,
+            cachedTokens: 10,
+          }),
+        }),
+      }),
+    );
+  });
+
   it("continues a text loop once when the model stops on max_tokens", async () => {
     const harness = createHarness();
     harness.createMessageWithTimeout
@@ -450,7 +493,83 @@ describe("SessionRuntime", () => {
     expect(harness.runtime.state.loop.lifetimeTurnCount).toBe(2);
   });
 
-  it("reuses cached tools until the catalog version changes and invalidates on workspace update", () => {
+  it("replays one same-request escalation before continuation recovery in adaptive mode", async () => {
+    const previousPolicy = process.env.COWORK_LLM_OUTPUT_POLICY;
+    try {
+      process.env.COWORK_LLM_OUTPUT_POLICY = "adaptive";
+      const harness = createHarness();
+      harness.createMessageWithTimeout
+        .mockResolvedValueOnce({
+          stopReason: "max_tokens",
+          content: [{ type: "text", text: "partial answer" }],
+          usage: { inputTokens: 10, outputTokens: 8, cachedTokens: 0 },
+        })
+        .mockResolvedValueOnce({
+          stopReason: "end_turn",
+          content: [{ type: "text", text: "complete answer" }],
+          usage: { inputTokens: 10, outputTokens: 12, cachedTokens: 0 },
+        });
+
+      const result = await harness.runtime.requestLLMResponseWithAdaptiveBudget({
+        messages: [{ role: "user", content: "Start" }],
+        retryLabel: "adaptive retry",
+        operation: "Adaptive retry test",
+      });
+
+      expect(harness.createMessageWithTimeout).toHaveBeenCalledTimes(2);
+      expect(harness.createMessageWithTimeout.mock.calls[0][0].maxTokens).toBe(8_000);
+      expect(harness.createMessageWithTimeout.mock.calls[1][0].maxTokens).toBe(64_000);
+      expect(result.response.stopReason).toBe("end_turn");
+      expect(result.outputBudget.escalationAttempted).toBe(true);
+      expect(result.outputBudget.finalBudget).toBe(64_000);
+    } finally {
+      if (previousPolicy == null) {
+        delete process.env.COWORK_LLM_OUTPUT_POLICY;
+      } else {
+        process.env.COWORK_LLM_OUTPUT_POLICY = previousPolicy;
+      }
+    }
+  });
+
+  it("marks repeated thinking-only truncation as non-continuable after escalation", async () => {
+    const previousPolicy = process.env.COWORK_LLM_OUTPUT_POLICY;
+    try {
+      process.env.COWORK_LLM_OUTPUT_POLICY = "adaptive";
+      const harness = createHarness();
+      harness.createMessageWithTimeout
+        .mockResolvedValueOnce({
+          stopReason: "max_tokens",
+          content: [{ type: "text", text: "<think>reasoning</think>" }],
+          usage: { inputTokens: 10, outputTokens: 8, cachedTokens: 0 },
+        })
+        .mockResolvedValueOnce({
+          stopReason: "max_tokens",
+          content: [{ type: "text", text: "<think>still reasoning</think>" }],
+          usage: { inputTokens: 10, outputTokens: 12, cachedTokens: 0 },
+        });
+
+      const result = await harness.runtime.requestLLMResponseWithAdaptiveBudget({
+        messages: [{ role: "user", content: "Start" }],
+        retryLabel: "adaptive retry",
+        operation: "Adaptive retry test",
+      });
+
+      expect(harness.createMessageWithTimeout).toHaveBeenCalledTimes(2);
+      expect(result.response.stopReason).toBe("max_tokens");
+      expect(result.outputBudget.escalationAttempted).toBe(true);
+      expect(result.outputBudget.truncationClassification).toBe("reasoning_exhausted");
+      expect(result.outputBudget.continuationAllowed).toBe(false);
+      expect(result.outputBudget.guidanceMessage).toContain("output budget");
+    } finally {
+      if (previousPolicy == null) {
+        delete process.env.COWORK_LLM_OUTPUT_POLICY;
+      } else {
+        process.env.COWORK_LLM_OUTPUT_POLICY = previousPolicy;
+      }
+    }
+  });
+
+  it("refreshes base tool discovery and still invalidates on catalog or workspace changes", () => {
     const harness = createHarness();
     let catalogVersion = "catalog:v1";
     const initialRegistry = {
@@ -463,11 +582,11 @@ describe("SessionRuntime", () => {
 
     harness.runtime.getAvailableTools();
     harness.runtime.getAvailableTools();
-    expect(initialRegistry.getTools).toHaveBeenCalledTimes(1);
+    expect(initialRegistry.getTools).toHaveBeenCalledTimes(2);
 
     catalogVersion = "catalog:v2";
     harness.runtime.getAvailableTools();
-    expect(initialRegistry.getTools).toHaveBeenCalledTimes(2);
+    expect(initialRegistry.getTools).toHaveBeenCalledTimes(3);
 
     const updatedRegistry = {
       getTools: vi.fn(() => [{ name: "browser_navigate" }]),
@@ -502,6 +621,71 @@ describe("SessionRuntime", () => {
     expect(snapshotEvent?.payload.schema).toBe("session_runtime_v2");
     expect(snapshotEvent?.payload.version).toBe(2);
     expect(snapshotEvent?.payload.messageCount).toBe(2);
+  });
+
+  it("persists and restores prompt-cache snapshot state", () => {
+    const harness = createHarness();
+    harness.runtime.state.transcript.conversationHistory = [
+      { role: "user", content: "Resume the cached session" },
+    ];
+    harness.runtime.state.promptCache = {
+      stableSystemBlocks: [
+        {
+          text: "Stable instructions",
+          scope: "session",
+          cacheable: true,
+          stableKey: "identity:abc",
+        },
+      ],
+      stablePrefixHash: "prefix-hash",
+      toolSchemaHash: "tool-hash",
+      promptCacheMode: "anthropic_auto",
+      promptCacheProviderFamily: "anthropic",
+      promptCacheInvalidationReason: "stable_prefix_changed",
+    };
+
+    harness.runtime.saveSnapshot();
+
+    const snapshotEvent = harness.emittedEvents.find((event) => event.type === "conversation_snapshot");
+    expect(snapshotEvent?.payload.promptCache).toEqual({
+      stableSystemBlocks: [
+        {
+          text: "Stable instructions",
+          scope: "session",
+          cacheable: true,
+          stableKey: "identity:abc",
+        },
+      ],
+      stablePrefixHash: "prefix-hash",
+      toolSchemaHash: "tool-hash",
+      promptCacheMode: "anthropic_auto",
+      promptCacheProviderFamily: "anthropic",
+      promptCacheInvalidationReason: "stable_prefix_changed",
+    });
+
+    const restoredHarness = createHarness();
+    restoredHarness.runtime.restoreFromEvents([
+      {
+        type: "conversation_snapshot",
+        payload: snapshotEvent?.payload,
+      } as Any,
+    ]);
+
+    expect(restoredHarness.runtime.state.promptCache).toEqual({
+      stableSystemBlocks: [
+        {
+          text: "Stable instructions",
+          scope: "session",
+          cacheable: true,
+          stableKey: "identity:abc",
+        },
+      ],
+      stablePrefixHash: "prefix-hash",
+      toolSchemaHash: "tool-hash",
+      promptCacheMode: "anthropic_auto",
+      promptCacheProviderFamily: "anthropic",
+      promptCacheInvalidationReason: "stable_prefix_changed",
+    });
   });
 
   it("restores a legacy snapshot payload and backfills usage totals from llm_usage events", () => {
@@ -743,6 +927,35 @@ describe("SessionRuntime", () => {
 
     expect(harness.runtime.getTaskListState().items[0]?.title).toBe("From event");
     expect(harness.runtime.getTaskListState().items[0]?.kind).toBe("verification");
+  });
+
+  it("reuses rendered available tools when the render context is stable and invalidates on context change", () => {
+    const harness = createHarness();
+    const renderToolsForContext = vi.fn((tools: Any[]) =>
+      tools.map((tool) => ({ ...tool, description: `${tool.description} rendered` })),
+    );
+    harness.setToolRegistry({
+      getTools: vi.fn(() => [
+        { name: "run_command", description: "Run command" },
+        { name: "web_search", description: "Search web" },
+      ]),
+      getDeferredTools: vi.fn(() => []),
+      getToolCatalogVersion: vi.fn(() => "catalog:v1"),
+      renderToolsForContext,
+      cleanup: vi.fn(async () => undefined),
+    });
+
+    const first = harness.runtime.getAvailableTools();
+    const second = harness.runtime.getAvailableTools();
+
+    expect(first[0]?.description).toContain("rendered");
+    expect(second[0]?.description).toContain("rendered");
+    expect(renderToolsForContext).toHaveBeenCalledTimes(1);
+
+    harness.setExecutionMode("verified");
+    harness.runtime.getAvailableTools();
+
+    expect(renderToolsForContext).toHaveBeenCalledTimes(2);
   });
 
   it("triggers and clears the verification nudge under the expected conditions", () => {

@@ -15,10 +15,16 @@ import {
   type AzureReasoningEffort,
 } from "./types";
 import {
+  buildOpenAICompatibleSystemMessages,
+  fromOpenAICompatibleResponse,
   toOpenAICompatibleMessages,
   toOpenAICompatibleTools,
-  fromOpenAICompatibleResponse,
 } from "./openai-compatible";
+import {
+  buildOpenAIPromptCacheFields,
+  extractOpenAICompatibleCacheUsage,
+  splitSystemBlocksForOpenAIPrefix,
+} from "./prompt-cache";
 import { createLogger } from "../../utils/logger";
 
 const logger = createLogger("azure-openai");
@@ -129,6 +135,7 @@ export class AzureOpenAIProvider implements LLMProvider {
   ): Record<string, Any> {
     const messages = toOpenAICompatibleMessages(request.messages, request.system, {
       supportsImages: true,
+      systemBlocks: request.systemBlocks,
     });
     const rawTools = request.tools ? toOpenAICompatibleTools(request.tools) : undefined;
     if (rawTools && rawTools.length > AZURE_MAX_TOOLS) {
@@ -145,12 +152,27 @@ export class AzureOpenAIProvider implements LLMProvider {
       messages,
       [tokenField]: request.maxTokens,
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
-      ...(tools && tools.length > 0 && { tools, tool_choice: "auto" }),
+      ...(tools && tools.length > 0
+        ? {
+            tools,
+            tool_choice: request.toolChoice || "auto",
+          }
+        : {}),
+      ...buildOpenAIPromptCacheFields(request.promptCache),
     };
   }
 
-  private buildResponsesInput(messages: LLMMessage[]): Any[] {
+  private buildResponsesInput(messages: LLMMessage[], system?: string, systemBlocks?: LLMRequest["systemBlocks"]): Any[] {
     const input: Any[] = [];
+    const systemMessages = buildOpenAICompatibleSystemMessages(system, systemBlocks);
+
+    for (const systemMessage of systemMessages) {
+      input.push({
+        type: "message",
+        role: systemMessage.role,
+        content: [{ type: "input_text", text: systemMessage.content }],
+      });
+    }
 
     for (const msg of messages) {
       if (typeof msg.content === "string") {
@@ -259,7 +281,16 @@ export class AzureOpenAIProvider implements LLMProvider {
     request: LLMRequest,
     reasoningEffortOverride?: AzureRequestReasoningEffort,
   ): Record<string, Any> {
-    const input = this.buildResponsesInput(request.messages);
+    const { stableText, volatileText } = splitSystemBlocksForOpenAIPrefix(
+      request.system,
+      request.systemBlocks,
+    );
+    const instructions =
+      stableText || (!request.systemBlocks && request.system ? request.system : "") || undefined;
+    const input = this.buildResponsesInput(
+      request.messages,
+      volatileText || undefined,
+    );
     const rawResponsesTools = request.tools ? this.toResponsesTools(request.tools) : undefined;
     if (rawResponsesTools && rawResponsesTools.length > AZURE_MAX_TOOLS) {
       console.warn(
@@ -271,10 +302,16 @@ export class AzureOpenAIProvider implements LLMProvider {
     return {
       model: request.model || this.deployment,
       input,
-      ...(request.system ? { instructions: request.system } : {}),
+      ...(instructions ? { instructions } : {}),
       max_output_tokens: request.maxTokens,
       ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
-      ...(tools && tools.length > 0 && { tools, tool_choice: "auto" }),
+      ...(tools && tools.length > 0
+        ? {
+            tools,
+            tool_choice: request.toolChoice || "auto",
+          }
+        : {}),
+      ...buildOpenAIPromptCacheFields(request.promptCache),
     };
   }
 
@@ -414,6 +451,7 @@ export class AzureOpenAIProvider implements LLMProvider {
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedTokens = 0;
+    let cacheWriteTokens = 0;
     let finishReason: LLMResponse["stopReason"] = "end_turn";
 
     await this.consumeSseEvents(response, (eventData) => {
@@ -429,7 +467,9 @@ export class AzureOpenAIProvider implements LLMProvider {
       if (payload?.usage) {
         inputTokens = payload.usage.prompt_tokens ?? inputTokens;
         outputTokens = payload.usage.completion_tokens ?? outputTokens;
-        cachedTokens = payload.usage.prompt_tokens_details?.cached_tokens ?? cachedTokens;
+        const cacheUsage = extractOpenAICompatibleCacheUsage(payload.usage);
+        cachedTokens = cacheUsage.cachedTokens ?? cachedTokens;
+        cacheWriteTokens = cacheUsage.cacheWriteTokens ?? cacheWriteTokens;
       }
 
       const choice = Array.isArray(payload?.choices) ? payload.choices[0] : undefined;
@@ -478,8 +518,13 @@ export class AzureOpenAIProvider implements LLMProvider {
     return {
       content: [{ type: "text", text: contentText }],
       stopReason: finishReason,
-      usage: inputTokens || outputTokens
-        ? { inputTokens, outputTokens, cachedTokens: cachedTokens || undefined }
+      usage: inputTokens || outputTokens || cachedTokens || cacheWriteTokens
+        ? {
+            inputTokens,
+            outputTokens,
+            ...(cachedTokens ? { cachedTokens } : {}),
+            ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+          }
         : undefined,
     };
   }
@@ -493,6 +538,7 @@ export class AzureOpenAIProvider implements LLMProvider {
     let inputTokens = 0;
     let outputTokens = 0;
     let cachedTokens = 0;
+    let cacheWriteTokens = 0;
     let finishReason: LLMResponse["stopReason"] = "end_turn";
 
     await this.consumeSseEvents(response, (eventData) => {
@@ -508,7 +554,9 @@ export class AzureOpenAIProvider implements LLMProvider {
       if (payload?.usage) {
         inputTokens = payload.usage.input_tokens ?? inputTokens;
         outputTokens = payload.usage.output_tokens ?? outputTokens;
-        cachedTokens = payload.usage.input_tokens_details?.cached_tokens ?? cachedTokens;
+        const cacheUsage = extractOpenAICompatibleCacheUsage(payload.usage);
+        cachedTokens = cacheUsage.cachedTokens ?? cachedTokens;
+        cacheWriteTokens = cacheUsage.cacheWriteTokens ?? cacheWriteTokens;
       }
 
       switch (payload?.type) {
@@ -535,8 +583,9 @@ export class AzureOpenAIProvider implements LLMProvider {
           if (payload.response?.usage) {
             inputTokens = payload.response.usage.input_tokens ?? inputTokens;
             outputTokens = payload.response.usage.output_tokens ?? outputTokens;
-            cachedTokens =
-              payload.response.usage.input_tokens_details?.cached_tokens ?? cachedTokens;
+            const cacheUsage = extractOpenAICompatibleCacheUsage(payload.response.usage);
+            cachedTokens = cacheUsage.cachedTokens ?? cachedTokens;
+            cacheWriteTokens = cacheUsage.cacheWriteTokens ?? cacheWriteTokens;
           }
           if (typeof payload.response?.output_text === "string" && payload.response.output_text) {
             contentText = payload.response.output_text;
@@ -567,8 +616,13 @@ export class AzureOpenAIProvider implements LLMProvider {
     return {
       content: [{ type: "text", text: contentText }],
       stopReason: finishReason,
-      usage: inputTokens || outputTokens
-        ? { inputTokens, outputTokens, cachedTokens: cachedTokens || undefined }
+      usage: inputTokens || outputTokens || cachedTokens || cacheWriteTokens
+        ? {
+            inputTokens,
+            outputTokens,
+            ...(cachedTokens ? { cachedTokens } : {}),
+            ...(cacheWriteTokens ? { cacheWriteTokens } : {}),
+          }
         : undefined,
     };
   }
@@ -625,7 +679,7 @@ export class AzureOpenAIProvider implements LLMProvider {
         ? {
             inputTokens: response.usage.input_tokens ?? 0,
             outputTokens: response.usage.output_tokens ?? 0,
-            cachedTokens: response.usage.input_tokens_details?.cached_tokens || undefined,
+            ...extractOpenAICompatibleCacheUsage(response.usage),
           }
         : undefined,
     };

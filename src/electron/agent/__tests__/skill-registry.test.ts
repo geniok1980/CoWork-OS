@@ -41,6 +41,40 @@ function ensureDir(value: string): void {
   }
 }
 
+function movePath(source: string, destination: string): void {
+  const normalizedSource = normalizePath(source);
+  const normalizedDestination = normalizePath(destination);
+
+  if (mockFiles.has(normalizedSource)) {
+    const value = mockFiles.get(normalizedSource);
+    if (value !== undefined) {
+      ensureDir(parentDir(normalizedDestination));
+      mockFiles.set(normalizedDestination, value);
+      mockFiles.delete(normalizedSource);
+    }
+    return;
+  }
+
+  if (mockDirs.has(normalizedSource)) {
+    ensureDir(parentDir(normalizedDestination));
+    ensureDir(normalizedDestination);
+    for (const filePath of Array.from(mockFiles.keys())) {
+      if (filePath.startsWith(`${normalizedSource}/`)) {
+        const suffix = filePath.slice(normalizedSource.length);
+        mockFiles.set(`${normalizedDestination}${suffix}`, mockFiles.get(filePath)!);
+        mockFiles.delete(filePath);
+      }
+    }
+    for (const dirPath of Array.from(mockDirs)) {
+      if (dirPath === normalizedSource || dirPath.startsWith(`${normalizedSource}/`)) {
+        const suffix = dirPath.slice(normalizedSource.length);
+        mockDirs.add(`${normalizedDestination}${suffix}`);
+        mockDirs.delete(dirPath);
+      }
+    }
+  }
+}
+
 function pathExists(value: string): boolean {
   const normalized = normalizePath(value);
   return mockDirs.has(normalized) || mockFiles.has(normalized);
@@ -164,15 +198,45 @@ vi.mock("fs", () => ({
     mkdirSync: vi.fn().mockImplementation((dir: string) => {
       ensureDir(dir);
     }),
+    renameSync: vi.fn().mockImplementation((src: string, dest: string) => {
+      movePath(src, dest);
+    }),
     statSync: vi.fn().mockImplementation((p: string) => {
       const normalized = normalizePath(p);
       if (mockFiles.has(normalized)) {
-        return { size: Buffer.byteLength(mockFiles.get(normalized) || "", "utf8") };
+        return {
+          size: Buffer.byteLength(mockFiles.get(normalized) || "", "utf8"),
+          isDirectory: () => false,
+          isFile: () => true,
+        };
       }
       if (mockDirs.has(normalized)) {
-        return { size: 0 };
+        return { size: 0, isDirectory: () => true, isFile: () => false };
       }
       throw new Error(`Path not found: ${p}`);
+    }),
+    lstatSync: vi.fn().mockImplementation((p: string) => {
+      const normalized = normalizePath(p);
+      if (mockFiles.has(normalized)) {
+        return {
+          size: Buffer.byteLength(mockFiles.get(normalized) || "", "utf8"),
+          isDirectory: () => false,
+          isFile: () => true,
+          isSymbolicLink: () => false,
+        };
+      }
+      if (mockDirs.has(normalized)) {
+        return {
+          size: 0,
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        };
+      }
+      throw new Error(`Path not found: ${p}`);
+    }),
+    readlinkSync: vi.fn().mockImplementation(() => {
+      throw new Error("No symlinks in mock fs");
     }),
     unlinkSync: vi.fn().mockImplementation((p: string) => {
       mockFiles.delete(normalizePath(p));
@@ -230,15 +294,45 @@ vi.mock("fs", () => ({
   mkdirSync: vi.fn().mockImplementation((dir: string) => {
     ensureDir(dir);
   }),
+  renameSync: vi.fn().mockImplementation((src: string, dest: string) => {
+    movePath(src, dest);
+  }),
   statSync: vi.fn().mockImplementation((p: string) => {
     const normalized = normalizePath(p);
     if (mockFiles.has(normalized)) {
-      return { size: Buffer.byteLength(mockFiles.get(normalized) || "", "utf8") };
+      return {
+        size: Buffer.byteLength(mockFiles.get(normalized) || "", "utf8"),
+        isDirectory: () => false,
+        isFile: () => true,
+      };
     }
     if (mockDirs.has(normalized)) {
-      return { size: 0 };
+      return { size: 0, isDirectory: () => true, isFile: () => false };
     }
     throw new Error(`Path not found: ${p}`);
+  }),
+  lstatSync: vi.fn().mockImplementation((p: string) => {
+    const normalized = normalizePath(p);
+    if (mockFiles.has(normalized)) {
+      return {
+        size: Buffer.byteLength(mockFiles.get(normalized) || "", "utf8"),
+        isDirectory: () => false,
+        isFile: () => true,
+        isSymbolicLink: () => false,
+      };
+    }
+    if (mockDirs.has(normalized)) {
+      return {
+        size: 0,
+        isDirectory: () => true,
+        isFile: () => false,
+        isSymbolicLink: () => false,
+      };
+    }
+    throw new Error(`Path not found: ${p}`);
+  }),
+  readlinkSync: vi.fn().mockImplementation(() => {
+    throw new Error("No symlinks in mock fs");
   }),
   unlinkSync: vi.fn().mockImplementation((p: string) => {
     mockFiles.delete(normalizePath(p));
@@ -802,6 +896,21 @@ describe("SkillRegistry", () => {
 
       expect(result.success).toBe(true);
       expect(result.skill?.id).toBe("update-skill");
+    });
+
+    it("restores the installed skill if the update download fails", async () => {
+      const skillData = createMockSkill({ id: "restore-skill", metadata: { version: "1.0.0" } });
+      mockFiles.set(managedPath("restore-skill.json"), JSON.stringify(skillData));
+
+      mockFetch.mockRejectedValueOnce(new Error("network down"));
+
+      const result = await registry.update("restore-skill");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("network down");
+      expect(mockFiles.get(managedPath("restore-skill.json"))).toBe(
+        JSON.stringify(skillData),
+      );
     });
   });
 

@@ -9,6 +9,7 @@ import type {
   SessionChecklistItem,
   SessionChecklistState,
   SessionChecklistToolItemInput,
+  TaskDomain,
   Task,
   TaskEvent,
   VerificationEvidenceEntry,
@@ -20,6 +21,12 @@ import { planHasVerificationStep } from "../../../shared/plan-utils";
 import type {
   LLMContent,
   LLMMessage,
+  LLMRequest,
+  LLMPromptCacheMode,
+  LLMSystemBlock,
+  LLMTool,
+  LLMToolPromptRenderContext,
+  PromptCacheProviderFamily,
   StreamProgressCallback,
 } from "../llm";
 import { estimateTokens, estimateTotalTokens, type ContextManager } from "../context-manager";
@@ -214,6 +221,14 @@ export interface SessionRuntimeSnapshotV2 {
     blockingVerificationFailedStepIds: string[];
   };
   checklist: SessionChecklistState;
+  promptCache: {
+    stableSystemBlocks: LLMSystemBlock[];
+    stablePrefixHash: string;
+    toolSchemaHash: string;
+    promptCacheMode: LLMPromptCacheMode;
+    promptCacheProviderFamily: PromptCacheProviderFamily;
+    promptCacheInvalidationReason: string | null;
+  };
   usageTotals: {
     inputTokens: number;
     outputTokens: number;
@@ -322,6 +337,14 @@ export interface SessionRuntimeState {
     blockingVerificationFailedStepIds: Set<string>;
   };
   checklist: SessionChecklistState;
+  promptCache: {
+    stableSystemBlocks: LLMSystemBlock[];
+    stablePrefixHash: string;
+    toolSchemaHash: string;
+    promptCacheMode: LLMPromptCacheMode;
+    promptCacheProviderFamily: PromptCacheProviderFamily;
+    promptCacheInvalidationReason: string | null;
+  };
   usage: {
     totalInputTokens: number;
     totalOutputTokens: number;
@@ -341,13 +364,19 @@ export interface SessionRuntimeDeps {
   setToolRegistry: (toolRegistry: ToolRegistry) => void;
   getContextManager: () => ContextManager;
   getSystemPrompt: () => string;
+  buildPromptCacheRequestExtras?: (args: {
+    systemPrompt: string;
+    tools: LLMTool[];
+  }) => Partial<Pick<LLMRequest, "systemBlocks" | "promptCache">>;
   getModelMetadata: () => {
+    providerType: string;
     modelId: string;
     modelKey: string;
     llmProfileUsed: LlmProfile;
     resolvedModelKey: string;
   };
   getWebSearchMode: () => WebSearchMode;
+  getEffectiveTaskDomain: () => TaskDomain;
   getTaskToolRestrictions: () => Set<string>;
   hasTaskToolAllowlistConfigured: () => boolean;
   getTaskToolAllowlist: () => Set<string>;
@@ -550,6 +579,12 @@ export class SessionRuntime {
                   },
                 ]
               : messages;
+          const promptCacheExtras = this.deps.buildPromptCacheRequestExtras
+            ? this.deps.buildPromptCacheRequestExtras({
+                systemPrompt: opts.systemPrompt,
+                tools: [],
+              })
+            : {};
           const response = await this.deps.callLLMWithRetry(
             () =>
               this.deps.createMessageWithTimeout(
@@ -561,6 +596,7 @@ export class SessionRuntime {
                       : opts.initialMaxTokens,
                   system: opts.systemPrompt,
                   messages: requestMessages,
+                  ...(promptCacheExtras || {}),
                   ...(opts.onStreamProgress ? { onStreamProgress: opts.onStreamProgress } : {}),
                 },
                 120_000,
@@ -577,6 +613,7 @@ export class SessionRuntime {
               response.usage.inputTokens,
               response.usage.outputTokens,
               response.usage.cachedTokens,
+              response.usage.cacheWriteTokens,
             );
           }
           return {
@@ -835,10 +872,16 @@ export class SessionRuntime {
     ].join("\n");
   }
 
-  updateTracking(inputTokens: number, outputTokens: number, cachedTokens = 0): void {
+  updateTracking(
+    inputTokens: number,
+    outputTokens: number,
+    cachedTokens = 0,
+    cacheWriteTokens = 0,
+  ): void {
     const safeInput = Number.isFinite(inputTokens) ? inputTokens : 0;
     const safeOutput = Number.isFinite(outputTokens) ? outputTokens : 0;
     const safeCached = Number.isFinite(cachedTokens) ? cachedTokens : 0;
+    const safeCacheWrite = Number.isFinite(cacheWriteTokens) ? cacheWriteTokens : 0;
     const deltaCost = calculateCost(
       this.deps.getModelMetadata().modelId,
       safeInput,
@@ -857,16 +900,18 @@ export class SessionRuntime {
       this.deps.updateTask({ ...this.projectTaskState() });
     }
 
-    if (safeInput > 0 || safeOutput > 0 || safeCached > 0 || deltaCost > 0) {
+    if (safeInput > 0 || safeOutput > 0 || safeCached > 0 || safeCacheWrite > 0 || deltaCost > 0) {
       const cumulativeInput = this.getCumulativeInputTokens();
       const cumulativeOutput = this.getCumulativeOutputTokens();
       const cumulativeCost = this.getCumulativeCost();
       this.deps.emitEvent("llm_usage", {
+        providerType: this.deps.getModelMetadata().providerType,
         modelId: this.deps.getModelMetadata().modelId,
         delta: {
           inputTokens: safeInput,
           outputTokens: safeOutput,
           cachedTokens: safeCached,
+          ...(safeCacheWrite > 0 ? { cacheWriteTokens: safeCacheWrite } : {}),
           cost: deltaCost,
         },
         totals: {
@@ -946,6 +991,31 @@ export class SessionRuntime {
     this.toolSearchService = null;
   }
 
+  private buildToolPromptRenderContext(): LLMToolPromptRenderContext {
+    const task = this.deps.getTask();
+    return {
+      executionMode: this.deps.getEffectiveExecutionMode() || "execute",
+      taskDomain: this.deps.getEffectiveTaskDomain(),
+      webSearchMode: this.deps.getWebSearchMode(),
+      shellEnabled: this.deps.getWorkspace().permissions.shell,
+      agentType: task.agentType ?? "main",
+      workerRole: task.workerRole ?? null,
+      allowUserInput: task.agentConfig?.allowUserInput !== false,
+    };
+  }
+
+  private buildRenderedToolAvailabilityCacheKey(params: {
+    baseKey: string;
+    visibleToolNames: string[];
+    renderContext: LLMToolPromptRenderContext;
+  }): string {
+    return JSON.stringify({
+      baseKey: params.baseKey,
+      renderContext: params.renderContext,
+      visibleToolNames: params.visibleToolNames,
+    });
+  }
+
   getAvailableTools(): Any[] {
     const restrictedTools = this.deps.getTaskToolRestrictions();
     const hasAllowlist = this.deps.hasTaskToolAllowlistConfigured();
@@ -963,12 +1033,6 @@ export class SessionRuntime {
       webSearchMode: this.deps.getWebSearchMode(),
       shellEnabled: this.deps.getWorkspace().permissions.shell,
     });
-    if (
-      this.state.tooling.availableToolsCacheKey === cacheKey &&
-      this.state.tooling.availableToolsCache
-    ) {
-      return this.state.tooling.availableToolsCache.slice();
-    }
     const toolRegistry = this.deps.getToolRegistry();
     const baseTools =
       typeof toolRegistry.getTools === "function" ? toolRegistry.getTools() : [];
@@ -1006,9 +1070,25 @@ export class SessionRuntime {
       finalTools = this.deps.applyAdaptiveToolAvailabilityFilter(
         this.deps.applyStepScopedToolPolicy(this.deps.applyIntentFilter(agentPolicyFiltered)),
       );
-      this.state.tooling.availableToolsCacheKey = cacheKey;
-      this.state.tooling.availableToolsCache = finalTools.slice();
-      return finalTools;
+      const renderContext = this.buildToolPromptRenderContext();
+      const renderedCacheKey = this.buildRenderedToolAvailabilityCacheKey({
+        baseKey: cacheKey,
+        renderContext,
+        visibleToolNames: finalTools.map((tool: Any) => String(tool.name || "")),
+      });
+      if (
+        this.state.tooling.availableToolsCacheKey === renderedCacheKey &&
+        this.state.tooling.availableToolsCache
+      ) {
+        return this.state.tooling.availableToolsCache.slice();
+      }
+      const renderedTools =
+        typeof (toolRegistry as Any).renderToolsForContext === "function"
+          ? (toolRegistry as Any).renderToolsForContext(finalTools as LLMTool[], renderContext)
+          : finalTools;
+      this.state.tooling.availableToolsCacheKey = renderedCacheKey;
+      this.state.tooling.availableToolsCache = renderedTools.slice();
+      return renderedTools;
     }
 
     let filtered = allTools
@@ -1026,9 +1106,25 @@ export class SessionRuntime {
     finalTools = this.deps.applyAdaptiveToolAvailabilityFilter(
       this.deps.applyStepScopedToolPolicy(this.deps.applyIntentFilter(agentPolicyFiltered)),
     );
-    this.state.tooling.availableToolsCacheKey = cacheKey;
-    this.state.tooling.availableToolsCache = finalTools.slice();
-    return finalTools;
+    const renderContext = this.buildToolPromptRenderContext();
+    const renderedCacheKey = this.buildRenderedToolAvailabilityCacheKey({
+      baseKey: cacheKey,
+      renderContext,
+      visibleToolNames: finalTools.map((tool: Any) => String(tool.name || "")),
+    });
+    if (
+      this.state.tooling.availableToolsCacheKey === renderedCacheKey &&
+      this.state.tooling.availableToolsCache
+    ) {
+      return this.state.tooling.availableToolsCache.slice();
+    }
+    const renderedTools =
+      typeof (toolRegistry as Any).renderToolsForContext === "function"
+        ? (toolRegistry as Any).renderToolsForContext(finalTools as LLMTool[], renderContext)
+        : finalTools;
+    this.state.tooling.availableToolsCacheKey = renderedCacheKey;
+    this.state.tooling.availableToolsCache = renderedTools.slice();
+    return renderedTools;
   }
 
   async requestLLMResponseWithAdaptiveBudget(opts: {
@@ -1039,11 +1135,17 @@ export class SessionRuntime {
     return requestLLMResponseWithAdaptiveBudgetUtil({
       ...opts,
       llmTimeoutMs: 120_000,
+      providerType: this.deps.getModelMetadata().providerType,
       modelId: this.deps.getModelMetadata().modelId,
       systemPrompt: this.deps.getSystemPrompt(),
+      getTaskMaxTokens: () => {
+        const maxTokens = this.deps.getTask()?.agentConfig?.maxTokens;
+        return typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0
+          ? Math.floor(maxTokens)
+          : null;
+      },
+      getContextManager: () => this.deps.getContextManager(),
       getAvailableTools: () => this.getAvailableTools(),
-      resolveLLMMaxTokens: ({ messages, system }) =>
-        this.deps.resolveLLMMaxTokens({ messages, system }),
       applyRetryTokenCap: (baseMaxTokens, attempt, timeoutMs, hasTools) =>
         this.deps.applyRetryTokenCap(baseMaxTokens, attempt, timeoutMs, hasTools ?? false),
       getRetryTimeoutMs: (baseTimeoutMs, attempt, hasTools, maxTokensBudget) =>
@@ -1052,8 +1154,10 @@ export class SessionRuntime {
         this.deps.callLLMWithRetry(requestFn, operation),
       createMessageWithTimeout: (request, timeoutMs, operation) =>
         this.deps.createMessageWithTimeout(request, timeoutMs, operation),
-      updateTracking: (inputTokens, outputTokens, cachedTokens) =>
-        this.updateTracking(inputTokens, outputTokens, cachedTokens),
+      buildPromptCacheRequestExtras: this.deps.buildPromptCacheRequestExtras,
+      updateTracking: (inputTokens, outputTokens, cachedTokens, cacheWriteTokens) =>
+        this.updateTracking(inputTokens, outputTokens, cachedTokens, cacheWriteTokens),
+      emitEvent: (type, payload) => this.deps.emitEvent(type, payload),
       log: (message) => this.deps.log(message),
     });
   }
@@ -1889,6 +1993,14 @@ export class SessionRuntime {
           ),
         },
         checklist: this.cloneTaskListState(),
+        promptCache: {
+          stableSystemBlocks: [...this.state.promptCache.stableSystemBlocks],
+          stablePrefixHash: this.state.promptCache.stablePrefixHash,
+          toolSchemaHash: this.state.promptCache.toolSchemaHash,
+          promptCacheMode: this.state.promptCache.promptCacheMode,
+          promptCacheProviderFamily: this.state.promptCache.promptCacheProviderFamily,
+          promptCacheInvalidationReason: this.state.promptCache.promptCacheInvalidationReason,
+        },
         timestamp: Date.now(),
         messageCount: serializedHistory.length,
         modelId: meta.modelId,
@@ -2251,6 +2363,14 @@ export class SessionRuntime {
     this.state.verification.blockingVerificationFailedStepIds = new Set(
       payload.verification.blockingVerificationFailedStepIds || [],
     );
+    this.state.promptCache.stableSystemBlocks = payload.promptCache?.stableSystemBlocks || [];
+    this.state.promptCache.stablePrefixHash = payload.promptCache?.stablePrefixHash || "";
+    this.state.promptCache.toolSchemaHash = payload.promptCache?.toolSchemaHash || "";
+    this.state.promptCache.promptCacheMode = payload.promptCache?.promptCacheMode || "disabled";
+    this.state.promptCache.promptCacheProviderFamily =
+      payload.promptCache?.promptCacheProviderFamily || "unsupported";
+    this.state.promptCache.promptCacheInvalidationReason =
+      payload.promptCache?.promptCacheInvalidationReason || null;
     this.restoreTaskListState(this.getTaskListStateFromPayload(payload));
   }
 

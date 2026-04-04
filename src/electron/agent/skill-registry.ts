@@ -15,11 +15,17 @@ import { promisify } from "util";
 import JSZip from "jszip";
 import { getUserDataDir } from "../utils/user-data-dir";
 import {
+  CapabilitySecurityReport,
   CustomSkill,
+  ImportSecurityReportRequest,
+  InstallSecurityOutcome,
+  QuarantinedImportRecord,
+  RetryQuarantinedImportResult,
   SkillRegistryEntry,
   SkillSearchResult,
   SkillInstallProgress,
 } from "../../shared/types";
+import { getCapabilityBundleSecurityService } from "../security/capability-bundle-security";
 
 // Default registry URL - can be overridden via SKILLHUB_REGISTRY env var.
 // When pointing to a GitHub raw URL with a catalog.json, the static catalog mode is used.
@@ -53,6 +59,8 @@ const IMPORT_COPY_SKIP_NAMES = new Set([
   ".next",
   ".turbo",
 ]);
+const IMPORT_STAGE_MANIFEST_FILENAME = "manifest.json";
+const IMPORT_STAGE_BUNDLE_DIRNAME = "bundle";
 
 // Regex for valid skill IDs: lowercase alphanumeric, hyphens, underscores
 // This prevents path traversal attacks via malicious skill IDs
@@ -289,11 +297,18 @@ export interface SkillRegistryConfig {
 }
 
 export type InstallProgressCallback = (progress: SkillInstallProgress) => void;
+export type SkillInstallResult = {
+  success: boolean;
+  skill?: CustomSkill;
+  error?: string;
+  security?: InstallSecurityOutcome;
+};
 
 export class SkillRegistry {
   private registryUrl: string;
   private managedSkillsDir: string;
   private catalogCache: { entries: SkillRegistryEntry[]; fetchedAt: number } | null = null;
+  private readonly securityService = getCapabilityBundleSecurityService();
 
   constructor(config?: SkillRegistryConfig) {
     this.registryUrl = config?.registryUrl || DEFAULT_REGISTRY_URL;
@@ -373,6 +388,11 @@ export class SkillRegistry {
     return path.join(this.managedSkillsDir, `.tmp-${safeHint}-${nonce}`);
   }
 
+  private isSkillMetadataFile(fileName: string): boolean {
+    const lower = fileName.toLowerCase();
+    return lower.endsWith(".security.json") || lower === "build-mode.json";
+  }
+
   private removeManagedSkillArtifacts(skillId: string): void {
     const manifestPath = path.join(this.managedSkillsDir, `${skillId}.json`);
     if (fs.existsSync(manifestPath)) {
@@ -383,6 +403,101 @@ export class SkillRegistry {
     if (fs.existsSync(companionDir)) {
       fs.rmSync(companionDir, { recursive: true, force: true });
     }
+
+    const reportPath = this.securityService.getSkillReportPath(this.managedSkillsDir, skillId);
+    if (fs.existsSync(reportPath)) {
+      fs.unlinkSync(reportPath);
+    }
+  }
+
+  private moveManagedSkillArtifacts(skillId: string, targetDir: string): void {
+    fs.mkdirSync(targetDir, { recursive: true });
+    const manifestPath = path.join(this.managedSkillsDir, `${skillId}.json`);
+    const companionDir = path.join(this.managedSkillsDir, skillId);
+    const reportPath = this.securityService.getSkillReportPath(this.managedSkillsDir, skillId);
+
+    if (fs.existsSync(manifestPath)) {
+      fs.renameSync(manifestPath, path.join(targetDir, `${skillId}.json`));
+    }
+    if (fs.existsSync(companionDir)) {
+      fs.renameSync(companionDir, path.join(targetDir, skillId));
+    }
+    if (fs.existsSync(reportPath)) {
+      fs.renameSync(reportPath, path.join(targetDir, path.basename(reportPath)));
+    }
+  }
+
+  private restoreManagedSkillArtifacts(skillId: string, sourceDir: string): void {
+    const manifestBackupPath = path.join(sourceDir, `${skillId}.json`);
+    const companionBackupDir = path.join(sourceDir, skillId);
+    const reportPath = this.securityService.getSkillReportPath(this.managedSkillsDir, skillId);
+    const reportBackupPath = path.join(sourceDir, path.basename(reportPath));
+
+    if (fs.existsSync(manifestBackupPath)) {
+      fs.renameSync(manifestBackupPath, path.join(this.managedSkillsDir, `${skillId}.json`));
+    }
+    if (fs.existsSync(companionBackupDir)) {
+      fs.renameSync(companionBackupDir, path.join(this.managedSkillsDir, skillId));
+    }
+    if (fs.existsSync(reportBackupPath)) {
+      fs.renameSync(reportBackupPath, reportPath);
+    }
+  }
+
+  private writeSkillStage(
+    stageDir: string,
+    skill: CustomSkill,
+    sourceDir?: string,
+  ): CustomSkill {
+    fs.mkdirSync(stageDir, { recursive: true });
+    const safeId = sanitizeSkillId(skill.id);
+    if (!safeId) {
+      throw new Error(`Invalid skill ID: ${skill.id}`);
+    }
+
+    const manifestPath = path.join(this.managedSkillsDir, `${safeId}.json`);
+    const normalizedSkill: CustomSkill = {
+      ...skill,
+      id: safeId,
+      source: "managed",
+      filePath: manifestPath,
+    };
+
+    fs.writeFileSync(
+      path.join(stageDir, IMPORT_STAGE_MANIFEST_FILENAME),
+      JSON.stringify(normalizedSkill, null, 2),
+      "utf-8",
+    );
+
+    if (sourceDir) {
+      this.validateImportBundleDir(sourceDir);
+      this.copyImportBundle(sourceDir, path.join(stageDir, IMPORT_STAGE_BUNDLE_DIRNAME));
+    }
+
+    return normalizedSkill;
+  }
+
+  private toInstallOutcome(
+    report: CapabilitySecurityReport | undefined,
+    fallbackState: InstallSecurityOutcome["state"] = "failed",
+  ): InstallSecurityOutcome | undefined {
+    if (!report) {
+      return fallbackState === "failed" ? { state: "failed" } : undefined;
+    }
+
+    if (report.verdict === "quarantined") {
+      return {
+        state: "quarantined",
+        summary: report.summary,
+        report,
+      };
+    }
+
+    return {
+      state: report.verdict === "warning" ? "installed_with_warning" : "installed",
+      summary: report.summary,
+      report,
+    };
   }
 
   private buildImportedSkillPrompt(name: string, bundleDir: string): string {
@@ -425,7 +540,13 @@ export class SkillRegistry {
   private findCustomSkillManifest(rootDir: string): { manifestPath: string; supportDir?: string } | null {
     const candidates = fs
       .readdirSync(rootDir)
-      .filter((entry) => entry.endsWith(".json") && entry !== "package.json" && entry !== "metadata.json");
+      .filter(
+        (entry) =>
+          entry.endsWith(".json") &&
+          entry !== "package.json" &&
+          entry !== "metadata.json" &&
+          !this.isSkillMetadataFile(entry),
+      );
 
     for (const fileName of candidates) {
       const manifestPath = path.join(rootDir, fileName);
@@ -588,12 +709,13 @@ export class SkillRegistry {
     visit(rootDir);
   }
 
-  private installImportedSkill(
+  private async installImportedSkill(
     skill: CustomSkill,
     options: {
       sourceDir?: string;
-    } = {},
-  ): { success: boolean; skill?: CustomSkill; error?: string } {
+      source: "registry" | "clawhub" | "url" | "git";
+    },
+  ): Promise<SkillInstallResult> {
     const safeId = sanitizeSkillId(skill.id);
     if (!safeId) {
       return { success: false, error: `Invalid skill ID: ${skill.id}` };
@@ -603,27 +725,50 @@ export class SkillRegistry {
       return { success: false, error: `Skill ${safeId} is already installed` };
     }
 
-    const manifestPath = path.join(this.managedSkillsDir, `${safeId}.json`);
-    const normalizedSkill: CustomSkill = {
-      ...skill,
-      id: safeId,
-      source: "managed",
-      filePath: manifestPath,
-    };
-
+    const stageDir = this.buildTempDir(safeId);
     try {
-      if (options.sourceDir) {
-        this.validateImportBundleDir(options.sourceDir);
-        this.copyImportBundle(options.sourceDir, path.join(this.managedSkillsDir, safeId));
+      const normalizedSkill = this.writeSkillStage(stageDir, skill, options.sourceDir);
+      const report = await this.securityService.scanSkillStage({
+        bundleId: safeId,
+        displayName: normalizedSkill.name,
+        source: options.source,
+        managed: true,
+        stageDir,
+      });
+
+      if (report.verdict === "quarantined") {
+        this.securityService.quarantineSkillStage(
+          stageDir,
+          this.managedSkillsDir,
+          safeId,
+          normalizedSkill.name,
+          options.source,
+          report,
+        );
+        return {
+          success: false,
+          error: report.summary,
+          security: this.toInstallOutcome(report),
+        };
       }
-      fs.writeFileSync(manifestPath, JSON.stringify(normalizedSkill, null, 2), "utf-8");
-      return { success: true, skill: normalizedSkill };
+
+      this.securityService.activateSkillStage(stageDir, this.managedSkillsDir, safeId, report);
+      return {
+        success: true,
+        skill: normalizedSkill,
+        security: this.toInstallOutcome(report),
+      };
     } catch (error) {
       this.removeManagedSkillArtifacts(safeId);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        security: { state: "failed" },
       };
+    } finally {
+      if (fs.existsSync(stageDir)) {
+        fs.rmSync(stageDir, { recursive: true, force: true });
+      }
     }
   }
 
@@ -1201,7 +1346,7 @@ export class SkillRegistry {
     skillId: string,
     version?: string,
     onProgress?: InstallProgressCallback,
-  ): Promise<{ success: boolean; skill?: CustomSkill; error?: string }> {
+  ): Promise<SkillInstallResult> {
     const clawHubSource = parseClawHubInput(skillId);
     if (clawHubSource && /^clawhub:/i.test(skillId.trim())) {
       return this.installFromClawHub(skillId);
@@ -1248,36 +1393,41 @@ export class SkillRegistry {
         throw new Error("Invalid skill data received from registry");
       }
 
-      notify({ status: "installing", progress: 80, message: "Installing skill..." });
+      notify({ status: "installing", progress: 80, message: "Scanning skill..." });
 
-      // Save skill to managed skills directory (using validated safeId)
-      const skillPath = path.join(this.managedSkillsDir, `${safeId}.json`);
       const skill: CustomSkill = {
         ...skillData,
         source: "managed",
-        filePath: skillPath,
       };
 
-      fs.writeFileSync(skillPath, JSON.stringify(skill, null, 2), "utf-8");
+      const result = await this.installImportedSkill(skill, { source: "registry" });
+      if (result.success) {
+        notify({
+          status: "completed",
+          progress: 100,
+          message:
+            result.security?.state === "installed_with_warning"
+              ? "Skill installed with security warning"
+              : "Skill installed successfully",
+        });
+      } else if (result.security?.state === "quarantined") {
+        notify({ status: "failed", progress: 0, message: result.security.summary, error: result.security.summary });
+      }
 
-      notify({ status: "completed", progress: 100, message: "Skill installed successfully" });
-
-      console.log(`[SkillRegistry] Installed skill: ${safeId} at ${skillPath}`);
-
-      return { success: true, skill };
+      return result;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`[SkillRegistry] Install failed for ${safeId}:`, errorMessage);
 
       notify({ status: "failed", progress: 0, message: errorMessage, error: errorMessage });
 
-      return { success: false, error: errorMessage };
+      return { success: false, error: errorMessage, security: { state: "failed" } };
     }
   }
 
   async installFromClawHub(
     identifierOrUrl: string,
-  ): Promise<{ success: boolean; skill?: CustomSkill; error?: string }> {
+  ): Promise<SkillInstallResult> {
     const source = parseClawHubInput(identifierOrUrl);
     if (!source) {
       return { success: false, error: `Invalid ClawHub identifier: ${identifierOrUrl}` };
@@ -1329,11 +1479,12 @@ export class SkillRegistry {
         ),
       };
       skill.category = "ClawHub";
-      return this.installImportedSkill(skill, { sourceDir: tempDir });
+      return await this.installImportedSkill(skill, { sourceDir: tempDir, source: "clawhub" });
     } catch (error) {
       return {
         success: false,
         error: `ClawHub install failed: ${error instanceof Error ? error.message : String(error)}`,
+        security: { state: "failed" },
       };
     } finally {
       if (fs.existsSync(tempDir)) {
@@ -1342,7 +1493,7 @@ export class SkillRegistry {
     }
   }
 
-  async installFromUrl(url: string): Promise<{ success: boolean; skill?: CustomSkill; error?: string }> {
+  async installFromUrl(url: string): Promise<SkillInstallResult> {
     const normalizedUrl = typeof url === "string" ? url.trim() : "";
     if (!normalizedUrl) {
       return { success: false, error: "URL is required" };
@@ -1369,7 +1520,7 @@ export class SkillRegistry {
         if (!this.validateSkillData(skillData)) {
           return { success: false, error: "Invalid skill manifest" };
         }
-        return this.installImportedSkill(skillData);
+        return await this.installImportedSkill(skillData, { source: "url" });
       }
 
       const skillMd = await readResponseTextWithLimit(
@@ -1394,7 +1545,7 @@ export class SkillRegistry {
         fs.mkdirSync(tempDir, { recursive: true });
         fs.writeFileSync(path.join(tempDir, "SKILL.md"), skillMd, "utf-8");
         const skill = this.importSkillBundle(tempDir, normalizedUrl);
-        return this.installImportedSkill(skill, { sourceDir: tempDir });
+        return await this.installImportedSkill(skill, { sourceDir: tempDir, source: "url" });
       } finally {
         if (fs.existsSync(tempDir)) {
           fs.rmSync(tempDir, { recursive: true, force: true });
@@ -1404,13 +1555,14 @@ export class SkillRegistry {
       return {
         success: false,
         error: `Install failed: ${error instanceof Error ? error.message : String(error)}`,
+        security: { state: "failed" },
       };
     }
   }
 
   async installFromGit(
     gitUrl: string,
-  ): Promise<{ success: boolean; skill?: CustomSkill; error?: string }> {
+  ): Promise<SkillInstallResult> {
     const parsed = parseGitUrl(gitUrl);
     if (!parsed) {
       return { success: false, error: `Invalid git URL: ${gitUrl}` };
@@ -1431,7 +1583,7 @@ export class SkillRegistry {
       const bundleRoot = this.detectSkillBundleRoot(tempDir);
       if (bundleRoot) {
         const skill = this.importSkillBundle(bundleRoot, parsed.url);
-        return this.installImportedSkill(skill, { sourceDir: bundleRoot });
+        return await this.installImportedSkill(skill, { sourceDir: bundleRoot, source: "git" });
       }
 
       const manifest = this.findCustomSkillManifest(tempDir);
@@ -1444,7 +1596,7 @@ export class SkillRegistry {
 
       const raw = fs.readFileSync(manifest.manifestPath, "utf-8");
       const skill = JSON.parse(raw) as CustomSkill;
-      return this.installImportedSkill(
+      return await this.installImportedSkill(
         {
           ...skill,
           source: "managed",
@@ -1454,12 +1606,13 @@ export class SkillRegistry {
             homepage: skill.metadata?.homepage || parsed.url,
           },
         },
-        manifest.supportDir ? { sourceDir: manifest.supportDir } : {},
+        manifest.supportDir ? { sourceDir: manifest.supportDir, source: "git" } : { source: "git" },
       );
     } catch (error) {
       return {
         success: false,
         error: `Git import failed: ${error instanceof Error ? error.message : String(error)}`,
+        security: { state: "failed" },
       };
     } finally {
       if (fs.existsSync(tempDir)) {
@@ -1475,7 +1628,7 @@ export class SkillRegistry {
     skillId: string,
     version?: string,
     onProgress?: InstallProgressCallback,
-  ): Promise<{ success: boolean; skill?: CustomSkill; error?: string }> {
+  ): Promise<SkillInstallResult> {
     // Validate skill ID
     const safeId = sanitizeSkillId(skillId);
     if (!safeId) {
@@ -1488,8 +1641,28 @@ export class SkillRegistry {
       return { success: false, error: `Skill ${safeId} is not installed` };
     }
 
-    // Re-install with latest version
-    return this.install(safeId, version, onProgress);
+    const backupDir = this.buildTempDir(`${safeId}-backup`);
+    this.moveManagedSkillArtifacts(safeId, backupDir);
+
+    try {
+      const result = await this.install(safeId, version, onProgress);
+      if (result.success) {
+        return result;
+      }
+      this.restoreManagedSkillArtifacts(safeId, backupDir);
+      return result;
+    } catch (error) {
+      this.restoreManagedSkillArtifacts(safeId, backupDir);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        security: { state: "failed" },
+      };
+    } finally {
+      if (fs.existsSync(backupDir)) {
+        fs.rmSync(backupDir, { recursive: true, force: true });
+      }
+    }
   }
 
   /**
@@ -1558,7 +1731,7 @@ export class SkillRegistry {
     const files = fs.readdirSync(this.managedSkillsDir);
 
     for (const file of files) {
-      if (!file.endsWith(".json")) continue;
+      if (!file.endsWith(".json") || this.isSkillMetadataFile(file)) continue;
 
       try {
         const filePath = path.join(this.managedSkillsDir, file);
@@ -1573,6 +1746,38 @@ export class SkillRegistry {
     }
 
     return skills;
+  }
+
+  async verifyManagedSkillIntegrity(skillId: string): Promise<CapabilitySecurityReport | null> {
+    const skill = this.listManagedSkills().find((entry) => entry.id === skillId);
+    const result = await this.securityService.verifyManagedSkillIntegrity(
+      this.managedSkillsDir,
+      skillId,
+      skill?.name,
+    );
+    return result.allowed ? result.report : null;
+  }
+
+  async inspectExternalSkill(skill: CustomSkill): Promise<CapabilitySecurityReport | null> {
+    return this.securityService.inspectUnmanagedSkill(skill);
+  }
+
+  listQuarantinedImports(): QuarantinedImportRecord[] {
+    return this.securityService
+      .listQuarantinedImports()
+      .filter((record) => record.bundleKind === "skill");
+  }
+
+  getImportSecurityReport(request: ImportSecurityReportRequest): CapabilitySecurityReport | null {
+    return this.securityService.getImportSecurityReport(request, this.managedSkillsDir);
+  }
+
+  async retryQuarantinedImport(recordId: string): Promise<RetryQuarantinedImportResult> {
+    return this.securityService.retryQuarantinedImport(recordId);
+  }
+
+  removeQuarantinedImport(recordId: string): { success: boolean; error?: string } {
+    return this.securityService.removeQuarantinedImport(recordId);
   }
 
   /**

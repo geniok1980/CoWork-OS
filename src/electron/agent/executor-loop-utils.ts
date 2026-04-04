@@ -126,6 +126,20 @@ export function appendAssistantResponseToConversation(
   return emptyResponseCount + 1;
 }
 
+export function shouldRetryEmptyFollowUpEndTurn(opts: {
+  wantsToEnd: boolean;
+  hasTextInThisResponse: boolean;
+  hasProvidedTextResponse: boolean;
+  hadToolCalls: boolean;
+}): boolean {
+  return (
+    opts.wantsToEnd &&
+    !opts.hasTextInThisResponse &&
+    !opts.hasProvidedTextResponse &&
+    !opts.hadToolCalls
+  );
+}
+
 export function computeToolFailureDecision(opts: {
   toolResults: LLMToolResult[];
   hasDisabledToolAttempt: boolean;

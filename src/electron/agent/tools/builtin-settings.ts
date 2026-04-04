@@ -214,6 +214,7 @@ const TOOL_CATEGORIES: Record<string, keyof BuiltinToolsSettings["categories"]> 
   create_presentation: "skill",
   generate_presentation: "skill",
   organize_folder: "skill",
+  Skill: "skill",
   // Shell tools
   run_command: "shell",
   x_action: "shell",

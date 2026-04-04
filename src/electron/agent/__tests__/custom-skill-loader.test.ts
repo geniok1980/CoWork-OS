@@ -814,7 +814,7 @@ describe("getSkillDescriptionsForModel", () => {
     const descriptions = loader.getSkillDescriptionsForModel();
 
     expect(descriptions).toContain(
-      "parameterized-skill: A skill with params (params: path*, language)",
+      "parameterized-skill: A skill with params (args: path*, language) [user-invocable]",
     );
   });
 
@@ -1035,7 +1035,7 @@ describe("getSkillDescriptionsForModel", () => {
     });
 
     expect(descriptions).toContain("Routing confidence is low");
-    expect(descriptions).toContain("skill_list");
+    expect(descriptions).toContain("Review the listed skills carefully");
   });
 
   it("should truncate descriptions to respect prompt text budget", async () => {

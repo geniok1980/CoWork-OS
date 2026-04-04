@@ -18,6 +18,7 @@ import { AgentDaemon } from "../daemon";
 import { LLMTool, MODELS } from "../llm/types";
 import { LLMProviderFactory, type LLMSettings } from "../llm/provider-factory";
 import { downscaleImage } from "./image-utils";
+import { createLogger } from "../../utils/logger";
 
 type VisionProvider = "openai" | "anthropic" | "gemini" | "bedrock";
 
@@ -25,10 +26,30 @@ const DEFAULT_MAX_TOKENS = 900;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20MB
 const IMAGE_DOWNSCALE_THRESHOLD = 2 * 1024 * 1024; // 2MB — auto-downscale above this
 const VISION_CACHE_MAX_ENTRIES = 128;
+const logger = createLogger("VisionTools");
 
 const execFileAsync = promisify(execFile);
 
-function safeResolveWithinWorkspace(workspacePath: string, relPath: string): string | null {
+function isAnthropicSubscriptionToken(value?: string | null): boolean {
+  return typeof value === "string" && value.includes("sk-ant-oat");
+}
+
+function resolveAnthropicCredential(settings: LLMSettings): string | undefined {
+  const apiKey = settings.anthropic?.apiKey?.trim();
+  const subscriptionToken = settings.anthropic?.subscriptionToken?.trim();
+  if (settings.anthropic?.authMethod === "subscription") {
+    return subscriptionToken || apiKey;
+  }
+  if (settings.anthropic?.authMethod === "api_key") {
+    return apiKey || subscriptionToken;
+  }
+  return subscriptionToken || apiKey;
+}
+
+function safeResolveWithinWorkspace(
+  workspacePath: string,
+  relPath: string,
+): string | null {
   const root = path.resolve(workspacePath);
   const candidate = path.resolve(root, relPath);
   if (candidate === root) return null;
@@ -55,14 +76,30 @@ function guessImageMimeType(filePath: string): string {
   }
 }
 
-function buildSetupHint(provider: VisionProvider): { type: string; label: string; target: string } {
+function buildSetupHint(provider: VisionProvider): {
+  type: string;
+  label: string;
+  target: string;
+} {
   switch (provider) {
     case "openai":
-      return { type: "open_settings", label: "Set up OpenAI API key", target: "openai" };
+      return {
+        type: "open_settings",
+        label: "Set up OpenAI API key",
+        target: "openai",
+      };
     case "anthropic":
-      return { type: "open_settings", label: "Set up Anthropic API key", target: "anthropic" };
+      return {
+        type: "open_settings",
+        label: "Set up Claude credentials",
+        target: "anthropic",
+      };
     case "gemini":
-      return { type: "open_settings", label: "Set up Gemini API key", target: "gemini" };
+      return {
+        type: "open_settings",
+        label: "Set up Gemini API key",
+        target: "gemini",
+      };
     case "bedrock":
       return {
         type: "open_settings",
@@ -105,7 +142,9 @@ export class VisionTools {
     this.visionCache.set(cacheKey, { result, cachedAt: Date.now() });
 
     if (this.visionCache.size <= VISION_CACHE_MAX_ENTRIES) return;
-    const entries = Array.from(this.visionCache.entries()).sort((a, b) => a[1].cachedAt - b[1].cachedAt);
+    const entries = Array.from(this.visionCache.entries()).sort(
+      (a, b) => a[1].cachedAt - b[1].cachedAt,
+    );
     const overflow = this.visionCache.size - VISION_CACHE_MAX_ENTRIES;
     for (let i = 0; i < overflow; i++) {
       this.visionCache.delete(entries[i][0]);
@@ -123,12 +162,19 @@ export class VisionTools {
       asAny?.cause?.statusCode;
     const status = Number(statusRaw);
     if (Number.isFinite(status)) {
-      if ([408, 409, 425, 429, 500, 502, 503, 504].includes(status)) return true;
-      if ([400, 401, 403, 404, 405, 406, 410, 411, 413, 414, 415, 422].includes(status))
+      if ([408, 409, 425, 429, 500, 502, 503, 504].includes(status))
+        return true;
+      if (
+        [400, 401, 403, 404, 405, 406, 410, 411, 413, 414, 415, 422].includes(
+          status,
+        )
+      )
         return false;
     }
 
-    const code = String(asAny?.code || asAny?.name || asAny?.type || "").toLowerCase();
+    const code = String(
+      asAny?.code || asAny?.name || asAny?.type || "",
+    ).toLowerCase();
     if (code) {
       const retryableCodes = [
         "etimedout",
@@ -249,7 +295,8 @@ export class VisionTools {
             },
             model: {
               type: "string",
-              description: "Optional model override (provider-specific model ID).",
+              description:
+                "Optional model override (provider-specific model ID).",
             },
             max_tokens: {
               type: "number",
@@ -315,10 +362,17 @@ export class VisionTools {
         ? input.prompt.trim()
         : "Describe this image in detail.";
     const providerOverride =
-      typeof input?.provider === "string" ? input.provider.trim().toLowerCase() : "";
-    const modelOverride = typeof input?.model === "string" ? input.model.trim() : "";
-    const maxTokensRaw = typeof input?.max_tokens === "number" ? input.max_tokens : undefined;
-    const maxTokens = Math.min(Math.max(maxTokensRaw ?? DEFAULT_MAX_TOKENS, 64), 4096);
+      typeof input?.provider === "string"
+        ? input.provider.trim().toLowerCase()
+        : "";
+    const modelOverride =
+      typeof input?.model === "string" ? input.model.trim() : "";
+    const maxTokensRaw =
+      typeof input?.max_tokens === "number" ? input.max_tokens : undefined;
+    const maxTokens = Math.min(
+      Math.max(maxTokensRaw ?? DEFAULT_MAX_TOKENS, 64),
+      4096,
+    );
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "analyze_image",
@@ -334,7 +388,10 @@ export class VisionTools {
 
     const absPath = safeResolveWithinWorkspace(this.workspace.path, relPath);
     if (!absPath) {
-      return { success: false, error: "Image path must be within the current workspace" };
+      return {
+        success: false,
+        error: "Image path must be within the current workspace",
+      };
     }
 
     let stat;
@@ -369,7 +426,9 @@ export class VisionTools {
     });
     const cached = this.getCachedResult(cacheKey);
     if (cached) {
-      console.log(`[VisionTools] Cache hit for ${relPath} — skipping duplicate vision call`);
+      logger.debug(
+        `[VisionTools] Cache hit for ${relPath} — skipping duplicate vision call`,
+      );
       return cached;
     }
 
@@ -386,11 +445,14 @@ export class VisionTools {
         });
         processedBuffer = result.buffer;
         mimeType = result.mimeType;
-        console.log(
+        logger.debug(
           `[VisionTools] Downscaled image from ${buffer.length} to ${processedBuffer.length} bytes`,
         );
       } catch (err) {
-        console.warn(`[VisionTools] Image downscale failed, using original:`, err);
+        logger.warn(
+          `[VisionTools] Image downscale failed, using original:`,
+          err,
+        );
       }
     }
 
@@ -504,12 +566,13 @@ export class VisionTools {
         }
 
         if (provider === "anthropic") {
-          const apiKey = settings.anthropic?.apiKey?.trim();
+          const apiKey = resolveAnthropicCredential(settings);
           if (!apiKey) {
-            lastError = "Anthropic API key not configured.";
+            lastError = "Claude credentials not configured.";
             continue;
           }
-          const defaultModel = MODELS["sonnet-4-6"]?.anthropic || "claude-sonnet-4-6";
+          const defaultModel =
+            MODELS["sonnet-4-6"]?.anthropic || "claude-sonnet-4-6";
           const model = modelOverride || defaultModel;
           const text = await this.analyzeWithAnthropic({
             apiKey,
@@ -530,15 +593,18 @@ export class VisionTools {
 
         if (provider === "bedrock") {
           const hasCredentials =
-            (settings.bedrock?.accessKeyId && settings.bedrock?.secretAccessKey) ||
+            (settings.bedrock?.accessKeyId &&
+              settings.bedrock?.secretAccessKey) ||
             settings.bedrock?.profile ||
             settings.bedrock?.useDefaultCredentials;
           if (!hasCredentials) {
             lastError = "Amazon Bedrock credentials not configured.";
             continue;
           }
-          const defaultModel = MODELS["sonnet-4-6"]?.bedrock || "anthropic.claude-sonnet-4-6";
-          const model = modelOverride || settings.bedrock?.model || defaultModel;
+          const defaultModel =
+            MODELS["sonnet-4-6"]?.bedrock || "anthropic.claude-sonnet-4-6";
+          const model =
+            modelOverride || settings.bedrock?.model || defaultModel;
           const text = await this.analyzeWithBedrock({
             settings,
             model,
@@ -562,7 +628,8 @@ export class VisionTools {
             lastError = "Gemini API key not configured.";
             continue;
           }
-          const model = modelOverride || settings.gemini?.model || "gemini-2.0-flash";
+          const model =
+            modelOverride || settings.gemini?.model || "gemini-2.0-flash";
           const text = await this.analyzeWithGemini({
             apiKey,
             model,
@@ -591,7 +658,9 @@ export class VisionTools {
     const fallbackError =
       lastError ||
       "No vision-capable provider configured. Configure OpenAI/Anthropic/Gemini in Settings.";
-    const retryable = this.shouldRetryVisionError(lastErrorRaw ?? fallbackError);
+    const retryable = this.shouldRetryVisionError(
+      lastErrorRaw ?? fallbackError,
+    );
 
     if (emitToolError) {
       this.daemon.logEvent(this.taskId, "tool_error", {
@@ -615,7 +684,11 @@ export class VisionTools {
     pages?: unknown;
     provider?: unknown;
   }): Promise<
-    | { success: true; pages: Array<{ page: number; analysis: string }>; pageCount: number }
+    | {
+        success: true;
+        pages: Array<{ page: number; analysis: string }>;
+        pageCount: number;
+      }
     | { success: false; error: string }
   > {
     const relPath = typeof input?.path === "string" ? input.path.trim() : "";
@@ -623,9 +696,12 @@ export class VisionTools {
       typeof input?.prompt === "string" && input.prompt.trim().length > 0
         ? input.prompt.trim()
         : "Describe the layout, design, content, and visual structure of this document page in detail.";
-    const pagesSpec = typeof input?.pages === "string" ? input.pages.trim() : "1-2";
+    const pagesSpec =
+      typeof input?.pages === "string" ? input.pages.trim() : "1-2";
     const providerOverride =
-      typeof input?.provider === "string" ? input.provider.trim().toLowerCase() : undefined;
+      typeof input?.provider === "string"
+        ? input.provider.trim().toLowerCase()
+        : undefined;
 
     this.daemon.logEvent(this.taskId, "tool_call", {
       tool: "read_pdf_visual",
@@ -646,7 +722,10 @@ export class VisionTools {
 
     const absPath = safeResolveWithinWorkspace(this.workspace.path, relPath);
     if (!absPath) {
-      return { success: false, error: "PDF path must be within the current workspace" };
+      return {
+        success: false,
+        error: "PDF path must be within the current workspace",
+      };
     }
 
     let pdfStat;
@@ -673,7 +752,9 @@ export class VisionTools {
     });
     const cached = this.getCachedResult(cacheKey);
     if (cached) {
-      console.log(`[VisionTools] Cache hit for PDF ${relPath} — skipping duplicate vision call`);
+      logger.debug(
+        `[VisionTools] Cache hit for PDF ${relPath} — skipping duplicate vision call`,
+      );
       return cached;
     }
 
@@ -716,12 +797,15 @@ export class VisionTools {
 
       // Find generated page images
       const files = await fs.readdir(tmpDir);
-      const pageFiles = files.filter((f) => f.startsWith("page-") && f.endsWith(".png")).sort();
+      const pageFiles = files
+        .filter((f) => f.startsWith("page-") && f.endsWith(".png"))
+        .sort();
 
       if (pageFiles.length === 0) {
         return {
           success: false,
-          error: "PDF conversion produced no images. The PDF may be empty or corrupt.",
+          error:
+            "PDF conversion produced no images. The PDF may be empty or corrupt.",
         };
       }
 
@@ -752,7 +836,9 @@ export class VisionTools {
         }
 
         const pagePrompt =
-          pageFiles.length > 1 ? `Page ${pageNum} of ${lastPage}: ${prompt}` : prompt;
+          pageFiles.length > 1
+            ? `Page ${pageNum} of ${lastPage}: ${prompt}`
+            : prompt;
 
         const pageBase64 = pageBuffer.toString("base64");
         let analysisResult = await this.analyzeBuffer({
@@ -810,7 +896,11 @@ export class VisionTools {
         pagesAnalyzed: results.length,
       });
 
-      const pdfResult = { success: true as const, pages: results, pageCount: results.length };
+      const pdfResult = {
+        success: true as const,
+        pages: results,
+        pageCount: results.length,
+      };
       // Cache the successful PDF analysis result.
       this.setCachedResult(cacheKey, pdfResult);
       return pdfResult;
@@ -830,7 +920,10 @@ export class VisionTools {
     }
   }
 
-  private parsePageRange(spec: string): { firstPage: number; lastPage: number } {
+  private parsePageRange(spec: string): {
+    firstPage: number;
+    lastPage: number;
+  } {
     const maxPages = 5;
     const cleaned = spec.trim().toLowerCase();
 
@@ -891,7 +984,16 @@ export class VisionTools {
     mimeType: string;
     maxTokens: number;
   }): Promise<string> {
-    const client = new Anthropic({ apiKey: args.apiKey });
+    const client = isAnthropicSubscriptionToken(args.apiKey)
+      ? new Anthropic({
+          apiKey: null,
+          authToken: args.apiKey,
+          defaultHeaders: {
+            "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
+            "x-app": "cli",
+          },
+        })
+      : new Anthropic({ apiKey: args.apiKey });
 
     const response = await client.messages.create({
       model: args.model,
@@ -981,7 +1083,11 @@ export class VisionTools {
     }
 
     const client = new BedrockRuntimeClient(clientConfig);
-    const format = args.mimeType.split("/")[1] as "jpeg" | "png" | "gif" | "webp";
+    const format = args.mimeType.split("/")[1] as
+      | "jpeg"
+      | "png"
+      | "gif"
+      | "webp";
 
     const command = new ConverseCommand({
       modelId: args.model,

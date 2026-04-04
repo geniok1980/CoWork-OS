@@ -212,8 +212,8 @@ export class PluginRegistry extends EventEmitter {
     const discovered = await discoverPlugins(extensionDirs);
 
     // Load and register each plugin
-    for (const { path: pluginPath, manifest } of discovered) {
-      await this.loadAndRegister(pluginPath, manifest);
+    for (const { path: pluginPath, manifest, securityReport } of discovered) {
+      await this.loadAndRegister(pluginPath, manifest, securityReport || undefined);
     }
 
     this.initialized = true;
@@ -230,9 +230,9 @@ export class PluginRegistry extends EventEmitter {
   async discoverNewPlugins(extensionDirs?: string[]): Promise<void> {
     const discovered = await discoverPlugins(extensionDirs);
     let newCount = 0;
-    for (const { path: pluginPath, manifest } of discovered) {
+    for (const { path: pluginPath, manifest, securityReport } of discovered) {
       if (!this.plugins.has(manifest.name)) {
-        await this.loadAndRegister(pluginPath, manifest);
+        await this.loadAndRegister(pluginPath, manifest, securityReport || undefined);
         newCount++;
       }
     }
@@ -244,7 +244,11 @@ export class PluginRegistry extends EventEmitter {
   /**
    * Load and register a single plugin
    */
-  private async loadAndRegister(pluginPath: string, manifest: PluginManifest): Promise<void> {
+  private async loadAndRegister(
+    pluginPath: string,
+    manifest: PluginManifest,
+    securityReport?: import("../../shared/types").CapabilitySecurityReport,
+  ): Promise<void> {
     const pluginName = manifest.name;
 
     // Check compatibility
@@ -269,6 +273,9 @@ export class PluginRegistry extends EventEmitter {
       }
 
       const loadedPlugin = result.plugin;
+      if (securityReport) {
+        loadedPlugin.securityReport = securityReport;
+      }
       this.plugins.set(pluginName, loadedPlugin);
 
       const savedState = this.packStates.get(pluginName);

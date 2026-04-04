@@ -161,9 +161,7 @@ const ALWAYS_VISIBLE_TOOLS = new Set([
   "search_memories",
   "memory_save",
   "system_info",
-  "use_skill",
-  "skill_list",
-  "skill_get",
+  "Skill",
 ]);
 
 const SESSION_CHECKLIST_TOOLS = new Set([

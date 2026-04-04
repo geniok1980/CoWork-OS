@@ -2432,16 +2432,16 @@ relationship_memory:
     });
   });
 
-  it("fails fast when tool returns unrecoverable failure (use_skill not currently executable)", async () => {
+  it("fails fast when tool returns unrecoverable failure (Skill not currently executable)", async () => {
     const executorWithTools = createExecutorWithStubs(
       [
-        toolUseResponse("use_skill", {
-          skill_id: "audio-transcribe",
-          parameters: { inputPath: "/tmp/audio.mp3" },
+        toolUseResponse("Skill", {
+          skill: "audio-transcribe",
+          args: JSON.stringify({ inputPath: "/tmp/audio.mp3" }),
         }),
       ],
       {
-        use_skill: {
+        Skill: {
           success: false,
           error: "Skill 'audio-transcribe' is not currently executable",
           reason: "Missing or invalid skill prerequisites.",
@@ -2454,7 +2454,7 @@ relationship_memory:
     executorWithTools.getAvailableTools = vi.fn().mockReturnValue([
       { name: "run_command", description: "", input_schema: { type: "object", properties: {} } },
       { name: "glob", description: "", input_schema: { type: "object", properties: {} } },
-      { name: "use_skill", description: "", input_schema: { type: "object", properties: {} } },
+      { name: "Skill", description: "", input_schema: { type: "object", properties: {} } },
     ]);
 
     const step: Any = { id: "7", description: "Create transcript and summary", status: "pending" };
@@ -2692,6 +2692,42 @@ relationship_memory:
     const planDescriptions = executor.plan.steps.map((step: Any) => step.description);
     expect(planDescriptions).toContain("Validate output");
     expect(planDescriptions.length).toBe(4);
+  });
+
+  it("keeps generic recovery read-only for non-mutating steps", async () => {
+    const executor = createExecutorWithStubs(
+      [
+        toolUseResponse("write_file", {
+          path: "notes/recommendations.md",
+          content: "placeholder",
+        }),
+        textResponse(""),
+      ],
+      {
+        write_file: { success: false, error: "Tool not available" },
+      },
+    );
+
+    const failedStep: Any = {
+      id: "1",
+      description: "Research the current workspace context and summarize the findings.",
+      status: "pending",
+    };
+    const retainedPendingStep: Any = { id: "2", description: "Validate output", status: "pending" };
+    executor.plan = { description: "Plan", steps: [failedStep, retainedPendingStep] };
+    executor.maxPlanRevisions = 5;
+    executor.recoveryRequestActive = true;
+    executor.planRevisionCount = 0;
+
+    await (executor as Any).executeStep(failedStep);
+
+    const planDescriptions = executor.plan.steps.map((step: Any) => step.description);
+    expect(planDescriptions).toContain(
+      "If normal tools are blocked, continue with a read-only fallback path and complete the goal from existing evidence and tool outputs.",
+    );
+    expect(planDescriptions).not.toContain(
+      "If normal tools are blocked, implement the smallest safe code/feature change needed to continue and complete the goal.",
+    );
   });
 
   it("triggers recovery planning when the failure reason itself signals recovery intent", async () => {

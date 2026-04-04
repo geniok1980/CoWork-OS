@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   buildWorkerRolePrompt,
   getWorkerRoleSpec,
+  inferWorkerRoleKindFromPrompt,
   parseVerificationVerdict,
+  resolveDelegationWorkerRole,
   resolveDefaultWorkerRoleKind,
   resolveWorkerRoleAgentConfig,
 } from "../worker-role-registry";
@@ -41,5 +43,26 @@ describe("worker-role-registry", () => {
   it("exposes the built-in worker role specs", () => {
     expect(getWorkerRoleSpec("synthesizer").mutationAllowed).toBe(true);
     expect(getWorkerRoleSpec("researcher").mutationAllowed).toBe(false);
+  });
+
+  it("infers worker roles from delegation prompts and honors explicit overrides", () => {
+    expect(inferWorkerRoleKindFromPrompt("Investigate the failing test and summarize the findings")).toBe(
+      "researcher",
+    );
+    expect(inferWorkerRoleKindFromPrompt("Validate the patch and give a second opinion")).toBe(
+      "verifier",
+    );
+    expect(inferWorkerRoleKindFromPrompt("Combine both agent outputs into one final summary")).toBe(
+      "synthesizer",
+    );
+    expect(inferWorkerRoleKindFromPrompt("Implement the fix and rerun the tests")).toBe(
+      "implementer",
+    );
+    expect(
+      resolveDelegationWorkerRole({
+        requestedRole: "verifier",
+        prompt: "Implement the fix",
+      }),
+    ).toBe("verifier");
   });
 });

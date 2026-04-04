@@ -39,7 +39,7 @@ The branch adds a broader operating surface around mission control, health, QA, 
 - **Heartbeat service**: heartbeat orchestration was expanded to support the larger operator loop.
 - **Daily briefing**: briefing logic was updated to better feed the operator surfaces.
 - **Strategic planner**: planner services and tests were refreshed for the company/ops workflow.
-- **Improvement candidates**: improvement candidate handling was tightened around the self-improvement loop.
+- **Improvement candidates**: candidate handling was tightened around the legacy repo-improvement loop that preceded the current subconscious model.
 - **Mode suggestions and task detection**: shared primitives now detect automated task patterns and suggest modes more accurately.
 
 ### Shared model and UI updates

@@ -681,12 +681,8 @@ export class DatabaseManager {
         ON task_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_task_events_type_timestamp_task
         ON task_events(type, timestamp DESC, task_id);
-      CREATE INDEX IF NOT EXISTS idx_task_events_legacy_type_timestamp_task
-        ON task_events(legacy_type, timestamp DESC, task_id);
       CREATE INDEX IF NOT EXISTS idx_task_events_task_type_timestamp
         ON task_events(task_id, type, timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_task_events_task_legacy_type_timestamp
-        ON task_events(task_id, legacy_type, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(task_id);
       CREATE INDEX IF NOT EXISTS idx_approvals_task ON approvals(task_id);
       CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
@@ -1504,6 +1500,19 @@ export class DatabaseManager {
       this.db.exec("CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events(task_id, seq)");
     } catch {
       // Index already exists, ignore
+    }
+
+    // These indexes depend on the timeline-v2 legacy_type column, so create them
+    // only after the migration above has had a chance to add the column on older DBs.
+    try {
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_task_events_legacy_type_timestamp_task
+          ON task_events(legacy_type, timestamp DESC, task_id);
+        CREATE INDEX IF NOT EXISTS idx_task_events_task_legacy_type_timestamp
+          ON task_events(task_id, legacy_type, timestamp DESC);
+      `);
+    } catch {
+      // Column may still be unavailable on partially-corrupt DBs; a later repair can retry.
     }
 
     // Migration: Add pinned marker to tasks table

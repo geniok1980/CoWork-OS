@@ -140,52 +140,54 @@ jobs:
         continue-on-error: true
         run: npm test
 
-      - name: Validate published-package first-install flow
-        if: runner.os != 'Windows'
-        continue-on-error: true
-        env:
-          CO_WORK_INSTALL_VERSION: ${{ steps.release_metadata.outputs.npm_version }}
+      - name: Validate npm tarball first-install flow (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
         run: |
           set -euo pipefail
           repo_root="${GITHUB_WORKSPACE:-$(pwd)}"
           tarball="$(npm pack --silent)"
+          install_source="${repo_root}/${tarball}"
           tmp_dir="$(mktemp -d)"
+          test_dir="${tmp_dir}/smoke"
 
-          if npm view "cowork-os@${CO_WORK_INSTALL_VERSION}" >/dev/null 2>&1; then
-            install_source="cowork-os@${CO_WORK_INSTALL_VERSION}"
-          else
-            install_source="${repo_root}/${tarball}"
+          mkdir -p "$test_dir"
+          cd "$test_dir"
+          npm init -y >/dev/null 2>&1
+          npm install --ignore-scripts --omit=optional --no-audit --no-fund "$install_source"
+          npm run --prefix node_modules/cowork-os setup 2>&1 | tee setup.log
+
+          if grep -q "^\\[cowork\\] setup:bootstrap" setup.log; then
+            echo "Setup unexpectedly triggered dependency bootstrap fallback; electron should resolve from parent node_modules." >&2
+            exit 1
           fi
 
-          smoke_test() {
-            source_path="$1"
-            if [ -z "$source_path" ]; then
-              echo "Smoke test source is empty" >&2
-              exit 1
-            fi
+          node -e "const { execFileSync } = require('node:child_process'); const { createRequire } = require('node:module'); const path = require('node:path'); const pkgDir = path.resolve('./node_modules/cowork-os'); const pkgRequire = createRequire(path.join(pkgDir, 'package.json')); const electron = pkgRequire('electron'); const out = execFileSync(electron, ['-e', \"const Database=require('better-sqlite3');const db=new Database(':memory:');db.close();console.log('ok')\"], { cwd: pkgDir, encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }); if ((out || '').trim() !== 'ok') { console.error('Installed package check failed; better-sqlite3 not loading in Electron.'); process.exit(1); }"
 
-            test_dir="${tmp_dir}/smoke"
-            rm -rf "$test_dir"
-            mkdir -p "$test_dir"
-            cd "$test_dir"
-            npm init -y >/dev/null 2>&1
-            npm install --ignore-scripts --omit=optional --no-audit --no-fund "$source_path"
-            npm run --prefix node_modules/cowork-os setup 2>&1 | tee setup.log
-            if grep -q "^\\[cowork\\] setup:bootstrap" setup.log; then
-              echo "Setup unexpectedly triggered dependency bootstrap fallback; electron should resolve from parent node_modules." >&2
-              exit 1
-            fi
-            node -e "const { execFileSync } = require('node:child_process'); const { createRequire } = require('node:module'); const path = require('node:path'); const pkgDir = path.resolve('./node_modules/cowork-os'); const pkgRequire = createRequire(path.join(pkgDir, 'package.json')); const electron = pkgRequire('electron'); const out = execFileSync(electron, ['-e', \"const Database=require('better-sqlite3');const db=new Database(':memory:');db.close();console.log('ok')\"], { cwd: pkgDir, encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }); if ((out || '').trim() !== 'ok') { console.error('Installed package check failed; better-sqlite3 not loading in Electron.'); process.exit(1); }"
+      - name: Validate npm tarball first-install flow (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repoRoot = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
+          $tarball = (npm pack --silent | Select-Object -Last 1).Trim()
+          $installSource = Join-Path $repoRoot $tarball
+          $tmpDir = Join-Path $env:RUNNER_TEMP ("cowork-smoke-" + [guid]::NewGuid().ToString("N"))
+          $testDir = Join-Path $tmpDir "smoke"
+
+          New-Item -ItemType Directory -Force -Path $testDir | Out-Null
+          Set-Location $testDir
+          npm init -y | Out-Null
+          npm install --ignore-scripts --omit=optional --no-audit --no-fund $installSource
+
+          $setupLog = Join-Path $testDir "setup.log"
+          npm run --prefix node_modules/cowork-os setup *>&1 | Tee-Object -FilePath $setupLog
+
+          if (Select-String -Path $setupLog -Pattern '^\[cowork\] setup:bootstrap' -Quiet) {
+            throw "Setup unexpectedly triggered dependency bootstrap fallback; electron should resolve from parent node_modules."
           }
 
-          smoke_test "$install_source"
-
-          # Validate both install paths where possible (published registry package and local
-          # npm pack tarball), so we catch regressions in both command variants.
-          local_tgz="${repo_root}/${tarball}"
-          if [ "$install_source" != "$local_tgz" ]; then
-            smoke_test "$local_tgz"
-          fi
+          node -e "const { execFileSync } = require('node:child_process'); const { createRequire } = require('node:module'); const path = require('node:path'); const pkgDir = path.resolve('./node_modules/cowork-os'); const pkgRequire = createRequire(path.join(pkgDir, 'package.json')); const electron = pkgRequire('electron'); const out = execFileSync(electron, ['-e', \"const Database=require('better-sqlite3');const db=new Database(':memory:');db.close();console.log('ok')\"], { cwd: pkgDir, encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }); if ((out || '').trim() !== 'ok') { console.error('Installed package check failed; better-sqlite3 not loading in Electron.'); process.exit(1); }"
 
       - name: Build application
         run: npm run build

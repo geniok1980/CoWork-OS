@@ -394,23 +394,17 @@ Primary implementation now lives in:
 
 ---
 
-## 4) Heartbeat Proactive Frequency Contract
+## 4) Legacy Twin Routine Cadence
 
-Heartbeat now enforces per-task cadence using `frequencyMinutes` in each proactive task.
+Older twin integrations used role-local proactive-task cadence metadata such as `frequencyMinutes`.
 
-Behavior:
+Current architecture note:
 
-- Tasks run only when due, not every heartbeat cycle
-- Last-run timestamp tracked in memory by key: `<agentId>:<taskId>`
-- `frequencyMinutes` is normalized to a minimum of `1`
-- If missing/invalid, default frequency is `15` minutes
-- Task run-state is cleared when heartbeat service stops or agent heartbeat is canceled
+- Digital Twin templates are persona presets, not core automation owners
+- Always-on cadence now belongs to attached automation profiles
+- Heartbeat and Subconscious scheduling should be reasoned about through the core automation docs, not through twin-local routine metadata
 
-Important execution detail:
-
-- Due proactive tasks are now evaluated before work/no-work decision, so proactive tasks can independently trigger heartbeat work
-
-Source: `src/electron/agents/HeartbeatService.ts`
+This section remains only as migration context for older integrations that still read legacy role-local routine hints.
 
 ---
 

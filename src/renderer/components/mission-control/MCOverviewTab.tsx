@@ -10,6 +10,7 @@ export function MCOverviewTab({ data }: MCOverviewTabProps) {
     activeAgentsCount, totalTasksInQueue, pendingMentionsCount,
     agents, tasks, getTasksByColumn,
     commandCenterSummary, commandCenterReviewQueue,
+    coreFailureClusters, coreEvalCases, coreExperiments, coreLearnings,
     selectedCompany, plannerConfig, plannerRuns,
     feedItems, setActiveTab, setOpsSubTab, getAgentStatus,
     agentContext, formatRelativeTime, isAllWorkspacesSelected,
@@ -134,6 +135,30 @@ export function MCOverviewTab({ data }: MCOverviewTabProps) {
           {feedItems.length === 0 && (
             <div style={{ color: "var(--color-text-muted)", fontSize: 12 }}>{agentContext.getUiCopy("mcFeedEmpty")}</div>
           )}
+        </div>
+      </div>
+
+      <div className="mc-v2-card" onClick={() => { setActiveTab("ops"); setOpsSubTab("harness"); }}>
+        <div className="mc-v2-card-header">
+          <span className="mc-v2-card-title">Core Harness</span>
+          <span className="mc-v2-card-badge">{coreFailureClusters.length} clusters</span>
+        </div>
+        <div className="mc-v2-card-value">{coreEvalCases.length}</div>
+        <div className="mc-v2-card-items">
+          <div className="mc-v2-card-item">
+            <span className="mc-v2-card-item-label">Living evals</span>
+            <span className="mc-v2-card-item-value">{coreEvalCases.length}</span>
+          </div>
+          <div className="mc-v2-card-item">
+            <span className="mc-v2-card-item-label">Open experiments</span>
+            <span className="mc-v2-card-item-value">
+              {coreExperiments.filter((item) => ["proposed", "running", "passed_gate"].includes(item.status)).length}
+            </span>
+          </div>
+          <div className="mc-v2-card-item">
+            <span className="mc-v2-card-item-label">Recent learnings</span>
+            <span className="mc-v2-card-item-value">{coreLearnings.length}</span>
+          </div>
         </div>
       </div>
 

@@ -2,11 +2,11 @@
 
 Digital Twin Personas are pre-built AI agent templates that create role-specific digital twins for team members. Each twin absorbs cognitively draining work — status reporting, PR triage, meeting prep, dependency tracking — so the human can stay in deep focus.
 
-A persona template bundles everything needed: agent role configuration, Heartbeat v3 defaults, proactive tasks, recommended skills, a deep system prompt, and cognitive offload categories. Activating a template creates a fully configured agent in one click.
+A persona template now bundles prompt/personality defaults, recommended skills, display metadata, and cognitive offload categories. Activating a template creates a fully configured role preset in one click, but it does not automatically enroll that role into the always-on core runtime.
 
 Access from **Settings** > **Digital Twins** or **Mission Control** > **Add Digital Twin**. For company-ops workflows, you can also open Digital Twins from **Settings** > **Companies** to create operators in company context. Digital twins can also be activated through [Plugin Packs](plugin-packs.md) — 7 of the 10 bundled packs link directly to a persona template.
 
-Heartbeat v3 is the default runtime for all heartbeat-enabled twins. See [Heartbeat v3](heartbeat-v3.md) for the architecture source of truth.
+Digital Twins are intentionally separate from the core automation runtime. See [Core Automation](core-automation.md) and [Heartbeat v3](heartbeat-v3.md) for the architecture source of truth.
 
 ---
 
@@ -19,32 +19,21 @@ A JSON blueprint defining a digital twin. Each template specifies:
 | Field | Purpose |
 |-------|---------|
 | **Role config** | Capabilities, autonomy level, personality, system prompt |
-| **Heartbeat config** | `pulseEveryMinutes`, `dispatchCooldownMinutes`, `maxDispatchesPerDay`, `heartbeatProfile`, active hours, and stagger support |
 | **Cognitive offload** | Which categories of mental work the twin absorbs |
-| **Proactive tasks** | Tasks with cadence, execution mode, signal threshold, and priority |
 | **Skills** | Recommended skill references with reasons |
 | **Metadata** | Category, tags, seniority range, industry-agnostic flag |
 
-### Heartbeat v3 Model
+### Relation To Core Automation
 
-Twins use a two-lane heartbeat model:
+Digital Twins are not direct heartbeat or subconscious owners.
 
-- **Pulse** is cheap, deterministic, and non-LLM. It reduces signals, due proactive work, due checklist items, foreground state, and recent dispatch state into one decision.
-- **Dispatch** is the escalation lane. It only runs when Pulse decides the situation justifies visible work.
+That means:
 
-Pulse can return `idle`, `deferred`, `suggestion`, `dispatch_task`, `dispatch_runbook`, or `handoff_to_cron`.
+- Twin activation does not automatically create an automation profile
+- Twin templates do not own heartbeat cadence, cooldown, budget, or subconscious target state
+- Mission Control can still show the role, but core automation is attached separately through automation profiles
 
-This matters because a twin no longer treats every wake as task work. Quiet `idle` and `deferred` pulses are normal.
-
-### Heartbeat Profiles
-
-Heartbeat behavior is profile-driven:
-
-| Profile | Behavior |
-|---------|----------|
-| `observer` | Awareness only. Cheap silent checks, no checklist execution. |
-| `operator` | Awareness plus checklist and proactive review. |
-| `dispatcher` | Full escalation profile. Can create heartbeat tasks, runbooks, and cron handoffs. |
+If you want a twin-backed operator to become always-on, activate the template first, then attach a separate automation profile to that role.
 
 ### Cognitive Offload Categories
 
@@ -63,24 +52,16 @@ Each template targets specific categories of work that fragment attention:
 | `knowledge-curation` | Organizing, tagging, and surfacing institutional knowledge |
 | `routine-automation` | Handling repetitive checks and routine operational tasks |
 
-### Proactive Tasks
+### Optional Automation Pairing
 
-Tasks that Heartbeat v3 evaluates during Pulse. Each proactive task has:
+When a team wants a twin to act as an always-on operator, the intended flow is:
 
-- **Prompt template**: Used when Dispatch or a follow-up execution path needs task context
-- **Frequency**: How often it becomes due (in minutes)
-- **Execution mode**: `pulse_only`, `dispatch`, or `cron_handoff`
-- **Minimum signal strength**: Optional threshold before the task is considered relevant
-- **Priority**: Execution order when multiple tasks are due
-- **Enabled flag**: Toggled during activation or at runtime via the agent's soul config
+1. activate the twin template
+2. review the resulting role prompt, skills, and company linkage
+3. attach an automation profile separately
+4. monitor the role from Mission Control and the core harness
 
-Execution contract:
-
-- Proactive tasks are cadence-checked in Pulse, not blindly turned into work on every wake
-- `pulse_only` tasks stay cheap and local to heartbeat review
-- `dispatch` tasks require a Dispatch escalation before visible work is created
-- `cron_handoff` tasks are moved toward exact-time or heavyweight runbook scheduling
-- Tasks can be ignored when signal strength is below `minSignalStrength`
+This keeps persona choice separate from cognition ownership.
 
 ---
 
@@ -136,13 +117,12 @@ Execution contract:
 4. Click a template card to open the activation dialog
 5. Customize:
    - **Twin Name** — e.g., "Sarah's SW Twin" or "Backend Team Twin"
-   - **Pulse cadence** — how often the twin performs its cheap review cycle
-   - **Heartbeat profile** — `observer`, `operator`, or `dispatcher`
-   - **Dispatch controls** — cooldown, daily budget, and active hours when exposed
-   - **Proactive Tasks** — toggle individual tasks on/off
+   - **Role prompt and identity**
+   - **Recommended skills**
+   - **Company context**, when relevant
 6. Click **Create Digital Twin**
 
-The twin appears as a new agent in Mission Control, ready to work.
+The twin appears as a new agent in Mission Control, ready to work as a role/persona preset. If you want it to participate in the core runtime, attach automation separately.
 
 ### Company-Aware Activation
 
@@ -174,29 +154,30 @@ These templates are intended to pair with the `Venture operator kit` workspace p
 
 - A new **AgentRole** record with the template's capabilities, personality, and system prompt
 - Optional persisted **company assignment** when activation happens in company context
-- **Heartbeat v3** configured with Pulse cadence and profile defaults
-- **Cognitive offload config** embedded in the agent's soul JSON, including enabled proactive tasks
+- **Cognitive offload config** embedded in the agent's soul JSON
 - Warnings if any recommended skills are not installed (non-blocking — the twin works without them)
+
+What activation does **not** create:
+
+- an automation profile
+- heartbeat ownership
+- subconscious target ownership
+- memory distillation policy
 
 ---
 
 ## Daily Operation
 
-Once activated, a twin operates in two modes.
+Once activated, a twin mainly operates as a role/persona surface plus an on-demand execution target. Always-on operator behavior is added only if you attach automation separately.
 
-### Proactive Mode (Heartbeat v3)
+### Optional Always-On Mode
 
-The twin runs Heartbeat v3 on its configured Pulse cadence. Pulse reviews merged signals, pending mentions/tasks, due proactive work, due checklist items, foreground contention, and dispatch guardrails before deciding whether anything should escalate.
+If a twin-backed role also has an automation profile, it can participate in:
 
-For venture/operator twins, `.cowork/HEARTBEAT.md` acts as a recurring checklist input when the twin's `heartbeatProfile` allows maintenance execution. This is no longer controlled by `autonomyLevel`.
-
-Results may appear as:
-
-- no visible action (`idle` or `deferred`)
-- an internal suggestion
-- a heartbeat task
-- a runbook request
-- a cron handoff for exact-time or heavyweight work
+- Heartbeat v3 review
+- Subconscious reflective runs
+- core traces and learnings
+- Mission Control core-harness monitoring
 
 When a twin is linked to a company, the product can also surface it as part of that company's operator set in:
 
@@ -204,7 +185,7 @@ When a twin is linked to a company, the product can also surface it as part of t
 - `Settings > Digital Twins`
 - `Mission Control`
 
-**Software Engineer Twin (30-minute Pulse cadence):**
+Example Software Engineer routines once a separate automation profile is attached:
 
 | Task | Frequency | What It Does |
 |------|-----------|-------------|
@@ -212,7 +193,7 @@ When a twin is linked to a company, the product can also surface it as part of t
 | Test Coverage Scan | Every 4 hours | Checks recent code changes for files lacking test coverage |
 | Dependency Health | Every 8 hours | Runs dependency check for vulnerabilities and outdated packages |
 
-**Engineering Manager Twin (30-minute Pulse cadence):**
+Example Engineering Manager routines once a separate automation profile is attached:
 
 | Task | Frequency | What It Does |
 |------|-----------|-------------|
@@ -220,7 +201,7 @@ When a twin is linked to a company, the product can also surface it as part of t
 | Sprint Health Check | Every 4 hours | Monitors sprint progress, flags at-risk items, surfaces blockers |
 | Cross-Team Dependency Scan | Every 8 hours | Tracks dependencies between teams, flags blockers early |
 
-**VP of Engineering Twin (60-minute Pulse cadence):**
+Example VP of Engineering routines once a separate automation profile is attached:
 
 | Task | Frequency | What It Does |
 |------|-----------|-------------|
@@ -331,9 +312,9 @@ Heartbeat results can be delivered to channels — e.g., post the daily PR triag
 ### At Activation Time
 
 - **Name**: Any display name for the twin
-- **Pulse cadence**: 5 minutes to 4 hours
-- **Heartbeat profile**: `observer`, `operator`, or `dispatcher`
-- **Proactive tasks**: Enable/disable individual tasks
+- **Role prompt and identity**
+- **Recommended skills**
+- **Company linkage**, when relevant
 - All other role properties (capabilities, autonomy, personality) come from the template defaults
 
 ### After Activation
@@ -341,9 +322,9 @@ Heartbeat results can be delivered to channels — e.g., post the daily PR triag
 The twin is a standard AgentRole — all properties can be edited via the Agent Role Editor in Mission Control:
 
 - Change capabilities, autonomy level, or personality
-- Adjust Pulse cadence, Dispatch controls, or active hours
 - Edit the system prompt or soul configuration
-- Modify proactive task settings in the soul JSON
+- Modify skills and role-specific soul metadata
+- Attach automation separately in Mission Control if the role should become always-on
 
 ### Adding Custom Templates
 
@@ -363,11 +344,10 @@ Templates are JSON files in `resources/persona-templates/`. To add a custom temp
 PersonaTemplate (JSON)
     ↓ activate()
 AgentRole (SQLite)
-    ↓ pulse cadence
-Heartbeat v3
-  ├─ Signal ledger + checklist cache + proactive cadence evaluation
-  ├─ Pulse (non-LLM, no task creation)
-  └─ Dispatch (suggestion/task/runbook/cron handoff when justified)
+    ↓ optional attach
+AutomationProfile (SQLite)
+    ↓
+Heartbeat v3 + Subconscious + Memory
     ↓
 Mission Control + Task system + Run records
 ```
@@ -379,7 +359,7 @@ Mission Control + Task system + Run records
 | Template definitions | `resources/persona-templates/*.json` |
 | Bundled skills | `resources/skills/twin-*.json` |
 | Activated twin config | `agent_roles` table (SQLite) |
-| Proactive task config | `soul` JSON field on the AgentRole |
+| Optional automation linkage | `automation_profiles` and core runtime tables |
 | Task results | Standard task records in SQLite |
 
 ### IPC Channels
@@ -396,7 +376,7 @@ Mission Control + Task system + Run records
 
 `PersonaTemplateService` follows the same pattern as `CustomSkillLoader`:
 - Loads JSON from `resources/persona-templates/` (dev: `process.cwd()`, prod: `process.resourcesPath`)
-- No new database tables — templates instantiate into existing AgentRole records
+- No new twin-specific database tables — templates instantiate into existing AgentRole records
 - Skills are referenced by ID, not embedded — missing skills produce warnings, not errors
 
 ---
@@ -417,7 +397,7 @@ The in-app **Plugin Store** (accessible via the "+" button in the Customize pane
 Organization admins can control twin-related packs via [Admin Policies](admin-policies.md):
 - **Require** specific packs (e.g., ensure all engineers have the Engineering pack with its Software Engineer twin)
 - **Block** packs that aren't approved for the organization
-- **Limit agent resources** — cap heartbeat frequency and concurrent agents
+- **Limit agent resources** — cap automation profile usage and concurrent agents
 
 See [Plugin Packs](plugin-packs.md) and [Admin Policies](admin-policies.md) for details.
 
@@ -439,9 +419,10 @@ For the full founder-operated autonomous-company workflow, see [Zero-Human Compa
 | Open company-aware twin creation | Settings > Companies > Open Digital Twins |
 | Activate a template | Click template card > customize > Create Digital Twin |
 | Create company-linked operator | Open Digital Twins from a company context, then activate a venture/operator template |
-| Check twin's proactive results | View completed tasks in Mission Control |
+| Check twin task output | View completed tasks in Mission Control |
 | Assign work to a twin | Drag task to twin's column, or @mention the twin |
 | Edit twin after activation | Double-click the twin in Mission Control agents panel |
-| Adjust proactive tasks | Edit agent > soul JSON > cognitiveOffload.proactiveTasks |
+| Make the twin always-on | Attach a separate automation profile after activation |
+| Adjust twin role metadata | Edit agent > soul JSON and role settings |
 | Review heartbeat behavior | Open [Heartbeat v3](heartbeat-v3.md) |
 | Use a twin skill on-demand | @mention twin + skill prompt (e.g., "prepare meeting brief for X") |

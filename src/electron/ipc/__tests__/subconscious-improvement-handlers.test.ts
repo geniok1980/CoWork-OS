@@ -151,10 +151,7 @@ describe("subconscious improvement IPC handlers", () => {
       perExecutorPolicy: {
         task: { enabled: true },
         suggestion: { enabled: true },
-        scheduledTask: { enabled: true },
-        briefing: { enabled: true },
-        eventTriggerUpdate: { enabled: true },
-        mailboxAutomation: { enabled: true },
+        notify: { enabled: true },
         codeChangeTask: {
           enabled: true,
           requireWorktree: false,
@@ -188,10 +185,7 @@ describe("subconscious improvement IPC handlers", () => {
         perExecutorPolicy: {
           task: { enabled: true },
           suggestion: { enabled: true },
-          scheduledTask: { enabled: true },
-          briefing: { enabled: true },
-          eventTriggerUpdate: { enabled: true },
-          mailboxAutomation: { enabled: true },
+          notify: { enabled: true },
           codeChangeTask: {
             enabled: true,
             requireWorktree: true,

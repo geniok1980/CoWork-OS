@@ -1,3 +1,10 @@
+import type {
+  CoreEvalCase,
+  CoreFailureCluster,
+  CoreFailureRecord,
+  CoreHarnessExperiment,
+  CoreLearningsEntry,
+} from "../../../shared/types";
 import type { MissionControlData, OpsSubTab } from "./useMissionControlData";
 
 interface MCOpsTabProps {
@@ -6,6 +13,7 @@ interface MCOpsTabProps {
 
 const OPS_TABS: { id: OpsSubTab; label: string }[] = [
   { id: "overview", label: "Overview" },
+  { id: "harness", label: "Core Harness" },
   { id: "operators", label: "Operators" },
   { id: "outputs", label: "Outputs & Review" },
   { id: "execution", label: "Execution Map" },
@@ -18,6 +26,7 @@ export function MCOpsTab({ data }: MCOpsTabProps) {
     selectedCompany, commandCenterSummary,
     commandCenterOutputs, commandCenterReviewQueue,
     commandCenterOperators, commandCenterExecutionMap,
+    coreFailureRecords, coreFailureClusters, coreEvalCases, coreExperiments, coreLearnings,
     plannerConfig, plannerRuns, plannerRunning, plannerSaving, plannerLoading,
     selectedPlannerRunId, setSelectedPlannerRunId, selectedPlannerRun,
     plannerRunIssues, setSelectedIssueId, setDetailPanel,
@@ -26,7 +35,7 @@ export function MCOpsTab({ data }: MCOpsTabProps) {
     formatRelativeTime,
   } = data;
 
-  if (!selectedCompany) {
+  if (!selectedCompany && opsSubTab !== "harness") {
     return <div className="mc-v2-empty">Select a company to view operations.</div>;
   }
 
@@ -44,13 +53,23 @@ export function MCOpsTab({ data }: MCOpsTabProps) {
         ))}
       </nav>
       <div className="mc-v2-ops-content">
-        {opsSubTab === "overview" && (
+        {selectedCompany && opsSubTab === "overview" && (
           <OpsOverview company={selectedCompany} summary={commandCenterSummary} />
         )}
-        {opsSubTab === "operators" && (
+        {opsSubTab === "harness" && (
+          <OpsHarness
+            clusters={coreFailureClusters}
+            failures={coreFailureRecords}
+            evalCases={coreEvalCases}
+            experiments={coreExperiments}
+            learnings={coreLearnings}
+            formatRelativeTime={formatRelativeTime}
+          />
+        )}
+        {selectedCompany && opsSubTab === "operators" && (
           <OpsOperators operators={commandCenterOperators} formatRelativeTime={formatRelativeTime} />
         )}
-        {opsSubTab === "outputs" && (
+        {selectedCompany && opsSubTab === "outputs" && (
           <OpsOutputs
             outputs={commandCenterOutputs}
             reviewQueue={commandCenterReviewQueue}
@@ -60,7 +79,7 @@ export function MCOpsTab({ data }: MCOpsTabProps) {
             selectedIssueId={data.selectedIssueId}
           />
         )}
-        {opsSubTab === "execution" && (
+        {selectedCompany && opsSubTab === "execution" && (
           <OpsExecutionMap
             executionMap={commandCenterExecutionMap}
             setSelectedIssueId={setSelectedIssueId}
@@ -68,7 +87,7 @@ export function MCOpsTab({ data }: MCOpsTabProps) {
             selectedIssueId={data.selectedIssueId}
           />
         )}
-        {opsSubTab === "planner" && (
+        {selectedCompany && opsSubTab === "planner" && (
           <OpsPlanner
             config={plannerConfig}
             runs={plannerRuns}
@@ -89,6 +108,128 @@ export function MCOpsTab({ data }: MCOpsTabProps) {
             selectedIssueId={data.selectedIssueId}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+interface OpsHarnessProps {
+  failures: CoreFailureRecord[];
+  clusters: CoreFailureCluster[];
+  evalCases: CoreEvalCase[];
+  experiments: CoreHarnessExperiment[];
+  learnings: CoreLearningsEntry[];
+  formatRelativeTime: MissionControlData["formatRelativeTime"];
+}
+
+function OpsHarness({
+  failures,
+  clusters,
+  evalCases,
+  experiments,
+  learnings,
+  formatRelativeTime,
+}: OpsHarnessProps) {
+  return (
+    <div className="mc-v2-ops-stack">
+      <div className="mc-v2-ops-stats">
+        {[
+          { label: "Failure records", value: failures.length },
+          { label: "Failure clusters", value: clusters.length },
+          { label: "Living evals", value: evalCases.length },
+          { label: "Experiments", value: experiments.length },
+          { label: "Learnings", value: learnings.length },
+        ].map((stat) => (
+          <div key={stat.label} className="mc-v2-ops-stat-card">
+            <span className="mc-v2-ops-stat-value">{stat.value}</span>
+            <span className="mc-v2-ops-stat-label">{stat.label}</span>
+          </div>
+        ))}
+      </div>
+      <div>
+        <h3 className="mc-v2-ops-heading">Recurring failures</h3>
+        <div className="mc-v2-ops-list">
+          {clusters.length === 0 ? (
+            <div className="mc-v2-empty mc-v2-empty-compact">No clustered core failures yet.</div>
+          ) : (
+            clusters.slice(0, 8).map((cluster) => (
+              <div key={cluster.id} className="mc-v2-ops-row">
+                <div>
+                  <div className="mc-v2-ops-row-title">{cluster.rootCauseSummary}</div>
+                  <div className="mc-v2-ops-row-subtitle">{cluster.category} · recurred {cluster.recurrenceCount}x</div>
+                </div>
+                <span className="mc-v2-ops-pill">{cluster.status}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+      <div>
+        <h3 className="mc-v2-ops-heading">Recent failure records</h3>
+        <div className="mc-v2-ops-list">
+          {failures.length === 0 ? (
+            <div className="mc-v2-empty mc-v2-empty-compact">No core failure records captured yet.</div>
+          ) : (
+            failures.slice(0, 6).map((failure) => (
+              <div key={failure.id} className="mc-v2-ops-row">
+                <div>
+                  <div className="mc-v2-ops-row-title">{failure.summary}</div>
+                  <div className="mc-v2-ops-row-subtitle">
+                    {failure.category} · {failure.severity} · {failure.sourceSurface}
+                  </div>
+                </div>
+                <span className="mc-v2-ops-pill">{formatRelativeTime(failure.createdAt)}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+      <div>
+        <h3 className="mc-v2-ops-heading">Eval and experiment activity</h3>
+        <div className="mc-v2-ops-list">
+          {[...evalCases.slice(0, 4), ...experiments.slice(0, 4)].length === 0 ? (
+            <div className="mc-v2-empty mc-v2-empty-compact">No eval or experiment activity yet.</div>
+          ) : (
+            <>
+              {evalCases.slice(0, 4).map((item) => (
+                <div key={item.id} className="mc-v2-ops-row">
+                  <div>
+                    <div className="mc-v2-ops-row-title">{item.title}</div>
+                    <div className="mc-v2-ops-row-subtitle">passes {item.passCount} · fails {item.failCount}</div>
+                  </div>
+                  <span className="mc-v2-ops-pill">{item.status}</span>
+                </div>
+              ))}
+              {experiments.slice(0, 4).map((item) => (
+                <div key={item.id} className="mc-v2-ops-row">
+                  <div>
+                    <div className="mc-v2-ops-row-title">{item.summary || item.changeKind}</div>
+                    <div className="mc-v2-ops-row-subtitle">{item.changeKind}</div>
+                  </div>
+                  <span className="mc-v2-ops-pill">{item.status}</span>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
+      <div>
+        <h3 className="mc-v2-ops-heading">Recent learnings</h3>
+        <div className="mc-v2-ops-list">
+          {learnings.length === 0 ? (
+            <div className="mc-v2-empty mc-v2-empty-compact">No core learnings recorded yet.</div>
+          ) : (
+            learnings.slice(0, 8).map((entry) => (
+              <div key={entry.id} className="mc-v2-ops-row">
+                <div>
+                  <div className="mc-v2-ops-row-title">{entry.summary}</div>
+                  <div className="mc-v2-ops-row-subtitle">{entry.kind}</div>
+                </div>
+                <span className="mc-v2-ops-pill">{formatRelativeTime(entry.createdAt)}</span>
+              </div>
+            ))
+          )}
+        </div>
       </div>
     </div>
   );

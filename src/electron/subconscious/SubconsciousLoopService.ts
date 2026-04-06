@@ -4,14 +4,18 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentDaemon } from "../agent/daemon";
 import { ProactiveSuggestionsService } from "../agent/ProactiveSuggestionsService";
+import { AutomationProfileRepository } from "../agents/AutomationProfileRepository";
+import { buildCoreAutomationAgentConfig } from "../agents/autonomy-policy";
+import { CoreMemoryCandidateService } from "../core/CoreMemoryCandidateService";
+import { CoreMemoryDistiller } from "../core/CoreMemoryDistiller";
+import { CoreLearningPipelineService } from "../core/CoreLearningPipelineService";
+import { CoreTraceService } from "../core/CoreTraceService";
 import { WorkspaceRepository } from "../database/repositories";
-import { getCronService } from "../cron";
 import { getCronStorePath, loadCronStoreSync } from "../cron/store";
-import { syncDailyBriefingCronJob } from "../briefing/briefing-scheduler";
-import { DEFAULT_BRIEFING_CONFIG } from "../briefing/types";
-import { MailboxAutomationRegistry } from "../mailbox/MailboxAutomationRegistry";
 import type { EventTriggerService } from "../triggers/EventTriggerService";
 import { GitService } from "../git/GitService";
+import { getUserDataDir } from "../utils/user-data-dir";
+import { createLogger } from "../utils/logger";
 import type {
   ImprovementCampaign,
   ImprovementCandidate,
@@ -29,11 +33,17 @@ import {
   type SubconsciousDispatchKind,
   type SubconsciousDispatchRecord,
   type SubconsciousDispatchStatus,
+  type SubconsciousDreamArtifact,
   type SubconsciousEvidence,
   type SubconsciousHealth,
   type SubconsciousHistoryResetResult,
   type SubconsciousHypothesis,
+  type SubconsciousJournalEntry,
+  type SubconsciousMemoryItem,
+  type SubconsciousNotificationIntent,
+  type SubconsciousPermissionDecision,
   type SubconsciousRefreshResult,
+  type SubconsciousRiskLevel,
   type SubconsciousRun,
   type SubconsciousRunOutcome,
   type SubconsciousRunStage,
@@ -48,6 +58,7 @@ import { SubconsciousMigrationService } from "./SubconsciousMigrationService";
 import {
   SubconsciousBacklogRepository,
   SubconsciousCritiqueRepository,
+  clearSubconsciousTargetData,
   clearSubconsciousHistoryData,
   SubconsciousDecisionRepository,
   SubconsciousDispatchRepository,
@@ -58,6 +69,7 @@ import {
 import { SubconsciousSettingsManager } from "./SubconsciousSettingsManager";
 
 type Any = any;
+const logger = createLogger("Subconscious");
 
 interface SubconsciousLoopServiceDeps {
   notify?: (params: {
@@ -67,8 +79,14 @@ interface SubconsciousLoopServiceDeps {
     taskId?: string;
     workspaceId?: string;
   }) => Promise<void> | void;
+  isUserFocused?: () => boolean;
   getTriggerService?: () => EventTriggerService | null;
   getGlobalRoot?: () => string;
+  automationProfileRepo?: AutomationProfileRepository;
+  coreTraceService?: CoreTraceService;
+  coreMemoryCandidateService?: CoreMemoryCandidateService;
+  coreMemoryDistiller?: CoreMemoryDistiller;
+  coreLearningPipelineService?: CoreLearningPipelineService;
 }
 
 function now(): number {
@@ -87,19 +105,30 @@ function limit<T>(values: T[], max: number): T[] {
   return values.slice(0, max);
 }
 
+function uniqueBy<T>(items: T[], getKey: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const item of items) {
+    const key = getKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function hashNumber(value: string): number {
+  return parseInt(stableHash(value).slice(0, 8), 16);
+}
+
 function toDispatchPolicyKey(kind: SubconsciousDispatchKind):
   | keyof SubconsciousSettings["perExecutorPolicy"]
-  | "codeChangeTask"
-  | "eventTriggerUpdate"
-  | "scheduledTask"
-  | "mailboxAutomation" {
+  | "codeChangeTask" {
   switch (kind) {
-    case "scheduled_task":
-      return "scheduledTask";
-    case "event_trigger_update":
-      return "eventTriggerUpdate";
-    case "mailbox_automation":
-      return "mailboxAutomation";
     case "code_change_task":
       return "codeChangeTask";
     default:
@@ -111,12 +140,6 @@ function humanizeDispatchKind(kind?: SubconsciousDispatchKind): string {
   switch (kind) {
     case "code_change_task":
       return "code change task";
-    case "scheduled_task":
-      return "scheduled task";
-    case "event_trigger_update":
-      return "event trigger update";
-    case "mailbox_automation":
-      return "mailbox automation";
     default:
       return kind ? kind.replace(/_/g, " ") : "recommendation";
   }
@@ -131,6 +154,7 @@ const COWORK_OS_REPO_IDENTITY = "CoWork-OS/CoWork-OS";
 interface CodeWorkspaceTargetCandidate {
   workspace: Workspace;
   repoRoot: string;
+  workspaceAtRepoRoot: boolean;
   remoteName?: string;
   remoteUrl?: string;
   repoIdentity?: string;
@@ -154,6 +178,14 @@ function buildCodeTargetKey(candidate: Pick<CodeWorkspaceTargetCandidate, "repoR
   return `code_workspace:repo:${stableHash(candidate.repoRoot).slice(0, 16)}`;
 }
 
+async function normalizeComparablePath(value: string): Promise<string> {
+  try {
+    return await fs.realpath(value);
+  } catch {
+    return path.resolve(value);
+  }
+}
+
 export class SubconsciousLoopService {
   private readonly workspaceRepo: WorkspaceRepository;
   private readonly targetRepo: SubconsciousTargetRepository;
@@ -166,10 +198,12 @@ export class SubconsciousLoopService {
   private readonly artifactStore: SubconsciousArtifactStore;
   private readonly migrationService: SubconsciousMigrationService;
   private readonly latestEvidenceByTarget = new Map<string, SubconsciousEvidence[]>();
+  private readonly lastNotificationByIntent = new Map<string, number>();
   private agentDaemon: AgentDaemon | null = null;
   private intervalHandle?: ReturnType<typeof setInterval>;
   private brainStatus: SubconsciousBrainSummary["status"] = "idle";
   private started = false;
+  private lastDreamAt?: number;
 
   constructor(
     private readonly db: Database.Database,
@@ -190,13 +224,32 @@ export class SubconsciousLoopService {
     this.migrationService = new SubconsciousMigrationService(db);
   }
 
+  private async finalizeCoreLearning(traceId: string, target?: SubconsciousTargetRef, sourceRunId?: string): Promise<void> {
+    this.deps.coreMemoryCandidateService?.extractFromTrace(traceId, {
+      target,
+      sourceRunId,
+    });
+    this.deps.coreMemoryCandidateService?.autoAcceptHighSignalCandidates(traceId);
+    await this.deps.coreMemoryDistiller?.runHotPath(traceId);
+    this.deps.coreLearningPipelineService?.processTrace(traceId);
+  }
+
   async start(agentDaemon: AgentDaemon): Promise<void> {
     if (this.started) return;
     this.started = true;
     this.agentDaemon = agentDaemon;
     this.migrationService.runOnce();
+    this.normalizeLegacyOutcomeVocabulary();
+    this.pruneSessionOnlyState();
     await this.refreshTargets();
+    await this.maybeRunDream();
     this.resetInterval();
+    logger.info("Service started", {
+      enabled: this.getSettings().enabled,
+      autoRun: this.getSettings().autoRun,
+      cadenceMinutes: this.getSettings().cadenceMinutes,
+      targetCount: this.targetRepo.list().length,
+    });
     const settings = this.getSettings();
     if (settings.enabled && settings.autoRun) {
       await this.runNow();
@@ -236,10 +289,12 @@ export class SubconsciousLoopService {
     return {
       status: settings.enabled ? this.brainStatus : "paused",
       enabled: settings.enabled,
+      autonomyMode: settings.autonomyMode,
       cadenceMinutes: settings.cadenceMinutes,
       targetCount: targets.length,
       activeRunCount,
       lastRunAt,
+      lastDreamAt: this.lastDreamAt,
       updatedAt: now(),
     };
   }
@@ -266,12 +321,24 @@ export class SubconsciousLoopService {
       latestDecision: latestRun ? this.decisionRepo.findByRun(latestRun.id) : undefined,
       backlog: this.backlogRepo.listByTarget(targetKey, 50),
       dispatchHistory: this.dispatchRepo.listByTarget(targetKey, 30),
+      journal: await this.artifactStore.readJournalEntries(targetKey, 40),
+      memory: await this.artifactStore.readMemoryIndex(targetKey, target.target),
+      dreams: await this.artifactStore.readDreamArtifacts(target.target, 5),
     };
   }
 
   async refreshTargets(): Promise<SubconsciousRefreshResult> {
     const settings = this.getSettings();
     const collected = await this.collectTargets(settings.enabledTargetKinds);
+    const existingKeys = new Set(this.targetRepo.list().map((target) => target.key));
+    const collectedKeys = new Set(collected.keys());
+    const staleKeys = Array.from(existingKeys).filter((key) => !collectedKeys.has(key));
+    if (staleKeys.length) {
+      clearSubconsciousTargetData(this.db, staleKeys);
+      for (const key of staleKeys) {
+        this.latestEvidenceByTarget.delete(key);
+      }
+    }
     let evidenceCount = 0;
     for (const [targetKey, data] of collected.entries()) {
       if (data.target.kind === "code_workspace") {
@@ -283,12 +350,22 @@ export class SubconsciousLoopService {
       evidenceCount += evidence.length;
       this.latestEvidenceByTarget.set(targetKey, evidence);
       const backlogCount = this.backlogRepo.countOpenByTarget(targetKey);
-      const summary = this.buildTargetSummary(data.target, evidence, backlogCount);
+      const summary = this.buildTargetSummary(
+        data.target,
+        evidence,
+        backlogCount,
+        this.targetRepo.findByKey(targetKey),
+      );
       this.targetRepo.upsert(summary);
       await this.artifactStore.writeTargetState(summary, evidence, this.backlogRepo.listByTarget(targetKey, 50));
     }
     const targets = this.targetRepo.list();
     await this.artifactStore.writeBrainState(this.getBrainSummary(), targets);
+    logger.info("Refreshed targets", {
+      targetCount: targets.length,
+      evidenceCount,
+      enabledTargetKinds: settings.enabledTargetKinds,
+    });
     return { targetCount: targets.length, evidenceCount };
   }
 
@@ -297,7 +374,10 @@ export class SubconsciousLoopService {
     if (!settings.enabled) return null;
     await this.refreshTargets();
     const target = targetKey ? this.targetRepo.findByKey(targetKey) : this.pickTargetForRun();
-    if (!target) return null;
+    if (!target) {
+      logger.info("Run skipped: no eligible target", { requestedTargetKey: targetKey || null });
+      return null;
+    }
 
     const evidence = this.latestEvidenceByTarget.get(target.key) || [];
     const evidenceFingerprint = stableHash(
@@ -307,11 +387,22 @@ export class SubconsciousLoopService {
       })),
     );
     const deduped = this.runRepo.findLatestByFingerprint(target.key, evidenceFingerprint);
-    if (deduped && (deduped.outcome === "completed" || deduped.outcome === "completed_no_dispatch")) {
+    if (
+      deduped &&
+      ["sleep", "suggest", "dispatch", "notify", "defer", "dismiss"].includes(
+        deduped.outcome || "",
+      )
+    ) {
+      logger.info("Run deduplicated", {
+        targetKey: target.key,
+        runId: deduped.id,
+        outcome: deduped.outcome,
+      });
       return deduped;
     }
 
     this.brainStatus = "running";
+    const profile = this.resolveAutomationProfileForTarget(target.target);
     let run = this.runRepo.create({
       targetKey: target.key,
       workspaceId: target.target.workspaceId,
@@ -322,18 +413,116 @@ export class SubconsciousLoopService {
       rejectedHypothesisIds: [],
       startedAt: now(),
     });
+    const coreTrace = profile
+      ? this.deps.coreTraceService?.startTrace({
+          profileId: profile.id,
+          workspaceId: target.target.workspaceId,
+          targetKey: target.key,
+          sourceSurface: "subconscious",
+          traceKind: "subconscious_cycle",
+          status: "running",
+          subconsciousRunId: run.id,
+          startedAt: run.startedAt,
+        })
+      : undefined;
+    logger.info("Run started", {
+      runId: run.id,
+      targetKey: target.key,
+      targetLabel: target.target.label,
+      evidenceCount: evidence.length,
+      requestedTargetKey: targetKey || null,
+    });
 
     try {
+      await this.appendJournal({
+        runId: run.id,
+        targetKey: target.key,
+        kind: "observation",
+        summary: `Reflector started for ${target.target.label}.`,
+        details: evidence.length
+          ? `Collected ${evidence.length} evidence signal(s).`
+          : "No fresh evidence was collected.",
+      });
       this.targetRepo.update(target.key, {
         state: "active",
         evidenceFingerprint,
+        lastObservedAt: pick(evidence)?.createdAt || now(),
       });
 
+      if (evidence.length === 0) {
+        if (coreTrace) {
+          this.deps.coreTraceService?.appendPhaseEvent(
+            coreTrace.id,
+            "evidence",
+            "subconscious.no_evidence",
+            "No fresh evidence was worth acting on right now.",
+          );
+        }
+        run = this.completeSleepRun(run, "No fresh evidence was worth acting on right now.");
+        await this.appendJournal({
+          runId: run.id,
+          targetKey: target.key,
+          kind: "sleep",
+          summary: `Reflector slept for ${target.target.label}.`,
+          details: "No fresh evidence was worth acting on right now.",
+          outcome: "sleep",
+        });
+        this.brainStatus = "idle";
+        await this.artifactStore.writeRunArtifacts({
+          target: target.target,
+          run,
+          evidence,
+          hypotheses: [],
+          critiques: [],
+          backlog: [],
+          dispatch: null,
+        });
+        await this.finalizeTargetAfterRun(target, run, undefined, null, evidence);
+        await this.maybeRunDream(target.target);
+        if (coreTrace) {
+          this.deps.coreTraceService?.completeTrace(
+            coreTrace.id,
+            "completed",
+            "No fresh evidence was worth acting on right now.",
+          );
+          await this.finalizeCoreLearning(coreTrace.id, target.target, run.id);
+        }
+        logger.info("Run completed", {
+          runId: run.id,
+          targetKey: target.key,
+          targetLabel: target.target.label,
+          stage: run.stage,
+          outcome: run.outcome,
+          reason: run.blockedReason || null,
+        });
+        return run;
+      }
+
       run = await this.advanceRun(run.id, { stage: "ideating" });
+      if (coreTrace) {
+        this.deps.coreTraceService?.appendPhaseEvent(
+          coreTrace.id,
+          "evidence",
+          "subconscious.evidence_collected",
+          `Collected ${evidence.length} evidence signal(s).`,
+          {
+            evidenceCount: evidence.length,
+            targetKey: target.key,
+          },
+        );
+      }
       const hypotheses = this.generateHypotheses(target.target, evidence, settings.maxHypothesesPerRun).map(
         (item) => ({ ...item, runId: run.id }),
       );
       this.hypothesisRepo.replaceForRun(run.id, hypotheses);
+      if (coreTrace) {
+        this.deps.coreTraceService?.appendPhaseEvent(
+          coreTrace.id,
+          "decision",
+          "subconscious.hypotheses_generated",
+          `Generated ${hypotheses.length} hypothesis candidate(s).`,
+        );
+      }
 
       run = await this.advanceRun(run.id, { stage: "critiquing" });
       const critiques = this.generateCritiques(target.target, evidence, hypotheses).map((item) => ({
@@ -341,21 +530,59 @@ export class SubconsciousLoopService {
         runId: run.id,
       }));
       this.critiqueRepo.replaceForRun(run.id, critiques);
+      if (coreTrace) {
+        this.deps.coreTraceService?.appendPhaseEvent(
+          coreTrace.id,
+          "decision",
+          "subconscious.critiques_generated",
+          `Generated ${critiques.length} critique(s).`,
+        );
+      }
 
       run = await this.advanceRun(run.id, { stage: "synthesizing" });
       const decision = {
         ...this.synthesizeDecision(target.target, evidence, hypotheses, critiques),
         runId: run.id,
       };
+      if (coreTrace) {
+        this.deps.coreTraceService?.appendPhaseEvent(
+          coreTrace.id,
+          "decision",
+          "subconscious.decision_synthesized",
+          decision.winnerSummary,
+          {
+            recommendation: decision.recommendation,
+          },
+        );
+      }
       this.decisionRepo.upsert(decision);
+      await this.appendJournal({
+        runId: run.id,
+        targetKey: target.key,
+        kind: "decision",
+        summary: decision.winnerSummary,
+        details: decision.recommendation,
+      });
       const backlog = this.materializeBacklog(target.key, decision, this.resolveDispatchKind(target.target));
+      const dispatchKind = this.resolveDispatchKind(target.target);
+      const policy = this.evaluatePolicy(target, decision, evidence, dispatchKind);
+      this.runRepo.update(run.id, {
+        confidence: policy.confidence,
+        riskLevel: policy.riskLevel,
+        evidenceSources: policy.evidenceSources,
+        evidenceFreshness: policy.evidenceFreshness,
+        permissionDecision: policy.permissionDecision,
+        notificationIntent: policy.notificationIntent,
+      });
       const placeholderDispatch =
-        settings.dispatchDefaults.autoDispatch && this.resolveDispatchKind(target.target)
+        settings.dispatchDefaults.autoDispatch &&
+        dispatchKind &&
+        policy.permissionDecision === "allowed"
           ? ({
               id: randomUUID(),
               runId: run.id,
               targetKey: target.key,
-              kind: this.resolveDispatchKind(target.target)!,
+              kind: dispatchKind,
               status: "queued",
               summary: "Dispatch queued after synthesis.",
               createdAt: now(),
@@ -376,19 +603,43 @@ export class SubconsciousLoopService {
       });
 
       let dispatchRecord: SubconsciousDispatchRecord | null = null;
-      let outcome: SubconsciousRunOutcome = "completed_no_dispatch";
+      let outcome: SubconsciousRunOutcome =
+        policy.permissionDecision === "blocked"
+          ? "suggest"
+          : policy.permissionDecision === "escalated"
+            ? "defer"
+            : dispatchKind
+              ? "dispatch"
+              : "suggest";
       let finalStage: SubconsciousRunStage = "completed";
-      if (settings.dispatchDefaults.autoDispatch) {
+      if (
+        settings.dispatchDefaults.autoDispatch &&
+        dispatchKind &&
+        policy.permissionDecision === "allowed"
+      ) {
         run = await this.advanceRun(run.id, { stage: "dispatching" });
+        if (coreTrace) {
+          this.deps.coreTraceService?.appendPhaseEvent(
+            coreTrace.id,
+            "dispatch",
+            "subconscious.dispatch_started",
+            `Dispatching ${humanizeDispatchKind(dispatchKind)}.`,
+            {
+              dispatchKind,
+            },
+          );
+        }
         dispatchRecord = await this.dispatchDecision(target.target, decision, evidence);
         if (dispatchRecord) {
           this.dispatchRepo.create(dispatchRecord);
           outcome =
             dispatchRecord.status === "failed"
               ? "failed"
-              : dispatchRecord.status === "skipped"
-                ? "completed_no_dispatch"
-                : "completed";
+              : policy.notificationIntent === "completed_while_away"
+                ? "notify"
+                : dispatchRecord.status === "skipped"
+                  ? "defer"
+                  : "dispatch";
           if (dispatchRecord.status === "failed") {
             finalStage = "failed";
           }
@@ -400,10 +651,17 @@ export class SubconsciousLoopService {
         outcome,
         dispatchKind: dispatchRecord?.kind,
         dispatchStatus: dispatchRecord?.status,
+        confidence: policy.confidence,
+        riskLevel: policy.riskLevel,
+        evidenceSources: policy.evidenceSources,
+        evidenceFreshness: policy.evidenceFreshness,
+        permissionDecision: policy.permissionDecision,
+        notificationIntent: policy.notificationIntent,
         completedAt: now(),
         rejectedHypothesisIds: decision.rejectedHypothesisIds,
       });
       const finalRun = this.runRepo.findById(run.id) || run;
+      this.brainStatus = "idle";
       await this.artifactStore.writeRunArtifacts({
         target: target.target,
         run: finalRun,
@@ -414,33 +672,37 @@ export class SubconsciousLoopService {
         backlog: this.backlogRepo.listByTarget(target.key, 50),
         dispatch: dispatchRecord,
       });
-      this.targetRepo.update(target.key, {
-        state: "idle",
-        health: finalStage === "failed" ? "blocked" : target.health,
-        lastWinner: decision.winnerSummary,
-        lastRunAt: finalRun.completedAt,
-        lastEvidenceAt: pick(evidence)?.createdAt,
-        backlogCount: this.backlogRepo.countOpenByTarget(target.key),
-        lastDispatchKind: dispatchRecord?.kind,
-        lastDispatchStatus: dispatchRecord?.status,
+      await this.finalizeTargetAfterRun(target, finalRun, decision, dispatchRecord, evidence);
+      await this.notifyForRun(target.target, finalRun, decision, dispatchRecord);
+      await this.maybeRunDream(target.target);
+      if (coreTrace) {
+        this.deps.coreTraceService?.appendPhaseEvent(
+          coreTrace.id,
+          dispatchRecord ? "dispatch" : "complete",
+          dispatchRecord ? "subconscious.dispatch_completed" : "subconscious.run_completed",
+          dispatchRecord?.summary || decision.winnerSummary,
+          {
+            dispatchStatus: dispatchRecord?.status,
+            outcome,
+          },
+        );
+        this.deps.coreTraceService?.completeTrace(coreTrace.id, "completed", finalRun.outcome || outcome);
+        await this.finalizeCoreLearning(coreTrace.id, target.target, finalRun.id);
+      }
+      logger.info("Run completed", {
+        runId: finalRun.id,
+        targetKey: target.key,
+        targetLabel: target.target.label,
+        stage: finalRun.stage,
+        outcome: finalRun.outcome,
+        dispatchKind: finalRun.dispatchKind || null,
+        dispatchStatus: finalRun.dispatchStatus || null,
+        permissionDecision: finalRun.permissionDecision || null,
       });
-      await this.artifactStore.writeTargetState(
-        this.targetRepo.findByKey(target.key) || target,
-        evidence,
-        this.backlogRepo.listByTarget(target.key, 50),
-      );
-      await this.artifactStore.writeBrainState(this.getBrainSummary(), this.targetRepo.list());
-      await this.deps.notify?.({
-        type: finalStage === "failed" ? "warning" : "info",
-        title: `Subconscious ${finalStage === "failed" ? "failed" : "completed"}`,
-        message: `${target.target.label}: ${decision.winnerSummary}`,
-        workspaceId: target.target.workspaceId,
-        taskId: dispatchRecord?.taskId,
-      });
-      this.brainStatus = "idle";
       return this.runRepo.findById(run.id) || finalRun;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      this.brainStatus = "idle";
       this.runRepo.update(run.id, {
         stage: "failed",
         outcome: "failed",
@@ -451,9 +713,44 @@ export class SubconsciousLoopService {
         state: "idle",
         health: "blocked",
       });
-      this.brainStatus = "idle";
+      await this.appendJournal({
+        runId: run.id,
+        targetKey: target.key,
+        kind: "action",
+        summary: `Run failed for ${target.target.label}.`,
+        details: message,
+        outcome: "failed",
+      });
+      await this.artifactStore.writeBrainState(this.getBrainSummary(), this.targetRepo.list());
+      if (coreTrace) {
+        this.deps.coreTraceService?.appendPhaseEvent(
+          coreTrace.id,
+          "error",
+          "subconscious.error",
+          message,
+        );
+        this.deps.coreTraceService?.failTrace(coreTrace.id, message);
+        await this.finalizeCoreLearning(coreTrace.id, target.target, run.id);
+      }
+      logger.error("Run failed", {
+        runId: run.id,
+        targetKey: target.key,
+        targetLabel: target.target.label,
+        error: message,
+      });
       return this.runRepo.findById(run.id) || null;
     }
+  }
+
+  private resolveAutomationProfileForTarget(target: SubconsciousTargetRef) {
+    const repo = this.deps.automationProfileRepo;
+    if (!repo) return undefined;
+    if (target.agentRoleId) {
+      return repo.findByAgentRoleId(target.agentRoleId);
+    }
+    const enabled = repo.listEnabled();
+    if (!enabled.length) return undefined;
+    return enabled[0];
   }
 
   async retryRun(runId: string): Promise<SubconsciousRun | null> {
@@ -471,7 +768,7 @@ export class SubconsciousLoopService {
     if (reviewStatus === "dismissed") {
       this.runRepo.update(runId, {
         stage: "blocked",
-        outcome: "blocked",
+        outcome: "dismiss",
         blockedReason: "Dismissed during compatibility review.",
         completedAt: now(),
       });
@@ -490,6 +787,8 @@ export class SubconsciousLoopService {
       state: "stale",
       health: "watch",
       lastDispatchStatus: "skipped",
+      lastMeaningfulOutcome: "dismiss",
+      lastActionAt: now(),
     });
     return this.targetRepo.findByKey(targetKey);
   }
@@ -508,6 +807,8 @@ export class SubconsciousLoopService {
       recursive: true,
       force: true,
     }).catch(() => undefined);
+    this.lastDreamAt = undefined;
+    this.lastNotificationByIntent.clear();
     return {
       resetAt: now(),
       deleted,
@@ -645,6 +946,300 @@ export class SubconsciousLoopService {
     };
   }
 
+  private pruneSessionOnlyState(): void {
+    const durableKinds = new Set(this.getSettings().durableTargetKinds);
+    const staleKeys = this.targetRepo
+      .list()
+      .filter((target) => !durableKinds.has(target.target.kind))
+      .map((target) => target.key);
+    if (staleKeys.length) {
+      clearSubconsciousTargetData(this.db, staleKeys);
+    }
+  }
+
+  private computeJitterMs(targetKey: string, cadenceMinutes: number): number {
+    const maxJitter = Math.min(cadenceMinutes * 60 * 1000 * 0.1, 15 * 60 * 1000);
+    if (maxJitter <= 0) return 0;
+    return hashNumber(targetKey) % Math.max(1, Math.round(maxJitter));
+  }
+
+  private computeNextEligibleAt(target: SubconsciousTargetSummary, completedAt: number): number {
+    return completedAt + this.getSettings().cadenceMinutes * 60 * 1000 + (target.jitterMs || 0);
+  }
+
+  private computeExpiryAt(latestEvidenceAt?: number): number | undefined {
+    if (!latestEvidenceAt) return undefined;
+    return latestEvidenceAt + 30 * 24 * 60 * 60 * 1000;
+  }
+
+  private completeSleepRun(
+    run: SubconsciousRun,
+    reason: string,
+  ): SubconsciousRun {
+    this.runRepo.update(run.id, {
+      stage: "completed",
+      outcome: "sleep",
+      blockedReason: reason,
+      completedAt: now(),
+      confidence: 0.25,
+      riskLevel: "low",
+      evidenceSources: [],
+      evidenceFreshness: 0,
+      permissionDecision: "blocked",
+      notificationIntent: "input_needed",
+    });
+    const finalRun = this.runRepo.findById(run.id) || run;
+    return finalRun;
+  }
+
+  private normalizeLegacyOutcomeVocabulary(): void {
+    const statements = [
+      "UPDATE subconscious_runs SET outcome = 'dispatch' WHERE outcome = 'completed'",
+      "UPDATE subconscious_runs SET outcome = 'suggest' WHERE outcome = 'completed_no_dispatch'",
+      "UPDATE subconscious_decisions SET outcome = 'dispatch' WHERE outcome = 'completed'",
+      "UPDATE subconscious_decisions SET outcome = 'suggest' WHERE outcome = 'completed_no_dispatch'",
+      "UPDATE subconscious_targets SET last_meaningful_outcome = 'dispatch' WHERE last_meaningful_outcome = 'completed'",
+      "UPDATE subconscious_targets SET last_meaningful_outcome = 'suggest' WHERE last_meaningful_outcome = 'completed_no_dispatch'",
+    ];
+    try {
+      for (const sql of statements) {
+        this.db.prepare(sql).run();
+      }
+    } catch (error) {
+      logger.warn("Skipping legacy outcome vocabulary normalization:", error);
+    }
+  }
+
+  private async appendJournal(input: Omit<SubconsciousJournalEntry, "id" | "createdAt"> & { createdAt?: number }): Promise<void> {
+    if (!this.getSettings().journalingEnabled) return;
+    await this.artifactStore.appendJournalEntry({
+      id: randomUUID(),
+      createdAt: input.createdAt ?? now(),
+      ...input,
+    });
+  }
+
+  private evaluatePolicy(
+    target: SubconsciousTargetSummary,
+    decision: SubconsciousDecision,
+    evidence: SubconsciousEvidence[],
+    dispatchKind?: SubconsciousDispatchKind,
+  ): {
+    confidence: number;
+    riskLevel: SubconsciousRiskLevel;
+    evidenceSources: string[];
+    evidenceFreshness: number;
+    permissionDecision: SubconsciousPermissionDecision;
+    notificationIntent?: SubconsciousNotificationIntent;
+  } {
+    const settings = this.getSettings();
+    const evidenceSources = uniqueBy(evidence.map((item) => item.type), (value) => value);
+    const newestEvidenceAt = Math.max(...evidence.map((item) => item.createdAt), 0);
+    const ageHours = newestEvidenceAt ? (now() - newestEvidenceAt) / (60 * 60 * 1000) : 999;
+    const evidenceFreshness = clamp(1 - ageHours / 72, 0, 1);
+    const confidence = clamp(
+      0.45 + Math.min(evidence.length, 5) * 0.08 + (decision.winnerSummary.length > 0 ? 0.08 : 0),
+      0,
+      0.98,
+    );
+    const riskLevel: SubconsciousRiskLevel =
+      dispatchKind === "code_change_task" ? "high" : dispatchKind === "task" ? "medium" : "low";
+    let permissionDecision: SubconsciousPermissionDecision = "allowed";
+    if (!dispatchKind) {
+      permissionDecision = "blocked";
+    } else if (!settings.dispatchDefaults.autoDispatch) {
+      permissionDecision = "escalated";
+    } else if (riskLevel === "high") {
+      permissionDecision = settings.trustedTargetKeys.includes(target.key) ? "allowed" : "escalated";
+    } else if (riskLevel === "medium" && settings.autonomyMode === "recommendation_first") {
+      permissionDecision = "escalated";
+    } else if (confidence < 0.55 || evidenceFreshness < 0.2) {
+      permissionDecision = "escalated";
+    }
+
+    let notificationIntent: SubconsciousNotificationIntent | undefined;
+    if (permissionDecision === "escalated") {
+      notificationIntent = "input_needed";
+    } else if (permissionDecision === "allowed" && !this.deps.isUserFocused?.()) {
+      notificationIntent = "completed_while_away";
+    } else if (permissionDecision === "allowed" && dispatchKind) {
+      notificationIntent = "important_action_taken";
+    }
+
+    return {
+      confidence,
+      riskLevel,
+      evidenceSources,
+      evidenceFreshness,
+      permissionDecision,
+      notificationIntent,
+    };
+  }
+
+  private shouldNotify(intent?: SubconsciousNotificationIntent): boolean {
+    if (!intent) return false;
+    const policy = this.getSettings().notificationPolicy;
+    const hour = new Date().getHours();
+    const inQuietHours =
+      policy.quietHoursStart === policy.quietHoursEnd
+        ? false
+        : policy.quietHoursStart < policy.quietHoursEnd
+          ? hour >= policy.quietHoursStart && hour < policy.quietHoursEnd
+          : hour >= policy.quietHoursStart || hour < policy.quietHoursEnd;
+    if (inQuietHours && intent !== "input_needed") return false;
+    const enabled =
+      (intent === "input_needed" && policy.inputNeeded) ||
+      (intent === "important_action_taken" && policy.importantActionTaken) ||
+      (intent === "completed_while_away" && policy.completedWhileAway);
+    if (!enabled) return false;
+    const lastNotifiedAt = this.lastNotificationByIntent.get(intent) || 0;
+    return now() - lastNotifiedAt >= policy.throttleMinutes * 60 * 1000;
+  }
+
+  private async notifyForRun(
+    target: SubconsciousTargetRef,
+    run: SubconsciousRun,
+    decision?: SubconsciousDecision,
+    dispatchRecord?: SubconsciousDispatchRecord | null,
+  ): Promise<void> {
+    if (!run.notificationIntent || !this.shouldNotify(run.notificationIntent)) return;
+    this.lastNotificationByIntent.set(run.notificationIntent, now());
+    await this.appendJournal({
+      runId: run.id,
+      targetKey: target.key,
+      kind: "notification",
+      summary: `Notification emitted for ${target.label}.`,
+      details: run.notificationIntent,
+      outcome: run.outcome,
+    });
+    await this.deps.notify?.({
+      type: run.outcome === "failed" ? "warning" : "info",
+      title:
+        run.notificationIntent === "input_needed"
+          ? "Subconscious needs input"
+          : run.notificationIntent === "completed_while_away"
+            ? "Subconscious completed work while you were away"
+            : "Subconscious took action",
+      message: `${target.label}: ${decision?.winnerSummary || run.evidenceSummary}`,
+      workspaceId: target.workspaceId,
+      taskId: dispatchRecord?.taskId,
+    });
+    logger.info("Notification emitted", {
+      runId: run.id,
+      targetKey: target.key,
+      intent: run.notificationIntent,
+      taskId: dispatchRecord?.taskId || null,
+    });
+  }
+
+  private async finalizeTargetAfterRun(
+    target: SubconsciousTargetSummary,
+    run: SubconsciousRun,
+    decision: SubconsciousDecision | undefined,
+    dispatchRecord: SubconsciousDispatchRecord | null,
+    evidence: SubconsciousEvidence[],
+  ): Promise<void> {
+    const updated = {
+      state: "idle" as const,
+      health: run.stage === "failed" ? ("blocked" as const) : target.health,
+      lastWinner: decision?.winnerSummary || target.lastWinner,
+      lastRunAt: run.completedAt,
+      lastEvidenceAt: pick(evidence)?.createdAt || target.lastEvidenceAt,
+      lastObservedAt: pick(evidence)?.createdAt || now(),
+      lastActionAt: run.completedAt || now(),
+      backlogCount: this.backlogRepo.countOpenByTarget(target.key),
+      lastDispatchKind: dispatchRecord?.kind,
+      lastDispatchStatus: dispatchRecord?.status,
+      nextEligibleAt: this.computeNextEligibleAt(target, run.completedAt || now()),
+      expiresAt: this.computeExpiryAt(pick(evidence)?.createdAt || target.lastEvidenceAt),
+      lastMeaningfulOutcome: run.outcome,
+    };
+    this.targetRepo.update(target.key, updated);
+    const nextTarget = this.targetRepo.findByKey(target.key) || { ...target, ...updated };
+    await this.appendJournal({
+      runId: run.id,
+      targetKey: target.key,
+      kind: "action",
+      summary: `Run ${run.outcome || "completed"} for ${target.target.label}.`,
+      details: dispatchRecord?.summary || decision?.recommendation || run.blockedReason,
+      outcome: run.outcome,
+    });
+    await this.artifactStore.writeTargetState(
+      nextTarget,
+      evidence,
+      this.backlogRepo.listByTarget(target.key, 50),
+    );
+    await this.artifactStore.writeBrainState(this.getBrainSummary(), this.targetRepo.list());
+  }
+
+  private async maybeRunDream(target?: SubconsciousTargetRef): Promise<void> {
+    const settings = this.getSettings();
+    if (!settings.dreamsEnabled) return;
+    const cadenceMs = settings.dreamCadenceHours * 60 * 60 * 1000;
+    if (this.lastDreamAt && now() - this.lastDreamAt < cadenceMs) return;
+    const journal = await this.artifactStore.readJournalEntries(target?.key, 80);
+    if (!journal.length) return;
+    const digest = uniqueBy(
+      journal
+        .filter((entry) => entry.kind !== "notification")
+        .slice(0, 6)
+        .map((entry) => entry.summary),
+      (entry) => entry,
+    );
+    const memoryUpdates: SubconsciousMemoryItem[] = digest.map((summary, index) => ({
+      id: randomUUID(),
+      targetKey: target?.key,
+      bucket:
+        index === 0
+          ? "open_thread"
+          : /pattern|guardrail|repeat|again/i.test(summary)
+            ? "reliable_pattern"
+            : "project_state",
+      summary,
+      confidence: clamp(0.55 + index * 0.05, 0.55, 0.85),
+      stale: false,
+      sourceRunIds: uniqueBy(
+        journal.map((entry) => entry.runId).filter((value): value is string => Boolean(value)),
+        (value) => value,
+      ).slice(0, 6),
+      createdAt: now(),
+      updatedAt: now(),
+      lastValidatedAt: now(),
+    }));
+    const artifact: SubconsciousDreamArtifact = {
+      id: randomUUID(),
+      targetKey: target?.key,
+      createdAt: now(),
+      digest,
+      backlogProposals: uniqueBy(
+        journal
+          .filter((entry) => entry.outcome === "defer" || entry.kind === "decision")
+          .map((entry) => entry.summary),
+        (entry) => entry,
+      ).slice(0, 5),
+      targetHealthSummary: target
+        ? `${target.label} is currently ${this.targetRepo.findByKey(target.key)?.health || "healthy"}.`
+        : `Global brain reviewed ${journal.length} journal entries.`,
+      memoryUpdates,
+    };
+    await this.artifactStore.writeMemoryIndex(target || null, memoryUpdates);
+    await this.artifactStore.writeDreamArtifact(target || null, artifact);
+    await this.appendJournal({
+      targetKey: target?.key,
+      kind: "dream",
+      summary: target ? `Dream distilled ${target.label}.` : "Dream distilled the global brain.",
+      details: digest.join(" | "),
+    });
+    this.lastDreamAt = artifact.createdAt;
+    await this.artifactStore.writeBrainState(this.getBrainSummary(), this.targetRepo.list());
+    logger.info("Dream distilled", {
+      targetKey: target?.key || null,
+      digestCount: artifact.digest.length,
+      backlogProposalCount: artifact.backlogProposals.length,
+      memoryUpdateCount: artifact.memoryUpdates.length,
+    });
+  }
+
   private resetInterval(): void {
     if (this.intervalHandle) {
       clearInterval(this.intervalHandle);
@@ -661,7 +1256,7 @@ export class SubconsciousLoopService {
     const preferred = this.deps.getGlobalRoot?.();
     if (preferred) return preferred;
     const workspace = this.resolveDefaultWorkspace();
-    return workspace?.path || process.cwd();
+    return workspace?.path || getUserDataDir();
   }
 
   private resolveDefaultWorkspace() {
@@ -684,8 +1279,8 @@ export class SubconsciousLoopService {
       if (isCoworkRepoIdentity(a.repoIdentity) !== isCoworkRepoIdentity(b.repoIdentity)) {
         return isCoworkRepoIdentity(a.repoIdentity) ? -1 : 1;
       }
-      const aAtRoot = a.workspace.path === a.repoRoot;
-      const bAtRoot = b.workspace.path === b.repoRoot;
+      const aAtRoot = a.workspaceAtRepoRoot;
+      const bAtRoot = b.workspaceAtRepoRoot;
       if (aAtRoot !== bAtRoot) {
         return aAtRoot ? -1 : 1;
       }
@@ -704,11 +1299,16 @@ export class SubconsciousLoopService {
         const isGitRepo = await GitService.isGitRepo(workspace.path).catch(() => false);
         if (!isGitRepo) return null;
         const repoRoot = await GitService.getRepoRoot(workspace.path).catch(() => workspace.path);
+        const [normalizedWorkspacePath, normalizedRepoRoot] = await Promise.all([
+          normalizeComparablePath(workspace.path),
+          normalizeComparablePath(repoRoot),
+        ]);
         const remotes = await GitService.getRemotes(repoRoot);
         const preferredRemote = remotes.find((remote) => remote.name === "origin") || remotes[0];
         return {
           workspace,
           repoRoot,
+          workspaceAtRepoRoot: normalizedWorkspacePath === normalizedRepoRoot,
           remoteName: preferredRemote?.name,
           remoteUrl: preferredRemote?.url,
           repoIdentity: normalizeRepoIdentity(
@@ -734,6 +1334,7 @@ export class SubconsciousLoopService {
     const targetsByWorkspaceId = new Map<string, SubconsciousTargetRef>();
     for (const candidates of grouped.values()) {
       const primary = this.choosePrimaryCodeWorkspace(candidates);
+      const canonicalRepoRoot = primary.workspaceAtRepoRoot ? primary.workspace.path : primary.repoRoot;
       const targetKey = buildCodeTargetKey(primary);
       const label = isCoworkRepoIdentity(primary.repoIdentity)
         ? "CoWork OS source code"
@@ -744,10 +1345,10 @@ export class SubconsciousLoopService {
         key: targetKey,
         kind: "code_workspace",
         workspaceId: primary.workspace.id,
-        codeWorkspacePath: primary.repoRoot,
+        codeWorkspacePath: canonicalRepoRoot,
         label,
         metadata: {
-          repoRoot: primary.repoRoot,
+          repoRoot: canonicalRepoRoot,
           repoIdentity: primary.repoIdentity,
           remoteName: primary.remoteName,
           remoteUrl: primary.remoteUrl,
@@ -780,6 +1381,14 @@ export class SubconsciousLoopService {
             ? "watch"
             : current?.health || legacy?.health || "healthy",
       state: current?.state === "active" || legacy?.state === "active" ? "active" : current?.state || legacy?.state || "idle",
+      persistence: current?.persistence || legacy?.persistence || "durable",
+      missedRunPolicy: current?.missedRunPolicy || legacy?.missedRunPolicy || "catchUp",
+      nextEligibleAt: current?.nextEligibleAt || legacy?.nextEligibleAt,
+      lastObservedAt: Math.max(current?.lastObservedAt || 0, legacy?.lastObservedAt || 0) || undefined,
+      lastActionAt: Math.max(current?.lastActionAt || 0, legacy?.lastActionAt || 0) || undefined,
+      expiresAt: Math.max(current?.expiresAt || 0, legacy?.expiresAt || 0) || undefined,
+      jitterMs: current?.jitterMs || legacy?.jitterMs,
+      lastMeaningfulOutcome: current?.lastMeaningfulOutcome || legacy?.lastMeaningfulOutcome,
       lastWinner: current?.lastWinner || legacy?.lastWinner,
       lastRunAt: Math.max(current?.lastRunAt || 0, legacy?.lastRunAt || 0) || undefined,
       lastEvidenceAt: Math.max(current?.lastEvidenceAt || 0, legacy?.lastEvidenceAt || 0) || undefined,
@@ -965,11 +1574,11 @@ export class SubconsciousLoopService {
       for (const row of rows) {
         const workspace = this.workspaceRepo.findById(String(row.workspace_id));
         const target: SubconsciousTargetRef = {
-          key: `mailbox_thread:${row.thread_id}`,
-          kind: "mailbox_thread",
+          key: workspace?.id ? `workspace:${workspace.id}` : "global:brain",
+          kind: workspace?.id ? "workspace" : "global",
           workspaceId: workspace?.id,
-          mailboxThreadId: String(row.thread_id),
-          label: String(row.subject || row.thread_id),
+          label: workspace?.name || "Global brain",
+          metadata: { sourceType: "mailbox_thread", threadId: String(row.thread_id) },
         };
         pushEvidence(target, {
           type: "mailbox_event",
@@ -980,24 +1589,33 @@ export class SubconsciousLoopService {
       }
     }
 
-    if (this.hasTable("agent_roles")) {
+    if (this.hasTable("automation_profiles") && this.hasTable("agent_roles")) {
       const rows = this.db
         .prepare(
-          `SELECT id, name, heartbeat_enabled, last_heartbeat_at, heartbeat_status, heartbeat_last_pulse_result
-           FROM agent_roles
-           WHERE COALESCE(heartbeat_enabled, 0) = 1`,
+          `SELECT ap.agent_role_id AS id,
+                  ar.name,
+                  ar.display_name,
+                  ap.last_heartbeat_at,
+                  ap.heartbeat_status,
+                  ap.heartbeat_last_pulse_result
+           FROM automation_profiles ap
+           JOIN agent_roles ar ON ar.id = ap.agent_role_id
+           WHERE ap.enabled = 1
+             AND COALESCE(ar.is_active, 1) = 1
+             AND COALESCE(ar.role_kind, 'custom') != 'persona_template'`,
         )
         .all() as Any[];
       for (const row of rows) {
+        const label = String(row.display_name || row.name || row.id);
         const target: SubconsciousTargetRef = {
           key: `agent_role:${row.id}`,
           kind: "agent_role",
           agentRoleId: String(row.id),
-          label: String(row.name || row.id),
+          label,
         };
         pushEvidence(target, {
           type: "heartbeat_signal",
-          summary: `Heartbeat ${row.heartbeat_status || "idle"} for ${row.name || row.id}`,
+          summary: `Heartbeat ${row.heartbeat_status || "idle"} for ${label}`,
           details: row.heartbeat_last_pulse_result || undefined,
           fingerprint: stableHash(["heartbeat", row.id, row.last_heartbeat_at, row.heartbeat_status]),
           createdAt: Number(row.last_heartbeat_at || now()),
@@ -1036,13 +1654,16 @@ export class SubconsciousLoopService {
         )
         .all() as Any[];
       for (const row of rows) {
+        const workspaceId =
+          typeof row.workspace_id === "string" && row.workspace_id.trim().length > 0
+            ? String(row.workspace_id)
+            : undefined;
         const target: SubconsciousTargetRef = {
-          key: `event_trigger:${row.id}`,
-          kind: "event_trigger",
-          workspaceId: row.workspace_id || undefined,
-          eventTriggerId: String(row.id),
-          label: String(row.name || row.id),
-          metadata: { source: row.source },
+          key: workspaceId ? `workspace:${workspaceId}` : "global:brain",
+          kind: workspaceId ? "workspace" : "global",
+          workspaceId,
+          label: workspaceId ? `Workspace ${workspaceId}` : "Global brain",
+          metadata: { sourceType: "event_trigger", triggerId: String(row.id), source: row.source },
         };
         pushEvidence(target, {
           type: "event_trigger",
@@ -1056,11 +1677,11 @@ export class SubconsciousLoopService {
     const cronStore = loadCronStoreSync(getCronStorePath());
     for (const job of cronStore.jobs) {
       const target: SubconsciousTargetRef = {
-        key: `scheduled_task:${job.id}`,
-        kind: "scheduled_task",
+        key: job.workspaceId ? `workspace:${job.workspaceId}` : "global:brain",
+        kind: job.workspaceId ? "workspace" : "global",
         workspaceId: job.workspaceId,
-        scheduledTaskId: job.id,
-        label: job.name,
+        label: job.workspaceId ? `Workspace ${job.workspaceId}` : "Global brain",
+        metadata: { sourceType: "scheduled_task", scheduledTaskId: job.id, jobName: job.name },
       };
       pushEvidence(target, {
         type: "scheduled_task",
@@ -1081,17 +1702,57 @@ export class SubconsciousLoopService {
       for (const row of rows) {
         const workspace = this.workspaceRepo.findById(String(row.workspace_id));
         const target: SubconsciousTargetRef = {
-          key: `briefing:${row.workspace_id}`,
-          kind: "briefing",
+          key: `workspace:${row.workspace_id}`,
+          kind: "workspace",
           workspaceId: String(row.workspace_id),
-          briefingId: String(row.workspace_id),
-          label: workspace ? `${workspace.name} briefing` : `Briefing ${row.workspace_id}`,
+          label: workspace ? workspace.name : `Workspace ${row.workspace_id}`,
+          metadata: { sourceType: "briefing", briefingId: String(row.workspace_id) },
         };
         pushEvidence(target, {
           type: "briefing",
           summary: `${row.enabled ? "Enabled" : "Paused"} briefing at ${row.schedule_time || "08:00"}`,
           fingerprint: stableHash(["briefing", row.workspace_id, row.schedule_time, row.updated_at, row.enabled]),
           createdAt: Number(row.updated_at || now()),
+        });
+      }
+    }
+
+    if (this.hasTable("improvement_runs")) {
+      const rows = this.db
+        .prepare(
+          `SELECT id, workspace_id, status, review_status, promotion_status, promotion_error, pull_request, completed_at, created_at
+           FROM improvement_runs
+           WHERE pull_request IS NOT NULL AND pull_request != ''
+           ORDER BY COALESCE(completed_at, created_at) DESC
+           LIMIT 50`,
+        )
+        .all() as Any[];
+      for (const row of rows) {
+        const pullRequest = this.safeJsonParseRecord(row.pull_request);
+        const prNumber = pullRequest?.number || pullRequest?.url || row.id;
+        const target: SubconsciousTargetRef = {
+          key: `pull_request:${prNumber}`,
+          kind: "pull_request",
+          workspaceId: row.workspace_id || undefined,
+          pullRequestId: String(prNumber),
+          label: pullRequest?.title || `Pull request ${prNumber}`,
+          metadata: {
+            url: pullRequest?.url,
+            branchName: pullRequest?.branchName,
+            baseBranch: pullRequest?.baseBranch,
+          },
+        };
+        const signals: string[] = [];
+        if (row.review_status && row.review_status !== "accepted") signals.push("review requested");
+        if (row.promotion_status === "promotion_failed") signals.push("CI failed");
+        if (row.promotion_error) signals.push("comments unresolved");
+        if (row.status === "running" || row.status === "queued") signals.push("inactivity timeout");
+        pushEvidence(target, {
+          type: "pull_request_activity",
+          summary: `${signals.join(", ") || "pull request activity"}: ${target.label}`,
+          details: pullRequest?.url || row.promotion_error || undefined,
+          fingerprint: stableHash(["pull_request", prNumber, row.status, row.review_status, row.promotion_status, row.promotion_error]),
+          createdAt: Number(row.completed_at || row.created_at || now()),
         });
       }
     }
@@ -1116,44 +1777,80 @@ export class SubconsciousLoopService {
     target: SubconsciousTargetRef,
     evidence: SubconsciousEvidence[],
     backlogCount: number,
+    current?: SubconsciousTargetSummary,
   ): SubconsciousTargetSummary {
     const lastDecision = this.decisionRepo.findLatestByTarget(target.key);
     const lastDispatch = pick(this.dispatchRepo.listByTarget(target.key, 1));
-    const lastEvidenceAt = pick(evidence)?.createdAt;
+    const lastEvidenceAt = pick(evidence)?.createdAt || current?.lastEvidenceAt;
+    const settings = this.getSettings();
+    const persistence = settings.durableTargetKinds.includes(target.kind) ? "durable" : "sessionOnly";
+    const jitterMs = current?.jitterMs ?? this.computeJitterMs(target.key, settings.cadenceMinutes);
     let health: SubconsciousHealth = "healthy";
     if (evidence.some((item) => item.type === "code_failure")) {
       health = "blocked";
     } else if (evidence.length >= 3) {
       health = "watch";
+    } else if (current?.health) {
+      health = current.health;
     }
     return {
       key: target.key,
       target,
       health,
-      state: "idle",
-      lastWinner: lastDecision?.winnerSummary,
+      state: current?.state === "active" ? "active" : "idle",
+      persistence,
+      missedRunPolicy: settings.catchUpOnRestart ? "catchUp" : "skip",
+      nextEligibleAt: current?.nextEligibleAt,
+      lastObservedAt: lastEvidenceAt || current?.lastObservedAt,
+      lastActionAt: current?.lastActionAt,
+      expiresAt: this.computeExpiryAt(lastEvidenceAt) || current?.expiresAt,
+      jitterMs,
+      lastMeaningfulOutcome: current?.lastMeaningfulOutcome,
+      lastWinner: lastDecision?.winnerSummary || current?.lastWinner,
       lastRunAt: this.runRepo.list({ targetKey: target.key, limit: 1 })[0]?.completedAt,
       lastEvidenceAt,
       backlogCount,
       evidenceFingerprint: evidence.length
         ? stableHash(evidence.map((item) => item.fingerprint))
-        : undefined,
+        : current?.evidenceFingerprint,
       lastDispatchKind: lastDispatch?.kind,
       lastDispatchStatus: lastDispatch?.status,
     };
   }
 
+  private isTargetActionable(target: SubconsciousTargetSummary): boolean {
+    const evidenceCount = this.latestEvidenceByTarget.get(target.key)?.length || 0;
+    if (target.backlogCount > 0) return true;
+    if (evidenceCount > 0) return true;
+    if (target.lastMeaningfulOutcome === "defer") return true;
+    return false;
+  }
+
+  private scoreTargetForRun(target: SubconsciousTargetSummary): number {
+    const evidence = this.latestEvidenceByTarget.get(target.key) || [];
+    const latestEvidenceAt = evidence[0]?.createdAt || target.lastEvidenceAt || 0;
+    const freshnessHours = latestEvidenceAt ? (now() - latestEvidenceAt) / (60 * 60 * 1000) : 9999;
+    const freshnessBonus = latestEvidenceAt ? Math.max(0, 3 - Math.min(3, freshnessHours / 12)) : 0;
+    return (
+      target.backlogCount * 3 +
+      evidence.length * 2 +
+      (target.health === "blocked" ? 4 : target.health === "watch" ? 1.5 : 0) +
+      (target.lastMeaningfulOutcome === "defer" ? 1.5 : 0) +
+      freshnessBonus
+    );
+  }
+
   private pickTargetForRun(): SubconsciousTargetSummary | undefined {
-    const targets = this.targetRepo.list().filter((target) => target.key !== "global:brain");
+    const currentTime = now();
+    const targets = this.targetRepo
+      .list()
+      .filter((target) => target.key !== "global:brain")
+      .filter((target) => !target.expiresAt || target.expiresAt > currentTime)
+      .filter((target) => !target.nextEligibleAt || target.nextEligibleAt <= currentTime)
+      .filter((target) => this.isTargetActionable(target));
     return targets.sort((a, b) => {
-      const priorityA =
-        a.backlogCount +
-        (a.health === "blocked" ? 3 : a.health === "watch" ? 1 : 0) +
-        (isCoworkRepoIdentity(String(a.target.metadata?.repoIdentity || "")) ? 1 : 0);
-      const priorityB =
-        b.backlogCount +
-        (b.health === "blocked" ? 3 : b.health === "watch" ? 1 : 0) +
-        (isCoworkRepoIdentity(String(b.target.metadata?.repoIdentity || "")) ? 1 : 0);
+      const priorityA = this.scoreTargetForRun(a);
+      const priorityB = this.scoreTargetForRun(b);
       if (priorityB !== priorityA) return priorityB - priorityA;
       return (b.lastEvidenceAt || 0) - (a.lastEvidenceAt || 0);
     })[0];
@@ -1277,7 +1974,7 @@ export class SubconsciousLoopService {
       rejectedHypothesisIds: rejected,
       rationale: critiques.find((item) => item.hypothesisId === winner.id)?.response || winner.rationale,
       nextBacklog,
-      outcome: executor ? "completed" : "completed_no_dispatch",
+      outcome: executor ? "dispatch" : "suggest",
       createdAt: now(),
     };
   }
@@ -1316,6 +2013,7 @@ export class SubconsciousLoopService {
       typeof target.metadata?.repoRoot === "string"
         ? target.metadata.repoRoot
         : target.codeWorkspacePath;
+    const normalizedRepoRoot = repoRoot ? await normalizeComparablePath(repoRoot) : undefined;
     const workspaceIds = Array.isArray(target.metadata?.workspaceIds)
       ? target.metadata.workspaceIds.filter((value): value is string => typeof value === "string")
       : [];
@@ -1326,18 +2024,24 @@ export class SubconsciousLoopService {
     for (const workspaceId of candidates) {
       const workspace = this.workspaceRepo.findById(workspaceId);
       if (!workspace || workspace.isTemp || !workspace.path) continue;
-      if (!repoRoot) return workspace;
+      if (!normalizedRepoRoot) return workspace;
       const resolvedRepoRoot = await GitService.getRepoRoot(workspace.path).catch(() => null);
-      if (resolvedRepoRoot === repoRoot) {
+      const normalizedWorkspaceRepoRoot = resolvedRepoRoot
+        ? await normalizeComparablePath(resolvedRepoRoot)
+        : null;
+      if (normalizedWorkspaceRepoRoot === normalizedRepoRoot) {
         return workspace;
       }
     }
 
-    if (repoRoot) {
+    if (normalizedRepoRoot) {
       for (const workspace of this.workspaceRepo.findAll()) {
         if (workspace.isTemp || !workspace.path) continue;
         const resolvedRepoRoot = await GitService.getRepoRoot(workspace.path).catch(() => null);
-        if (resolvedRepoRoot === repoRoot) {
+        const normalizedWorkspaceRepoRoot = resolvedRepoRoot
+          ? await normalizeComparablePath(resolvedRepoRoot)
+          : null;
+        if (normalizedWorkspaceRepoRoot === normalizedRepoRoot) {
           return workspace;
         }
       }
@@ -1386,6 +2090,7 @@ export class SubconsciousLoopService {
             prompt,
             workspaceId,
             source: "subconscious",
+            agentConfig: buildCoreAutomationAgentConfig(),
           });
           return this.completedDispatch(decision, target, dispatchKind, {
             taskId: task.id,
@@ -1410,82 +2115,15 @@ export class SubconsciousLoopService {
             summary: `Created suggestion ${suggestion.id}.`,
           });
         }
-        case "scheduled_task": {
-          const cron = getCronService();
-          if (!cron || !workspaceId) {
-            return this.skippedDispatch(decision, target, dispatchKind, "Scheduled-task dispatch is unavailable.");
-          }
-          const result = await cron.add({
-            name: `Subconscious: ${target.label}`,
-            description: "Managed by the subconscious loop.",
-            enabled: true,
-            allowUserInput: false,
-            shellAccess: false,
-            schedule: { kind: "every", everyMs: Math.max(this.getSettings().cadenceMinutes, 60) * 60 * 1000 },
+        case "notify": {
+          await this.deps.notify?.({
+            type: "info",
+            title: `Subconscious: ${target.label}`,
+            message: decision.winnerSummary,
             workspaceId,
-            taskTitle: `Subconscious follow-up: ${target.label}`,
-            taskPrompt: decision.recommendation,
-          });
-          if (!result.ok) {
-            throw new Error(result.error);
-          }
-          return this.completedDispatch(decision, target, dispatchKind, {
-            externalRefId: result.job.id,
-            summary: `Created scheduled task ${result.job.id}.`,
-          });
-        }
-        case "briefing": {
-          const cron = getCronService();
-          if (!cron || !workspaceId) {
-            return this.skippedDispatch(decision, target, dispatchKind, "Briefing dispatch is unavailable.");
-          }
-          await syncDailyBriefingCronJob(cron, workspaceId, {
-            ...DEFAULT_BRIEFING_CONFIG,
-            enabled: true,
           });
           return this.completedDispatch(decision, target, dispatchKind, {
-            externalRefId: workspaceId,
-            summary: `Enabled briefing automation for ${workspaceId}.`,
-          });
-        }
-        case "event_trigger_update": {
-          const triggerService = this.deps.getTriggerService?.();
-          if (!triggerService || !target.eventTriggerId) {
-            return this.skippedDispatch(decision, target, dispatchKind, "Event trigger update is unavailable.");
-          }
-          const existing = triggerService.getTrigger(target.eventTriggerId);
-          if (!existing) {
-            return this.skippedDispatch(decision, target, dispatchKind, "Trigger no longer exists.");
-          }
-          triggerService.updateTrigger(existing.id, {
-            description: `${existing.description || ""}\n[Subconscious] ${decision.winnerSummary}`.trim(),
-            enabled: true,
-          });
-          return this.completedDispatch(decision, target, dispatchKind, {
-            externalRefId: existing.id,
-            summary: `Updated trigger ${existing.id}.`,
-          });
-        }
-        case "mailbox_automation": {
-          if (!workspaceId || !target.mailboxThreadId) {
-            return this.skippedDispatch(decision, target, dispatchKind, "Mailbox automation needs a thread target.");
-          }
-          const record = MailboxAutomationRegistry.createRule({
-            name: `Subconscious: ${target.label}`,
-            description: "Managed by the subconscious loop.",
-            workspaceId,
-            threadId: target.mailboxThreadId,
-            conditions: [
-              { field: "threadId", operator: "equals", value: target.mailboxThreadId },
-            ],
-            actionType: "create_task",
-            actionTitle: `Mailbox follow-up: ${target.label}`,
-            actionPrompt: decision.recommendation,
-            enabled: true,
-          });
-          return this.completedDispatch(decision, target, dispatchKind, {
-            externalRefId: record.id,
-            summary: `Created mailbox automation ${record.id}.`,
+            summary: "Delivered a notification-only subconscious outcome.",
           });
         }
         case "code_change_task": {
@@ -1517,14 +2155,14 @@ export class SubconsciousLoopService {
             taskOverrides: {
               workerRole: "implementer",
             },
-            agentConfig: {
+            agentConfig: buildCoreAutomationAgentConfig(undefined, {
               llmProfile: "strong",
               requireWorktree: this.getSettings().perExecutorPolicy.codeChangeTask.requireWorktree,
               verificationAgent: this.getSettings().perExecutorPolicy.codeChangeTask.verificationRequired,
               reviewPolicy: this.getSettings().perExecutorPolicy.codeChangeTask.strictReview
                 ? "strict"
                 : "balanced",
-            },
+            }),
           });
           return this.completedDispatch(decision, target, dispatchKind, {
             taskId: task.id,
@@ -1588,6 +2226,15 @@ export class SubconsciousLoopService {
   private async advanceRun(id: string, updates: Partial<SubconsciousRun>): Promise<SubconsciousRun> {
     this.runRepo.update(id, updates);
     return this.runRepo.findById(id)!;
+  }
+
+  private safeJsonParseRecord(value: unknown): Record<string, any> | undefined {
+    if (typeof value !== "string" || !value.trim()) return undefined;
+    try {
+      return JSON.parse(value) as Record<string, any>;
+    } catch {
+      return undefined;
+    }
   }
 
   private hasTable(name: string): boolean {

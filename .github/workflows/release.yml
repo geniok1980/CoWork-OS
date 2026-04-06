@@ -265,10 +265,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # unsigned macOS build publishing to GitHub releases
 
+      - name: Align packaged artifact names with updater metadata
+        run: node scripts/release-artifact-names.mjs
+
       - name: Verify expected desktop artifacts exist
         shell: bash
         run: |
           set -euo pipefail
+          node scripts/release-artifact-names.mjs --check
           shopt -s nullglob
           if [ "${RUNNER_OS}" = "Windows" ]; then
             windows_artifacts=(release/*.exe)

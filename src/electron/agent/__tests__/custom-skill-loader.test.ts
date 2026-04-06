@@ -1007,6 +1007,35 @@ describe("getSkillDescriptionsForModel", () => {
     expect(explicitDescriptions).not.toContain("- coding-agent:");
   });
 
+  it("should not treat distant activation and skill-name words as an explicit codex-cli request", async () => {
+    const codexCli = createTestSkill({
+      id: "codex-cli",
+      name: "Codex CLI Agent",
+      description: "Review a PR with Codex CLI.",
+      category: "Development",
+      metadata: {
+        routing: {
+          useWhen: "Use when the user explicitly wants to review a PR with Codex CLI.",
+        },
+      },
+    });
+
+    mockFiles.set("codex-cli.json", JSON.stringify(codexCli));
+
+    await loader.reloadSkills();
+
+    const ranked = loader.rankModelInvocableSkillsForQuery(
+      [
+        "This pasted note mentions the Codex CLI Agent in passing.",
+        "You can run local models if needed.",
+        "But this request is only asking for a summary of the article.",
+      ].join("\n"),
+      { limit: 3 },
+    );
+
+    expect(ranked.map((entry) => entry.skill.id)).not.toContain("codex-cli");
+  });
+
   it("should include fallback discovery hint when routing confidence is low", async () => {
     mockFiles.set(
       "render-deploy.json",

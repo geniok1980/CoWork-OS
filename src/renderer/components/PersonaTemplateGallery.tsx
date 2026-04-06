@@ -24,8 +24,6 @@ interface ActivationState {
   customName: string;
   customIcon: string;
   customColor: string;
-  heartbeatInterval: number;
-  enabledTasks: Set<string>;
 }
 
 const CATEGORY_ICONS: Record<string, string> = {
@@ -114,16 +112,11 @@ export function PersonaTemplateGallery({
     });
 
   const handleActivateClick = (template: PersonaTemplateData) => {
-    const enabledTasks = new Set(
-      template.cognitiveOffload.proactiveTasks.filter((t) => t.enabled).map((t) => t.id),
-    );
     setActivationState({
       template,
       customName: buildTwinName(companyName, template.name),
       customIcon: template.icon,
       customColor: template.color,
-      heartbeatInterval: template.heartbeat.intervalMinutes,
-      enabledTasks,
     });
   };
 
@@ -139,8 +132,6 @@ export function PersonaTemplateGallery({
           displayName: activationState.customName,
           icon: activationState.customIcon,
           color: activationState.customColor,
-          heartbeatIntervalMinutes: activationState.heartbeatInterval,
-          enabledProactiveTasks: Array.from(activationState.enabledTasks),
         },
       });
 
@@ -155,17 +146,6 @@ export function PersonaTemplateGallery({
     } finally {
       setActivating(false);
     }
-  };
-
-  const toggleTask = (taskId: string) => {
-    if (!activationState) return;
-    const next = new Set(activationState.enabledTasks);
-    if (next.has(taskId)) {
-      next.delete(taskId);
-    } else {
-      next.add(taskId);
-    }
-    setActivationState({ ...activationState, enabledTasks: next });
   };
 
   return (
@@ -286,44 +266,9 @@ export function PersonaTemplateGallery({
                   />
                 </label>
 
-                <label className="pt-form-label">
-                  Heartbeat Interval (minutes)
-                  <select
-                    className="pt-form-select"
-                    value={activationState.heartbeatInterval}
-                    onChange={(e) =>
-                      setActivationState({
-                        ...activationState,
-                        heartbeatInterval: Number(e.target.value),
-                      })
-                    }
-                  >
-                    <option value={5}>5 min</option>
-                    <option value={15}>15 min</option>
-                    <option value={30}>30 min</option>
-                    <option value={60}>1 hour</option>
-                    <option value={120}>2 hours</option>
-                    <option value={240}>4 hours</option>
-                  </select>
-                </label>
-
-                <div className="pt-form-section">
-                  <span className="pt-form-section-label">Proactive Tasks</span>
-                  <div className="pt-proactive-tasks">
-                    {activationState.template.cognitiveOffload.proactiveTasks.map((task) => (
-                      <label key={task.id} className="pt-task-toggle">
-                        <input
-                          type="checkbox"
-                          checked={activationState.enabledTasks.has(task.id)}
-                          onChange={() => toggleTask(task.id)}
-                        />
-                        <div className="pt-task-info">
-                          <span className="pt-task-name">{task.name}</span>
-                          <span className="pt-task-desc">{task.description}</span>
-                        </div>
-                      </label>
-                    ))}
-                  </div>
+                <div className="pt-form-note">
+                  Digital Twins are persona presets only. Core automation, heartbeat, subconscious,
+                  and memory ownership are configured separately in Mission Control.
                 </div>
 
                 <div className="pt-form-section">

@@ -627,9 +627,6 @@ export function MissionControlPanel({
           toolRestrictions: agent.toolRestrictions,
           autonomyLevel: agent.autonomyLevel,
           soul: agent.soul,
-          heartbeatEnabled: agent.heartbeatEnabled,
-          heartbeatIntervalMinutes: agent.heartbeatIntervalMinutes,
-          heartbeatStaggerOffset: agent.heartbeatStaggerOffset,
         });
         setAgents((prev) => [...prev, created]);
       } else {
@@ -649,9 +646,6 @@ export function MissionControlPanel({
           sortOrder: agent.sortOrder,
           autonomyLevel: agent.autonomyLevel,
           soul: agent.soul,
-          heartbeatEnabled: agent.heartbeatEnabled,
-          heartbeatIntervalMinutes: agent.heartbeatIntervalMinutes,
-          heartbeatStaggerOffset: agent.heartbeatStaggerOffset,
         });
         if (updated) {
           setAgents((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));

@@ -16,7 +16,13 @@ export function hasAutomatedTaskTitle(title: string | undefined): boolean {
 export function isAutomatedTaskLike(task: Task | null | undefined): boolean {
   if (!task) return false;
   if (task.source === "manual") return false;
-  if (task.source === "cron" || task.source === "improvement") return true;
+  if (
+    task.source === "cron" ||
+    task.source === "improvement" ||
+    task.source === "subconscious"
+  ) {
+    return true;
+  }
   if (hasAutomatedTaskTitle(task.title)) return true;
   if (task.source === "hook") return false;
   if (task.source === "api") {

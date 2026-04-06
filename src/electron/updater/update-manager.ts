@@ -23,7 +23,7 @@ interface GitHubRelease {
 export class UpdateManager {
   private mainWindow: BrowserWindow | null = null;
   private repoOwner = "CoWork-OS";
-  private repoName = "cowork-os";
+  private repoName = "CoWork-OS";
   private isUpdating = false;
 
   setMainWindow(window: BrowserWindow): void {

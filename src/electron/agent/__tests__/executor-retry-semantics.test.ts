@@ -381,4 +381,109 @@ describe("TaskExecutor provider failover retry semantics", () => {
       }),
     ]);
   });
+
+  it("fails over on retryable OpenRouter image-input route errors", async () => {
+    const executor = createRetryExecutor();
+    executor.llmCallSequence = 0;
+    executor.providerRetryV2Enabled = true;
+    executor.recordObservedOutputThroughput = vi.fn();
+    executor.provider = { type: "openrouter", createMessage: vi.fn() };
+    executor.modelId = "minimax/minimax-m2.5:free";
+    executor.modelKey = "minimax/minimax-m2.5:free";
+    executor.llmProfileUsed = "cheap";
+    executor.resolvedModelKey = "minimax/minimax-m2.5:free";
+    executor.providerFailoverIndex = 0;
+    executor.providerFailoverSelections = [
+      {
+        providerType: "openrouter",
+        modelId: "minimax/minimax-m2.5:free",
+        modelKey: "minimax/minimax-m2.5:free",
+        llmProfileUsed: "cheap",
+        resolvedModelKey: "minimax/minimax-m2.5:free",
+        modelSource: "provider_default",
+        warnings: [],
+      },
+      {
+        providerType: "openrouter",
+        modelId: "qwen/qwen3.6-plus:free",
+        modelKey: "qwen/qwen3.6-plus:free",
+        llmProfileUsed: "cheap",
+        resolvedModelKey: "qwen/qwen3.6-plus:free",
+        modelSource: "provider_default",
+        warnings: [],
+      },
+    ];
+    executor.lastRoutingState = {
+      currentProvider: "openrouter",
+      currentModel: "minimax/minimax-m2.5:free",
+      activeProvider: "openrouter",
+      activeModel: "minimax/minimax-m2.5:free",
+      routeReason: "automatic_execution",
+      fallbackChain: [],
+      fallbackOccurred: false,
+      manualOverride: false,
+      updatedAt: Date.now(),
+    };
+    executor.emitRoutingState = vi.fn((overrides?: Any) => {
+      executor.lastRoutingState = {
+        currentProvider: "openrouter",
+        currentModel: "minimax/minimax-m2.5:free",
+        activeProvider: executor.provider.type,
+        activeModel: executor.modelId,
+        routeReason: overrides?.routeReason || "automatic_execution",
+        fallbackChain: overrides?.fallbackChain || [],
+        fallbackOccurred: overrides?.fallbackOccurred ?? false,
+        manualOverride: overrides?.manualOverride ?? false,
+        updatedAt: Date.now(),
+      };
+    });
+    executor.applyResolvedProviderSelection = vi.fn((selection: Any) => {
+      executor.provider = { type: selection.providerType, createMessage: vi.fn() };
+      executor.modelId = selection.modelId;
+      executor.modelKey = selection.modelKey;
+      executor.llmProfileUsed = selection.llmProfileUsed;
+      executor.resolvedModelKey = selection.resolvedModelKey;
+    });
+
+    const requestFn = vi.fn(async () => {
+      if (executor.modelId === "minimax/minimax-m2.5:free") {
+        const error = new Error(
+          "OpenRouter API error: 404 Not Found - No endpoints found that support image input",
+        );
+        (error as Any).status = 404;
+        (error as Any).retryable = true;
+        throw error;
+      }
+      return {
+        content: [],
+        stopReason: "end_turn",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      };
+    });
+
+    const response = await (executor as Any).callLLMWithRetry(
+      requestFn,
+      "provider image-input failover",
+    );
+
+    expect(response.stopReason).toBe("end_turn");
+    expect(requestFn).toHaveBeenCalledTimes(2);
+    expect(executor.modelId).toBe("qwen/qwen3.6-plus:free");
+    expect(executor.providerFailoverIndex).toBe(1);
+    expect(executor.lastRoutingState?.routeReason).toBe("model_capability");
+    expect(executor.lastRoutingState?.fallbackOccurred).toBe(true);
+    expect(executor.lastRoutingState?.fallbackChain).toEqual([
+      expect.objectContaining({
+        providerType: "openrouter",
+        modelKey: "minimax/minimax-m2.5:free",
+        reason: "model_capability",
+        success: false,
+      }),
+      expect.objectContaining({
+        providerType: "openrouter",
+        modelKey: "qwen/qwen3.6-plus:free",
+        success: true,
+      }),
+    ]);
+  });
 });

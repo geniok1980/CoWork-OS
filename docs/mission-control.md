@@ -1,15 +1,15 @@
 # Mission Control
 
-Mission Control is a centralized agent orchestration and monitoring dashboard. It provides a command center for managing agents, tracking tasks across a Kanban board, monitoring real-time activity, and overseeing team-based collaboration.
+Mission Control is a centralized agent orchestration and monitoring dashboard. It provides the main cockpit for managing agents, tracking tasks across a Kanban board, monitoring real-time activity, and overseeing team-based collaboration.
 
-Heartbeat v3 is the default background automation model exposed here. Mission Control should be read as pulse/defer/dispatch truth, not as a wake-queue monitor. See [Heartbeat v3](heartbeat-v3.md) for the runtime model.
+Heartbeat v3 is the default background automation model exposed here. Mission Control should be read as pulse/defer/dispatch truth, not as a wake-queue monitor. It also surfaces the `Core Harness` that learns from runtime traces. See [Heartbeat v3](heartbeat-v3.md) and [Core Automation](core-automation.md) for the runtime model.
 
 Access it from **Settings** > **Mission Control**. For company-ops workflows, you can also jump into it directly from **Settings** > **Companies** with the selected company preloaded.
 
-Mission Control now sits alongside two other operational entry points:
+Mission Control now sits alongside the other operational entry points:
 
 - **Devices** for machine-level task routing and remote execution
-- **Settings > Automations** for queueing, scheduling, triggers, briefing, and subconscious policies
+- **Settings > Automations** for core automation, queueing, scheduling, triggers, briefing, and subconscious policies
 - **Settings > Companies** for company graph editing and operator assignment
 
 ## Layout
@@ -18,7 +18,7 @@ Mission Control is split into three panels:
 
 | Panel | Purpose |
 |-------|---------|
-| **Left — Agents** | Active agents list with Pulse/Dispatch state, cadence, and manual trigger controls |
+| **Left — Agents** | Active agents list with Pulse/Dispatch state, automation-profile-backed cadence, and manual trigger controls |
 | **Center — Mission Queue** | Kanban board with 5 columns for task lifecycle management |
 | **Right — Feed & Details** | Live activity feed and selected task details with comments/mentions |
 
@@ -58,7 +58,9 @@ Configure agent roles with:
 - Personality and model preferences
 - Capabilities and tool restrictions
 - Autonomy level (lead / specialist / intern)
-- Heartbeat v3 settings (`heartbeatEnabled`, `pulseEveryMinutes`, `dispatchCooldownMinutes`, `maxDispatchesPerDay`, `activeHours`, `heartbeatProfile`, plus stagger support for Pulse cadence)
+- link-out to the attached automation profile when the role participates in the always-on core
+
+Heartbeat and subconscious ownership no longer live directly in the general role editor. Core-runtime settings are managed through the dedicated automation surfaces.
 
 ---
 
@@ -155,6 +157,19 @@ The `Ops` tab is most useful when the company graph is maintained in **Settings*
 
 If the work itself is being executed on another machine, pair Mission Control with the **Devices** tab: Mission Control gives you company-level orchestration, while Devices gives you machine-level routing and remote task inspection.
 
+### Core Harness
+
+Mission Control now includes a `Core Harness` view for the learning loop around always-on automation.
+
+It surfaces:
+
+- recurring core failure clusters
+- living eval cases
+- proposed and gated experiments
+- promoted learnings
+
+This is the main monitoring surface for the `trace -> failure mining -> clustering -> eval -> experiment -> learning` loop behind Heartbeat and Subconscious.
+
 ---
 
 ## Strategic Planner Strip
@@ -198,9 +213,11 @@ See [Features — Agent Teams](features.md#agent-teams) for more details.
 
 Access from the **Add Digital Twin** button in the agents panel (next to Add Agent).
 
-Browse pre-built persona templates — Software Engineer, Engineering Manager, Product Manager, and more — and activate them in one click. Each twin comes pre-configured with:
+Browse pre-built persona templates — Software Engineer, Engineering Manager, Product Manager, and more — and activate them in one click. Twins are now optional persona presets and do not directly own the always-on core runtime.
 
-- **Heartbeat v3 proactive tasks** evaluated in Pulse and escalated only when justified
+Each twin comes with:
+
+- **Prompt and personality defaults**
 - **Cognitive offload categories** targeting the mental work that fragments focus
 - **Recommended skills** for on-demand use (meeting prep, decision packages, status reports)
 
@@ -211,7 +228,7 @@ Mission Control is also the best place to monitor venture/operator twins such as
 - `Growth Operator`
 - `Customer Ops Lead`
 
-If those twins were created from a company context, they still appear in Mission Control as normal agents, but they retain their company assignment for use in `Ops`, `Companies`, and company-aware Digital Twins views.
+If those twins were created from a company context, they still appear in Mission Control as normal agents, but they retain their company assignment for use in `Ops`, `Companies`, and company-aware Digital Twins views. If you want one of those operators to become always-on, attach a separate automation profile instead of relying on the twin template itself.
 
 See [Digital Twins](digital-twins.md) for full documentation, enterprise scenarios, and template reference.
 
@@ -245,6 +262,7 @@ Mission Control subscribes to live event streams — no manual refresh needed:
 | Event Stream | What It Updates |
 |-------------|-----------------|
 | **Heartbeat v3 events** | Agent status dots, pulse/dispatch indicators, deferred state, feed items |
+| **Core harness events** | Failure clusters, eval upkeep, experiment progression, and learning summaries |
 | **Activity events** | Comments, mentions, assignments in the feed |
 | **Learning events** | Post-task learning progression, skill promotion states, and evidence-linked completion summaries |
 | **Routing events** | Provider/model switches, fallback transitions, and route-reason updates |
@@ -263,6 +281,7 @@ Mission Control subscribes to live event streams — no manual refresh needed:
 | Open company-scoped Mission Control | Settings > Companies > Open in Mission Control |
 | Add a new agent | Click "Add Agent" in the agents panel |
 | Add a digital twin | Click "Add Digital Twin" in the agents panel ([details](digital-twins.md)) |
+| Review core automation learning | Open the `Core Harness` view |
 | Configure the company planner | Use the planner strip above the board |
 | Inspect company ops | Open the `Ops` tab in the right panel |
 | Edit an agent | Double-click the agent card |

@@ -1,6 +1,6 @@
 # Plugin Packs & Customize
 
-Plugin packs are composable, role-specific bundles that group skills, agent roles, connectors, and slash commands into a single installable unit. Each pack targets a job function — engineering, sales, product management — and can optionally link to a [Digital Twin Persona](digital-twins.md) for proactive background work.
+Plugin packs are composable, role-specific bundles that group skills, agent roles, connectors, and slash commands into a single installable unit. Each pack targets a job function — engineering, sales, product management — and can optionally link to a [Digital Twin Persona](digital-twins.md) as an optional role preset.
 
 Access from **Settings** > **Customize**.
 
@@ -548,17 +548,17 @@ CoWork OS ships with 17 plugin packs covering common job functions.
 
 Seven of the seventeen bundled packs link to [Digital Twin Personas](digital-twins.md):
 
-| Pack | Persona Template | Proactive Tasks |
-|------|-----------------|-----------------|
-| Engineering | Software Engineer | PR triage, dependency checks, test coverage scans |
-| Engineering Management | Engineering Manager | Sprint health reports, standup summaries, blocker detection |
-| Product Management | Product Manager | Feature request triage, roadmap updates, stakeholder briefs |
-| DevOps | DevOps/SRE Engineer | Uptime monitoring, deployment verifications, incident summaries |
-| Data Analysis | Data Scientist | Pipeline health checks, data quality scans, anomaly detection |
-| QA & Testing | QA/Test Engineer | Test coverage reports, regression risk assessments, flaky test detection |
-| Technical Writing | Technical Writer | Doc freshness scans, style consistency checks, link verification |
+| Pack | Persona Template | Example Role Fit |
+|------|-----------------|------------------|
+| Engineering | Software Engineer | PR triage, dependency checks, test coverage review |
+| Engineering Management | Engineering Manager | Sprint health reporting, standup prep, blocker detection |
+| Product Management | Product Manager | Feature triage, roadmap prep, stakeholder briefs |
+| DevOps | DevOps/SRE Engineer | Uptime review, deployment verification, incident summaries |
+| Data Analysis | Data Scientist | Pipeline review, data quality scans, anomaly detection |
+| QA & Testing | QA/Test Engineer | Test coverage reporting, regression review, flaky-test detection |
+| Technical Writing | Technical Writer | Doc freshness review, style consistency checks, link verification |
 
-When a pack with a digital twin is active, the twin runs heartbeat-driven background tasks on a schedule — surfacing insights, flagging issues, and preparing reports without being asked.
+Pack activation exposes the linked twin as an optional persona preset. It does not auto-enroll that role into heartbeat, subconscious, or memory ownership.
 
 ### Activation Flow
 
@@ -566,7 +566,8 @@ When a pack with a digital twin is active, the twin runs heartbeat-driven backgr
 2. The Digital Twin badge appears in the pack detail header
 3. Go to **Mission Control** > **Add Digital Twin**
 4. Select the linked persona template
-5. The twin starts running proactive tasks on the configured schedule
+5. Activate the role preset
+6. Optionally attach a separate automation profile if that role should become always-on
 
 ---
 

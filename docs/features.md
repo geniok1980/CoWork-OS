@@ -7,7 +7,7 @@
 - **WhatsApp**: QR code pairing, self-chat mode, markdown support
 - **Telegram**: Bot commands, streaming responses, workspace selection, group routing modes, and allowed-group allowlists
 - **Discord**: Slash commands, DM support, guild integration, guild allowlists, embeds/polls/select menus, live message fetch and attachment download
-- **Slack**: Socket Mode, channel mentions, file uploads, and multiple workspace installations in one app profile
+- **Slack**: Socket Mode, channel mentions, file uploads, multiple workspace installations in one app profile, and optional curated middle-step progress relays
 - **Microsoft Teams**: Bot Framework SDK, DM/channel mentions, adaptive cards
 - **Google Chat**: Service account auth, spaces/DMs, threaded conversations
 - **Feishu / Lark**: Webhook + app credential gateway support for Lark/Feishu tenants
@@ -37,15 +37,15 @@
 - **Provider-Aware Prompt Caching**: CoWork keeps stable system blocks cacheable and dynamic turn context uncached, prefers Anthropic automatic caching where supported, uses explicit Claude breakpoints on OpenRouter, and derives stable OpenAI-family cache keys for GPT routes.
 - **Session Checklist Primitive**: execution-style tasks can create a session-local ordered checklist with `task_list_create`, maintain it with `task_list_update`, inspect it with `task_list_list`, and surface it read-only in the task UI. The runtime can issue a non-blocking verification nudge when implementation items are done but no verification item exists yet.
 - **Structured Delegation Briefs**: `spawn_agent` and `orchestrate_agents` resolve a worker role, package parent-step context plus evidence requirements into a structured brief, and apply the corresponding completion/tool contract to the child.
-- **Permission Engine**: layered tool approvals combine explicit modes, per-tool/path/command-prefix/MCP-server rules, session grants, workspace-local rules, profile rules, and hard guardrails; the active workspace can browse and remove its own rules in Settings.
+- **Permission Engine**: layered tool approvals combine explicit modes, per-tool/path/command-prefix/MCP-server rules, session grants, workspace-local rules, profile rules, and hard guardrails; `dangerous_only` adds a lower-friction mode that still prompts on destructive, privacy-sensitive, side-effecting, or ambiguous actions.
 - **Live Terminal**: Shell commands run in a real-time terminal view — see output as it happens, stop execution, or provide interactive input (e.g. `y`/`n` prompts)
 - **Dynamic Re-Planning**: Agent can revise its plan mid-execution
-- **139+ Built-in Skills**: GitHub, Slack, Notion, Spotify, Apple Notes, Unity, Unreal, Terraform, Kubernetes, financial analysis, and more. Optional CLI-based skills (e.g. [aurl](skills/aurl.md) for OpenAPI/GraphQL APIs) appear when the binary is installed.
+- **138 Built-in Skills**: GitHub, Slack, Notion, Spotify, Apple Notes, Unity, Unreal, Terraform, Kubernetes, financial analysis, and more. Bundled workflows now include [LLM Wiki](llm-wiki.md) for persistent research vaults and [manim-video](skills/manim-video.md) for deterministic technical animation. Optional CLI-based skills (e.g. [aurl](skills/aurl.md) for OpenAPI/GraphQL APIs) appear when the binary is installed.
 - **Additive Skill Runtime**: Skills can still be proactively shortlisted from task semantics, but they now apply as additive context and scoped runtime directives. They never replace the original task prompt. See [Skills Runtime Model](skills-runtime-model.md).
 - **Chat Mode**: Direct LLM chat with no tools, no step timeline, same-session follow-ups, chat-only streaming for supported providers, and a fixed high output budget for explicit `executionMode: "chat"` sessions. See [Chat Mode](chat-mode.md).
 - **Document Creation**: Excel, Word, PDF, PowerPoint with professional formatting
 - **Document Editing Sessions**: Inline PDF region editing and DOCX block replacement. Open a document from the Files panel or task artifact surface to enter an editing session with version browsing and document-aware controls.
-- **Persistent Memory**: Cross-session context with privacy-aware observation capture
+- **Persistent Memory**: Cross-session context with curated hot memory, searchable archive recall, session transcript recall, topic packs, and privacy-aware observation capture
 - **Knowledge Graph**: SQLite-backed entity/relationship memory with FTS5 search, graph traversal, and auto-extraction
 - **Workspace Kit**: `.cowork/` project kit + markdown indexing with context injection
 - **Agent Teams**: Multi-agent collaboration with shared checklists, graph-backed coordinated runs, and team management UI
@@ -68,12 +68,13 @@
 - **Image Attachments**: Attach images to tasks and follow-ups for multimodal analysis
 - **Image Generation**: Multi-provider support (Gemini, OpenAI gpt-image-1/1.5/DALL-E, Azure OpenAI, OpenRouter) with configurable provider ordering
 - **Video Generation**: Text-to-video and image-to-video via new video generation providers. Configure preferred video model in Settings > LLM. Generated videos render inline in the task feed.
+- **Programmatic Technical Animation**: The bundled [manim-video](skills/manim-video.md) skill scaffolds Manim CE projects for math explainers, algorithm walkthroughs, architecture animations, and data stories with local project files, dependency preflight, and draft-first render helpers.
 - **Visual Annotation**: Iterative image refinement with the Visual Annotator
 - **Context Summarization**: Automatic context compression surfaced in the task timeline
 - **Structured Input Requests**: In plan-mode flows, the agent can pause with 1-3 short multiple-choice questions instead of asking ambiguous free-text follow-ups
 - **Parallel Tool Timeline**: Concurrent read-only tool bursts are grouped into lane-based timeline cards instead of flooding the event feed; screenshot-heavy refinement loops stay more compact in summary mode
 - **Renderer Performance**: In the `CoWork-OS/CoWork-OS` repo, the renderer uses `@chenglou/pretext` for text-heavy sidebar/timeline measurement, with flattened visible sidebar rows and post-render height reconciliation for expanded timeline cards
-- **Adaptive Runtime Recovery**: Execute tasks use adaptive turn budgets, bounded follow-up recovery, and safety-stop escalation instead of hard window failure by default
+- **Adaptive Runtime Recovery**: Execute tasks use adaptive turn budgets, bounded follow-up recovery, retry-aware turn guidance, and safety-stop escalation instead of hard window failure by default
 - **Session Snapshot Resume**: SessionRuntime prefers `session_runtime_v2` checkpoint and event payloads, falls back to legacy `conversationHistory` payloads or event-derived history, and rewrites legacy resumes to V2 on the next checkpoint
 - **Workspace Rule Manager**: Settings can list and remove workspace-local permission rules directly, and approval prompts can persist new workspace or profile rules with explicit reasons and scope previews.
 - **Path Drift Repair**: `/workspace/...` aliases and drifted relative paths can be normalized back into the active workspace or pinned task root, with strict-fail policies when hard enforcement is preferred
@@ -85,7 +86,20 @@
 - **Graceful Uncertainty**: Agent expresses uncertainty honestly and rates confidence on recommendations. Low-confidence messages display with an amber indicator.
 - **AI Playbook**: Auto-captures successful patterns (approach, outcome, tools) and lessons from failures with error classification (7 categories: tool failure, wrong approach, missing context, permission denied, timeout, rate limit, user correction). Time-based decay scoring deprioritises stale entries. Proven patterns reinforced on repeated success. Mid-task user corrections automatically detected and captured. Relevant entries injected into system prompts. View in Settings > AI Playbook.
 - **Task Result Feedback**: Completed task banners show 👍 / 👎 controls, with task-level rejections logged as quality signals for Usage Insights. The shared feedback IPC still supports structured message-level feedback for adaptation and future UI surfaces.
-- **Evolving Agent Intelligence**: The agent visibly improves over time through a connected set of subsystems — unified memory synthesis, adaptive style learning, playbook-to-skill promotion, channel persona adaptation, evolution metrics, and daily operational journaling. See [Evolving Agent Intelligence](evolving-agent-intelligence.md).
+- **Evolving Agent Intelligence**: The agent visibly improves over time through a connected set of subsystems — layered memory, retry-aware recovery reuse, adaptive style learning, playbook-to-skill promotion, channel persona adaptation, evolution metrics, and daily operational journaling. See [Evolving Agent Intelligence](evolving-agent-intelligence.md).
+
+### LLM Wiki Research Vaults
+
+CoWork includes `llm-wiki` as a bundled first-class research-vault workflow inspired by Andrej Karpathy's LLM Wiki concept.
+
+- **Persistent vaults**: creates workspace-local markdown knowledge bases instead of one-off research outputs
+- **Obsidian-friendly structure**: durable notes, maps, `[[wikilinks]]`, source-preserving `raw/` captures, and filed-back `outputs/`
+- **Deterministic workbench**: bundled runtimes handle raw ingest, vault-first search, slide/chart rendering, and graph analysis
+- **Deterministic maintenance**: bundled analyzer reports topology, orphan pages, broken links, ambiguous links, weakly linked pages, bridge pages, surprising cross-section links, and suggested follow-up questions
+- **GUI-first and slash-friendly**: natural prompts like `Build a persistent research vault for GRPO papers` route into `llm-wiki`, `/llm-wiki` remains available in desktop and supported gateway channels, and the welcome screen surfaces the default vault for browsing
+- **Run artifacts + durable state**: each run writes an inspectable manifest and graph report while keeping the vault itself persistent in the workspace
+
+See [LLM Wiki](llm-wiki.md) for command syntax, layout, modes, and analyzer behavior.
 
 ### Computer use (macOS)
 
@@ -270,7 +284,7 @@ The runtime now includes a set of decision and recovery contracts aimed at keepi
 | Capability | Behavior |
 |------------|----------|
 | **Structured input requests** | `request_user_input` asks 1-3 concise multiple-choice questions, pauses the task, and resumes after submit/dismiss. Only available in plan mode. |
-| **Adaptive turn-window recovery** | Execute-oriented tasks default to `adaptive_unbounded`, soft-log exhausted windows, reserve space for finalization, and allow a bounded follow-up recovery attempt before triggering a safety stop. |
+| **Adaptive turn-window recovery** | Execute-oriented tasks default to `adaptive_unbounded`, soft-log exhausted windows, reserve space for finalization, and allow a bounded follow-up recovery attempt before triggering a safety stop. Retrying turns can carry attempt count, retry reason/class, pending verification items, and recent session recall so the agent continues instead of restarting. |
 | **Context overflow retry** | Context-capacity errors trigger compaction plus retry instead of immediate hard failure when the model context window is exceeded. |
 | **Workspace alias repair** | Absolute alias paths such as `/workspace/...` can be remapped into the active workspace for file and directory tools, or blocked via `strict_fail`. |
 | **Pinned task-root repair** | Relative paths that drift outside the task's canonical root can be rewritten back under the pinned root, retried with a bounded budget, or rejected under strict policy. |
@@ -390,12 +404,20 @@ Configure in **Settings** > **Voice**.
 
 | Feature | Description |
 |---------|-------------|
-| **Auto-Capture** | Observations, decisions, and errors captured during task execution |
-| **Agent-Initiated Save** | Agents can explicitly save insights, decisions, observations, and errors via `memory_save` tool for cross-session recall |
+| **Curated Hot Memory** | Small prompt-visible memory lane for durable user/workspace facts, constraints, workflow rules, project facts, and active commitments |
+| **Wake-Up Layers** | The runtime exposes memory as `L0 Identity`, `L1 Essential Story`, `L2 Topic Packs`, and `L3 Deep Recall`; only `L0 + L1` are injected into the live prompt by default |
+| **Curated Memory Tools** | `memory_curate` adds/replaces/removes curated entries, and `memory_curated_read` inspects the current hot-memory layer with stable entry IDs for deterministic edits |
+| **Archive Memory** | `memory_save` persists observations, decisions, errors, and insights into the larger searchable archive lane for cross-session recall |
+| **Checkpoint Capture** | Runtime-native checkpoints are written before compaction, on non-trivial task completion, and every 12 meaningful exchanges, each carrying both a structured summary and a verbatim evidence packet |
+| **Session Recall** | `search_sessions` searches recent transcript spans and optional checkpoints when the agent needs to recall what happened in a prior run |
+| **Verbatim Quote Recall** | `search_quotes` returns exact spans with provenance from transcripts, task messages, imported memories, and indexed workspace markdown when the agent needs “what was actually said?” |
+| **Topic Packs** | `memory_topics_load` loads focused packs from `.cowork/memory/topics`, and `refresh: false` performs a true read-only lookup over existing topic files |
+| **Memory Hub Preview** | Memory Hub shows the current `L0/L1` payload and the `L2/L3` layers excluded from default injection, including budget-driven exclusions |
 | **Privacy Protection** | Auto-detects sensitive patterns (API keys, passwords, tokens) |
-| **Unified Search** | `search_memories` searches both the memory DB and `.cowork/` workspace markdown files with hybrid semantic + BM25 ranking |
+| **Unified Search** | `search_memories` searches archive memory plus indexed `.cowork/` markdown with hybrid semantic + BM25 ranking |
 | **LLM Compression** | Summarizes observations for ~10x token efficiency |
-| **Progressive Retrieval** | 3-layer approach: snippets → timeline → full details |
+| **Prompt Defaults** | `L0 Identity` and `L1 Essential Story` are injected by default; archive injection is off by default; `L2/L3` recall stays explicit and tool-driven |
+| **Temporal Knowledge Graph** | Relationships can carry `valid_from` / `valid_to`, `kg_invalidate_edge` closes an active fact without deleting history, and historical reads can opt into `as_of` |
 | **ChatGPT History Import** | Import your full ChatGPT conversation history — eliminates cold start. All data stored locally and encrypted. [Details below](#chatgpt-history-import) |
 | **Per-Workspace Settings** | Enable/disable, privacy modes, retention policies |
 
@@ -455,6 +477,7 @@ CoWork OS still keeps a multi-layered learning stack under the reflective loop. 
 - **Confidence decay**: older playbook entries receive lower relevance scores (30d: 0.8x, 90d: 0.5x)
 - **Reinforcement**: successful patterns are boosted via reinforcement memories
 - **Mid-task correction detection**: regex-based detection of user corrections during execution
+- **Retry-aware reuse**: retries can reuse playbook patterns during planning, recent session recall during planning/execution/follow-ups, and pending verification checklist state instead of restarting cold
 - **`/learn` skill**: manually teach the agent insights, corrections, preferences, or rules
 
 These layers feed the `Subconscious` loop and the normal task runtime. See [Subconscious Reflective Loop](subconscious-loop.md) for the full architecture guide.
@@ -465,13 +488,14 @@ A set of connected subsystems that make improvement visible and measurable over 
 
 | Subsystem | Purpose |
 |-----------|---------|
-| **Unified Memory Synthesizer** | Collects 7 memory sources (user profile, relationship, playbook, memory, knowledge graph, workspace kit, daily summaries), deduplicates by 120-char fingerprint, ranks by `relevance × 0.45 + confidence × 0.3 + recency × 0.25`, and assembles a single token-budgeted `<cowork_synthesized_memory>` block injected into every task. |
+| **Layered Memory Runtime** | Uses explicit wake-up layers: `<cowork_hot_memory>` for `L0 Identity`, `<cowork_structured_memory>` for `L1 Essential Story`, and tool-driven `L2/L3` recall through `memory_topics_load`, `search_sessions`, `search_memories`, and `search_quotes`. |
+| **Retry-Aware Recovery Guidance** | When execution retries or resumes, injects retry count, retry reason/classification, pending verification items, and recent session evidence so the agent keeps moving from the last good state instead of restarting blindly. Planning retries can also include compact playbook context. |
 | **Adaptive Style Engine** | Observes message length, emoji usage, technical vocabulary, and structured feedback to gradually shift personality settings (response length, emoji usage, explanation depth). Rate-limited to a configurable number of level-shifts per week. |
 | **Playbook-to-Skill Promotion** | When a playbook pattern is reinforced 3+ times, auto-generates a `skill_proposal` for admin review. No skill is created until explicitly approved. |
 | **Channel Persona Adapter** | Applies channel-appropriate communication directives (Slack = terse/structured, email = formal/greeting+sign-off, WhatsApp = short/emoji, etc.) on top of the core persona without replacing it. |
 | **Evolution Metrics** | Computes 5 on-demand metrics: Correction Rate, Style Adaptations, Knowledge Graph growth, Task Success Rate, and Style Alignment. Produces an overall 0–100 Evolution Score. Surfaced in the Daily Briefing. |
-| **Daily Operational Log** | `DailyLogService` writes structured per-day entries (task, feedback, decision, observation) to `.cowork/memory/daily/<YYYY-MM-DD>.md` for use by the summarizer. Raw logs are never injected into prompts. |
-| **Daily Log Summarizer** | Reads pre-written daily summary files from `.cowork/memory/summaries/<YYYY-MM-DD>.md`, applies recency decay (half-life: 7 days), and returns ranked `MemoryFragment` objects that enter the Memory Synthesizer pipeline. |
+| **Daily Operational Log** | `DailyLogService` manages optional per-day raw logs under `.cowork/memory/daily/<YYYY-MM-DD>.md`. Raw logs are never injected directly into prompts. |
+| **Daily Log Summarizer** | Reads pre-written summary files from `.cowork/memory/summaries/<YYYY-MM-DD>.md`, applies recency decay, and feeds ranked summaries into the structured-memory lane. |
 
 **Behavior Adaptation controls** (Settings > Guardrails > Behavior Adaptation):
 - **Adaptive Style** toggle — enable/disable style learning (off by default)

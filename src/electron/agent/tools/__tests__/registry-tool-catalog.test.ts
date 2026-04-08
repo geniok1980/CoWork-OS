@@ -207,14 +207,15 @@ describe("ToolRegistry tool catalog versioning", () => {
     expect((registry as Any).getApprovalTypeForTool("Skill")).toBeNull();
   });
 
-  it("does not pre-classify local reads and network-capable tools as external services", () => {
+  it("does not pre-classify local reads as external services and keeps safe network reads scoped", () => {
     const registry = new ToolRegistry(createWorkspace(), createDaemon(), "task-safe-read-approval");
 
     expect((registry as Any).getApprovalTypeForTool("read_file")).toBeNull();
     expect((registry as Any).getApprovalTypeForTool("glob")).toBeNull();
     expect((registry as Any).getApprovalTypeForTool("web_search")).toBeNull();
-    expect((registry as Any).getApprovalTypeForTool("web_fetch")).toBeNull();
-    expect((registry as Any).getApprovalTypeForTool("http_request")).toBeNull();
+    expect((registry as Any).getApprovalTypeForTool("web_fetch")).toBe("network_access");
+    expect((registry as Any).getApprovalTypeForTool("http_request", { method: "GET" })).toBe("network_access");
+    expect((registry as Any).getApprovalTypeForTool("http_request", { method: "POST", body: "x" })).toBe("data_export");
   });
 
   it("keeps explicit approval classes for destructive, integration, and computer-use tools", () => {
@@ -222,6 +223,8 @@ describe("ToolRegistry tool catalog versioning", () => {
 
     expect((registry as Any).getApprovalTypeForTool("run_command")).toBe("run_command");
     expect((registry as Any).getApprovalTypeForTool("delete_file")).toBe("delete_file");
+    expect((registry as Any).getApprovalTypeForTool("analyze_image")).toBe("data_export");
+    expect((registry as Any).getApprovalTypeForTool("read_pdf_visual")).toBe("data_export");
     expect((registry as Any).getApprovalTypeForTool("mcp_fetch_issue")).toBe("external_service");
     expect((registry as Any).getApprovalTypeForTool("notion_action")).toBe("external_service");
     expect((registry as Any).getApprovalTypeForTool("computer_click")).toBe("computer_use");

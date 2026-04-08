@@ -14,7 +14,7 @@ For the full inbox workspace, see [Inbox Agent](inbox-agent.md).
 | **Web fetch** | `web_fetch` | Static pages, APIs |
 | **Browser** | `browser_navigate`, `browser_get_content`, `browser_click`, etc. | Forms, interactive sites |
 | **Scraping** | `scrape_page`, `scrape_multiple` | Structured extraction |
-| **Slash skills** | `/simplify`, `/batch` | Quality passes, parallel migrations |
+| **Slash skills** | `/simplify`, `/batch`, `/llm-wiki` | Quality passes, parallel migrations, persistent research vaults |
 
 ## Integration-Dependent (Graceful Fallbacks)
 

@@ -24,6 +24,7 @@ import {
   isArtifactGenerationToolName,
   isFileMutationToolName,
 } from "../tool-semantics";
+import { extractDomainFromUrl, extractUrlFromToolInput } from "../security/export-permission-context";
 
 const SOURCE_PRECEDENCE: Record<string, number> = {
   session: 600,
@@ -62,11 +63,13 @@ type PermissionFacts = {
   normalizedPath: string;
   normalizedCommand: string;
   normalizedServerName: string;
+  normalizedDomain: string;
   isReadOnly: boolean;
   isWriteLike: boolean;
   isWorkspaceWriteLike: boolean;
   isDeleteLike: boolean;
   isShell: boolean;
+  isDataExport: boolean;
   isExternalSideEffect: boolean;
   isNetworkAccess: boolean;
   isNonWorkspaceInteraction: boolean;
@@ -93,6 +96,66 @@ const NON_WORKSPACE_SYSTEM_TOOLS = new Set([
   "get_app_paths",
   "run_applescript",
 ]);
+const DANGEROUS_COMMAND_PATTERNS = [
+  /\brm\s+-rf\b/i,
+  /\bgit\s+reset\s+--hard\b/i,
+  /\bgit\s+clean\b.*(?:^|\s)-f/i,
+  /\bgit\s+checkout\s+--\b/i,
+  /\bmkfs(?:\.[a-z0-9_+-]+)?\b/i,
+  /\bdd\b/i,
+  /\bshutdown\b/i,
+  /\breboot\b/i,
+  /\bpoweroff\b/i,
+  /\bhalt\b/i,
+  /\bdiskutil\s+erase/i,
+  /\bformat\b/i,
+  /\bdel\b.*(?:^|\s)\/f\b/i,
+];
+const SAFE_DANGEROUS_ONLY_COMMAND_PREFIXES = [
+  "pwd",
+  "ls",
+  "tree",
+  "dir",
+  "cat ",
+  "head ",
+  "tail ",
+  "sed -n",
+  "grep ",
+  "rg ",
+  "find ",
+  "git status",
+  "git diff",
+  "git log",
+  "git show",
+  "git branch",
+  "git rev-parse",
+  "git ls-files",
+  "npm test",
+  "npm run test",
+  "npm run lint",
+  "npm run type-check",
+  "pnpm test",
+  "pnpm run test",
+  "pnpm run lint",
+  "pnpm run type-check",
+  "yarn test",
+  "yarn lint",
+  "yarn type-check",
+  "bun test",
+  "pytest",
+  "cargo test",
+  "go test",
+  "vitest ",
+  "jest ",
+  "eslint ",
+  "oxlint ",
+  "prettier --check",
+  "tsc --noemit",
+  "tsc --noemit ",
+  "node -v",
+  "python --version",
+  "python3 --version",
+].map((prefix) => prefix.toLowerCase());
 
 export class PermissionEngine {
   static evaluate(request: PermissionEngineRequest): PermissionEvaluationResult {
@@ -101,7 +164,7 @@ export class PermissionEngine {
     if (hardDecision) {
       return {
         ...hardDecision,
-        suggestions: this.buildSuggestions(request.allowPersistence !== false),
+        suggestions: this.buildSuggestions(request.allowPersistence !== false, facts),
         scopePreview: this.buildScopePreview(request, facts),
       };
     }
@@ -119,7 +182,7 @@ export class PermissionEngine {
           },
         },
         matchedRule,
-        suggestions: this.buildSuggestions(request.allowPersistence !== false),
+        suggestions: this.buildSuggestions(request.allowPersistence !== false, facts),
         scopePreview: this.buildScopePreview(request, facts),
       };
     }
@@ -142,7 +205,7 @@ export class PermissionEngine {
             originalReason: modeDecision.reason.summary,
           },
         },
-        suggestions: this.buildSuggestions(request.allowPersistence !== false),
+        suggestions: this.buildSuggestions(request.allowPersistence !== false, facts),
         scopePreview: this.buildScopePreview(request, facts),
       };
     }
@@ -150,7 +213,7 @@ export class PermissionEngine {
     return {
       decision: modeDecision.decision,
       reason: modeDecision.reason,
-      suggestions: this.buildSuggestions(request.allowPersistence !== false),
+      suggestions: this.buildSuggestions(request.allowPersistence !== false, facts),
       scopePreview: this.buildScopePreview(request, facts),
     };
   }
@@ -282,8 +345,39 @@ export class PermissionEngine {
             summary: "Accept-edits mode allows in-workspace reads and edits.",
           },
         };
+      case "dangerous_only":
+        if (this.isDangerousOnlyPromptWorthy(facts)) {
+          return {
+            decision: "ask",
+            reason: {
+              type: "mode",
+              mode,
+              summary:
+                "Dangerous-only mode prompts only for destructive, high-risk, or ambiguous external actions.",
+            },
+          };
+        }
+        return {
+          decision: "allow",
+          reason: {
+            type: "mode",
+            mode,
+            summary:
+              "Dangerous-only mode allows safe reads, edits, and non-destructive commands automatically.",
+          },
+        };
       case "dont_ask":
       case "bypass_permissions":
+        if (facts.isDataExport) {
+          return {
+            decision: "ask",
+            reason: {
+              type: "mode",
+              mode,
+              summary: "Data export always requires an explicit prompt, even in bypass modes.",
+            },
+          };
+        }
         return {
           decision: "allow",
           reason: {
@@ -324,17 +418,26 @@ export class PermissionEngine {
     const toolName = canonicalizeToolName(String(request.toolName || "").trim());
     const approvalType = request.approvalType;
     const normalizedCommand = normalizeCommandPrefix(request.command || this.extractCommand(request.toolInput));
-    const normalizedPath = normalizePermissionPath(request.path || this.extractPath(request.toolInput));
+    const normalizedPath = this.normalizePathAgainstWorkspace(
+      request.workspace.path,
+      request.path || this.extractPath(request.toolInput),
+    );
     const normalizedServerName = normalizeServerName(request.serverName || "");
+    const normalizedDomain = extractDomainFromUrl(extractUrlFromToolInput(request.toolInput)) || "";
     const isHttpRequestReadOnly = this.isReadOnlyHttpRequest(request.toolInput, toolName);
     const isShell = approvalType === "run_command" || toolName === "run_command";
     const isDeleteLike =
       approvalType === "delete_file" ||
       approvalType === "delete_multiple" ||
       toolName === "delete_file";
+    const isDataExport =
+      approvalType === "data_export" ||
+      toolName === "analyze_image" ||
+      toolName === "read_pdf_visual" ||
+      (toolName === "http_request" && !isHttpRequestReadOnly);
     const isExternalSideEffect =
       approvalType === "external_service" ||
-      (toolName === "http_request" && !isHttpRequestReadOnly) ||
+      isDataExport ||
       toolName.endsWith("_action") ||
       toolName === "voice_call";
     const isNetworkAccess =
@@ -353,11 +456,13 @@ export class PermissionEngine {
       normalizedPath,
       normalizedCommand,
       normalizedServerName,
+      normalizedDomain,
       isReadOnly,
       isWriteLike,
       isWorkspaceWriteLike,
       isDeleteLike,
       isShell,
+      isDataExport,
       isExternalSideEffect,
       isNetworkAccess,
       isNonWorkspaceInteraction,
@@ -420,6 +525,56 @@ export class PermissionEngine {
     return rawMethod ? rawMethod.toUpperCase() : "GET";
   }
 
+  private static isDangerousOnlySafeCommand(command: string): boolean {
+    const normalized = String(command || "").trim();
+    if (!normalized) {
+      return false;
+    }
+
+    const lowered = normalized.toLowerCase();
+    if (DANGEROUS_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized))) {
+      return false;
+    }
+
+    // Composite shell expressions can hide side effects that are hard to classify safely.
+    if (
+      /&&|\|\||;|`|\$\(|>>?|<<?|\bchmod\b|\bchown\b|\bsudo\b|\btee\b/i.test(normalized)
+    ) {
+      return false;
+    }
+
+    // Keep dangerous_only conservative for shell: allow only an explicit read/test subset.
+    if (
+      lowered.startsWith("find ") &&
+      /-delete|-exec|-ok|-okdir|-execdir|-fprint|-fprintf/i.test(normalized)
+    ) {
+      return false;
+    }
+
+    return SAFE_DANGEROUS_ONLY_COMMAND_PREFIXES.some(
+      (prefix) => lowered === prefix || lowered.startsWith(`${prefix} `),
+    );
+  }
+
+  private static isDangerousOnlyPromptWorthy(facts: PermissionFacts): boolean {
+    if (facts.isDeleteLike) {
+      return true;
+    }
+    if (facts.isShell) {
+      return !this.isDangerousOnlySafeCommand(facts.normalizedCommand);
+    }
+    if (facts.toolName === "run_applescript") {
+      return true;
+    }
+    if (facts.isExternalSideEffect || facts.isMcp) {
+      return true;
+    }
+    if (facts.isNonWorkspaceInteraction) {
+      return true;
+    }
+    return false;
+  }
+
   private static extractCommand(toolInput: unknown): string {
     const obj = toolInput && typeof toolInput === "object" ? (toolInput as Record<string, unknown>) : null;
     return typeof obj?.command === "string" ? obj.command : "";
@@ -431,6 +586,12 @@ export class PermissionEngine {
     if (typeof obj?.filePath === "string") return obj.filePath;
     if (typeof obj?.targetPath === "string") return obj.targetPath;
     return "";
+  }
+
+  private static normalizePathAgainstWorkspace(workspacePath: string, rawPath: string): string {
+    const trimmed = String(rawPath || "").trim();
+    if (!trimmed) return "";
+    return normalizePermissionPath(path.isAbsolute(trimmed) ? trimmed : path.join(workspacePath, trimmed));
   }
 
   private static findBestRule(rules: PermissionRule[], facts: PermissionFacts): PermissionRule | undefined {
@@ -465,6 +626,10 @@ export class PermissionEngine {
     switch (scope.kind) {
       case "tool":
         return scope.toolName === facts.toolName;
+      case "domain":
+        if (!facts.normalizedDomain || !scope.domain) return false;
+        if (scope.toolName && scope.toolName !== facts.toolName) return false;
+        return facts.normalizedDomain === scope.domain;
       case "path":
         if (!facts.normalizedPath || !scope.path) return false;
         if (scope.toolName && scope.toolName !== facts.toolName) return false;
@@ -482,7 +647,10 @@ export class PermissionEngine {
     }
   }
 
-  private static buildSuggestions(allowPersistence: boolean): PermissionPromptActionOption[] {
+  private static buildSuggestions(
+    allowPersistence: boolean,
+    facts: PermissionFacts,
+  ): PermissionPromptActionOption[] {
     const base: PermissionPromptActionOption[] = [
       { action: "deny_once", label: "Deny once", effect: "deny" },
       { action: "allow_once", label: "Allow once", effect: "allow" },
@@ -490,7 +658,7 @@ export class PermissionEngine {
     if (!allowPersistence) {
       return base;
     }
-    return [
+    const suggestions: PermissionPromptActionOption[] = [
       ...base,
       {
         action: "deny_session",
@@ -516,19 +684,24 @@ export class PermissionEngine {
         effect: "allow",
         destination: "workspace",
       },
-      {
-        action: "deny_profile",
-        label: "Deny for profile",
-        effect: "deny",
-        destination: "profile",
-      },
-      {
-        action: "allow_profile",
-        label: "Allow for profile",
-        effect: "allow",
-        destination: "profile",
-      },
     ];
+    if (!facts.isDataExport) {
+      suggestions.push(
+        {
+          action: "deny_profile",
+          label: "Deny for profile",
+          effect: "deny",
+          destination: "profile",
+        },
+        {
+          action: "allow_profile",
+          label: "Allow for profile",
+          effect: "allow",
+          destination: "profile",
+        },
+      );
+    }
+    return suggestions;
   }
 
   private static buildScopePreview(
@@ -543,6 +716,13 @@ export class PermissionEngine {
     request: PermissionEngineRequest,
     facts = this.buildFacts(request),
   ): PermissionRuleScope {
+    if (facts.normalizedDomain && (facts.isNetworkAccess || facts.isDataExport)) {
+      return {
+        kind: "domain",
+        domain: facts.normalizedDomain,
+        ...(facts.toolName ? { toolName: facts.toolName } : {}),
+      };
+    }
     if (facts.normalizedPath) {
       return {
         kind: "path",

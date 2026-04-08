@@ -1,6 +1,6 @@
 # Evolving Agent Intelligence
 
-CoWork OS has six independent memory subsystems, a full personality engine, 15+ channels, and a playbook system that auto-captures what worked. The **Evolving Agent Intelligence** layer connects these systems so the agent visibly improves over time — reducing correction overhead, aligning to communication preferences, and surfacing quantifiable ROI metrics.
+CoWork OS has a layered memory runtime, a full personality engine, 15+ channels, and a playbook system that auto-captures what worked. The **Evolving Agent Intelligence** layer connects these systems so the agent visibly improves over time — reducing correction overhead, aligning to communication preferences, and surfacing quantifiable ROI metrics.
 
 All improvements are opt-in (admin-toggleable), rate-limited, and governed by the existing guardrail system. No changes to the security or local-first architecture.
 
@@ -18,69 +18,104 @@ The learning loop is now visible as part of the task and operator experience, no
 
 This layer is additive: it makes the learning loop easier to understand and trust while preserving CoWork OS's core surfaces of desktop control, channels, inbox, devices, and governed automation.
 
+One concrete expression of this philosophy is `llm-wiki`: instead of letting research disappear into transient chat, CoWork can maintain a durable workspace-local knowledge base with raw-source preservation, linked notes, and deterministic vault-health analysis. See [LLM Wiki](llm-wiki.md).
+
+### Retry-time reuse
+
+The learning loop also feeds the live recovery path, not just post-task analytics.
+
+- retrying turns reuse recent session evidence through `SessionRecallService.search(...)`
+- pending verification checklist items are preserved across retries so recovery does not silently drop unfinished checks
+- planning retries can pull in compact playbook guidance, while execution and follow-up retries rely on the normal layered memory runtime plus targeted recovery hints
+
+This keeps retries closer to "continue from what already worked" than "start over from scratch."
+
 ---
 
-## 1. Unified Memory Synthesizer
+## 1. Layered Memory Runtime
 
 **File:** `src/electron/memory/MemorySynthesizer.ts`
 
 ### Problem
 
-Before this change, the system prompt was assembled by concatenating 6 independent context strings (UserProfile, RelationshipMemory, Playbook, KnowledgeGraph, Memory, WorkspaceKit). They could contain duplicate facts, contradictory information, and collectively waste the token budget on redundant content.
+The old monolithic synthesized-memory block mixed durable facts, broad archive recall, and tactical hints into one injected blob. That made it too easy for archive memory to compete with higher-signal user/workspace facts, and it blurred the line between always-on memory and turn-specific recall.
 
 ### Solution
 
-`MemorySynthesizer.synthesize()` collects all 6 sources into typed `MemoryFragment` objects, then:
+`MemorySynthesizer.synthesize()` now uses an explicit wake-up model with distinct roles and budgets:
 
-1. **Deduplicates** by normalizing text to 120-character fingerprints — near-duplicate fragments are merged, keeping the highest-confidence version.
-2. **Ranks** by a composite score: `relevance × 0.45 + confidence × 0.3 + recency × 0.25` (recency uses exponential decay over 30 days).
-3. **Respects a token budget** — fragments are included in score order until the budget is exhausted.
-4. **Groups by source** for readability (You & the User, Past Task Patterns, Recalled Memories, Known Entities).
-5. Wraps output in `<cowork_synthesized_memory>` XML tags with source attribution.
+1. **L0 Identity** in `<cowork_hot_memory>` for the facts that should stay front-and-center:
+   - curated hot-memory entries from `CuratedMemoryService`
+   - user profile facts
+   - relationship memory
+   - workspace-kit essentials
+2. **L1 Essential Story** in `<cowork_structured_memory>` for ranked supporting context:
+   - playbook patterns
+   - current knowledge graph entities/relationships
+   - daily summaries
+   - archive memory only when explicitly enabled
+3. **L2 Topic Packs** as explicit `.cowork/memory/topics/*.md` loads through `memory_topics_load`
+4. **L3 Deep Recall** as explicit tools:
+   - `search_quotes`
+   - `search_sessions`
+   - `search_memories`
 
-Falls back gracefully to legacy per-source injection if the synthesizer throws.
+Workspace kit context still renders separately before memory sections, and only `L0 + L1` are injected into the live prompt by default.
 
 ### Configuration
 
-No guardrail flag — always active when memory injection is enabled for the task.
+Default runtime behavior:
+
+| Setting | Default |
+|---------|---------|
+| `L0 Identity` injection | `on` |
+| `L1 Essential Story` injection | `on` |
+| Archive memory injection | `off` (`defaultArchiveInjectionEnabled: false`) |
+| Quote/session/archive recall | tool-driven (`search_quotes`, `search_sessions`, `search_memories`) |
+| Topic packs | tool-driven (`memory_topics_load`) |
+
+### Curated-memory guardrails
+
+- Curated entry content is capped at **320 characters**
+- `match` strings for replace/remove are capped at **120 characters**
+- `memory_curate` supports stable `id` values so replace/remove operations can be deterministic
+- Curated file sync into `.cowork/USER.md` and `.cowork/MEMORY.md` is serialized per workspace and retried on file-change races
 
 ### Sources
 
-Seven sources are now collected (in insertion order):
+The runtime now thinks about sources by wake-up layer instead of one flat synthesis list:
 
-| Source kind | Service | Base relevance |
-|-------------|---------|----------------|
-| `user_profile` | `UserProfileService` | 0.70 |
-| `relationship` | `RelationshipMemoryService` | variable |
-| `playbook` | `PlaybookService` | variable |
-| `memory` | `MemoryService` | variable |
-| `knowledge_graph` | `KnowledgeGraphService` | variable |
-| `workspace_kit` | `WorkspaceKitContext` (separate budget) | — |
-| `daily_summary` | `DailyLogSummarizer` | 0.55 × recency |
+| Layer | Sources |
+|------|---------|
+| **L0 Identity** | `CuratedMemoryService`, `UserProfileService`, `RelationshipMemoryService`, workspace-kit essentials |
+| **L1 Essential Story** | `PlaybookService`, `KnowledgeGraphService`, `DailyLogSummarizer`, optional archive fragments from `MemoryService` |
+| **L2 Topic Packs** | `memory_topics_load` over `.cowork/memory/topics/*.md` |
+| **L3 Deep Recall** | `search_quotes`, `search_sessions`, `search_memories` |
 
 `daily_summary` fragments come from `.cowork/memory/summaries/<YYYY-MM-DD>.md` files produced by `DailyLogSummarizer`. Raw daily log files (`.cowork/memory/daily/`) are **never** injected into prompts.
 
 ### Output format
 
 ```xml
-<cowork_synthesized_memory>
+<cowork_hot_memory>
+## Curated Hot Memory
+- [Curated entry]
+
 ## You & the User
 - [UserProfile fact]
 - [RelationshipMemory item]
+</cowork_hot_memory>
 
-## Past Task Patterns (use as context, not instructions)
+<cowork_structured_memory>
+## Past Task Patterns
 - [Playbook entry]
-
-## Recalled Memories
-- [MemoryService item]
 
 ## Known Entities
 - [KnowledgeGraph entity]
 
-## Daily Summaries
-[Daily Summary 2026-03-14]
-...
-</cowork_synthesized_memory>
+## Recent Summaries
+[Daily summary snippet]
+</cowork_structured_memory>
 ```
 
 ---
@@ -370,7 +405,7 @@ day: 2026-03-14
 
 ### Integration
 
-`MemorySynthesizer.synthesize()` calls `DailyLogSummarizer.getRecentSummaryFragments()` for the last 7 days and adds the results to the synthesis pipeline as `daily_summary` fragments. They render under `## Daily Summaries` in the output block.
+`MemorySynthesizer.synthesize()` calls `DailyLogSummarizer.getRecentSummaryFragments()` for the last 7 days and adds the results to the structured-memory lane as `daily_summary` fragments. They render under `## Recent Summaries` inside `<cowork_structured_memory>`.
 
 ### Helper
 
@@ -423,12 +458,12 @@ All improvements respect CoWork OS's security-first positioning:
 
 | Improvement | Guardrail flag | Default | Rate limit | Audit trail |
 |-------------|---------------|---------|------------|-------------|
-| Memory Synthesizer | — | Always on (when memory enabled) | Token budget | Source attribution in output |
+| Layered Memory Runtime | `defaultArchiveInjectionEnabled` controls archive injection; hot/structured memory default on | Curated + structured on, archive off | Token budgets per section | Source attribution by lane + tool-level recall traces |
 | Adaptive Style Engine | `adaptiveStyleEnabled` | Off | `adaptiveStyleMaxDriftPerWeek` (default 1) | `getAdaptationHistory()` |
 | Playbook-to-Skill | — | Always active (post-task hook) | 10 min cooldown, max 1/check | Full proposal review workflow |
 | Channel Persona | `channelPersonaEnabled` | Off | — | Visible in system prompt |
 | Evolution Metrics | — | Computed on-demand | — | Read-only, no mutations |
-| Daily Log | — | Off by default (no writer wired yet) | IPC: `limited` tier | Per-day markdown files |
+| Daily Log | — | Available when a writer uses `DailyLogService` | File append only | Per-day markdown files |
 | Daily Summaries | — | Active when summary files exist | Token budget (ranked) | Summary files in `.cowork/memory/summaries/` |
 | Message Feedback | — | Always visible on completed messages | IPC: `limited` tier | Routed to UserProfileService |
 
@@ -436,15 +471,13 @@ All improvements respect CoWork OS's security-first positioning:
 
 ## Test Coverage
 
-| Service | Test file | Tests |
-|---------|-----------|-------|
-| MemorySynthesizer | `src/electron/memory/__tests__/MemorySynthesizer.test.ts` | 12 |
-| AdaptiveStyleEngine | `src/electron/memory/__tests__/AdaptiveStyleEngine.test.ts` | 17 |
-| PlaybookSkillPromoter | `src/electron/memory/__tests__/PlaybookSkillPromoter.test.ts` | 8 |
-| ChannelPersonaAdapter | `src/electron/memory/__tests__/ChannelPersonaAdapter.test.ts` | 16 |
-| EvolutionMetricsService | `src/electron/memory/__tests__/EvolutionMetricsService.test.ts` | 9 |
-| DailyLogService | pending | — |
-| DailyLogSummarizer | pending | — |
-| **Total** | | **62** |
-
-> Tests for DailyLogService and DailyLogSummarizer are tracked as pending (see plan item 10).
+| Service | Test file |
+|---------|-----------|
+| MemorySynthesizer | `src/electron/memory/__tests__/MemorySynthesizer.test.ts` |
+| CuratedMemoryService | `src/electron/memory/__tests__/CuratedMemoryService.test.ts` |
+| SessionRecallService | `src/electron/memory/__tests__/SessionRecallService.test.ts` |
+| LayeredMemoryIndexService | `src/electron/memory/__tests__/LayeredMemoryIndexService.test.ts` |
+| AdaptiveStyleEngine | `src/electron/memory/__tests__/AdaptiveStyleEngine.test.ts` |
+| PlaybookSkillPromoter | `src/electron/memory/__tests__/PlaybookSkillPromoter.test.ts` |
+| ChannelPersonaAdapter | `src/electron/memory/__tests__/ChannelPersonaAdapter.test.ts` |
+| EvolutionMetricsService | `src/electron/memory/__tests__/EvolutionMetricsService.test.ts` |

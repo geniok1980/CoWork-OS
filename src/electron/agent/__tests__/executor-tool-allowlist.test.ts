@@ -121,6 +121,51 @@ describe("TaskExecutor tool allow-list semantics", () => {
     expect(allowlist.has("computer_move_mouse")).toBe(true);
   });
 
+  it("includes parse_document but not read_pdf_visual for ordinary PDF reading steps", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      title: "PDF summary",
+      prompt: "Read the attached PDF and summarize its philosophy.",
+      agentConfig: {
+        taskIntent: "execution",
+      },
+    };
+    executor.getEffectiveExecutionMode = vi.fn().mockReturnValue("execute");
+
+    const allowlist = (TaskExecutor as Any).prototype.buildStepToolAllowlist.call(
+      executor,
+      { requiredTools: new Set<string>() },
+      "analysis",
+      "writing",
+      "Read the attached PDF and summarize the argument in Turkish.",
+    );
+
+    expect(allowlist.has("parse_document")).toBe(true);
+    expect(allowlist.has("read_pdf_visual")).toBe(false);
+  });
+
+  it("adds read_pdf_visual only for explicit PDF layout analysis steps", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      title: "PDF layout review",
+      prompt: "Review the scanned PDF layout.",
+      agentConfig: {
+        taskIntent: "execution",
+      },
+    };
+    executor.getEffectiveExecutionMode = vi.fn().mockReturnValue("execute");
+
+    const allowlist = (TaskExecutor as Any).prototype.buildStepToolAllowlist.call(
+      executor,
+      { requiredTools: new Set<string>() },
+      "analysis",
+      "writing",
+      "Inspect this PDF layout, formatting, and scanned page appearance.",
+    );
+
+    expect(allowlist.has("read_pdf_visual")).toBe(true);
+  });
+
   it("infers create_diagram for inline diagram steps", () => {
     const executor = Object.create(TaskExecutor.prototype) as Any;
     executor.getEffectiveExecutionMode = vi.fn().mockReturnValue("execute");

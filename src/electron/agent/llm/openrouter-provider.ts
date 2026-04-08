@@ -20,6 +20,15 @@ import { buildOpenAICompatibleSystemMessages } from "./openai-compatible";
 import { createLogger } from "../../utils/logger";
 
 const logger = createLogger("OpenRouter");
+const SHARED_MODEL_IMAGE_SUPPORT = new Map<string, boolean>();
+const OPENROUTER_KNOWN_TEXT_ONLY_MODEL_PATTERNS = [
+  /\bminimax\/minimax-m2\.5\b/i,
+  /\bqwen\/qwen3(?:[.-]|$)/i,
+  /\bnemotron\b/i,
+];
+const MODEL_CATALOG_RETRY_COOLDOWN_MS = 5 * 60 * 1000;
+
+export const OPENROUTER_DEFAULT_MODEL = "anthropic/claude-3.5-sonnet";
 
 /**
  * OpenRouter API provider implementation
@@ -33,6 +42,7 @@ export class OpenRouterProvider implements LLMProvider {
   private modelImageSupport = new Map<string, boolean>();
   private modelCatalogLoaded = false;
   private modelCatalogLoadPromise: Promise<void> | null = null;
+  private modelCatalogLastAttemptAt = 0;
 
   constructor(config: LLMProviderConfig) {
     const apiKey = config.openrouterApiKey;
@@ -44,7 +54,7 @@ export class OpenRouterProvider implements LLMProvider {
 
     this.apiKey = apiKey;
     this.baseUrl = config.openrouterBaseUrl || "https://openrouter.ai/api/v1";
-    this.defaultModel = config.model || "openrouter/free";
+    this.defaultModel = config.model || OPENROUTER_DEFAULT_MODEL;
   }
 
   async createMessage(request: LLMRequest): Promise<LLMResponse> {
@@ -151,6 +161,10 @@ export class OpenRouterProvider implements LLMProvider {
     }
 
     if (this.isImageInputUnsupportedError(status, normalized)) {
+      return true;
+    }
+
+    if (this.isToolChoiceUnsupportedError(status, normalized)) {
       return true;
     }
 
@@ -320,6 +334,7 @@ export class OpenRouterProvider implements LLMProvider {
       const detail = errorData.error?.message || response.statusText;
       if (this.isImageInputUnsupportedError(response.status, detail)) {
         this.modelImageSupport.set(params.model, false);
+        SHARED_MODEL_IMAGE_SUPPORT.set(params.model, false);
       }
       const fullMessage =
         `OpenRouter API error: ${response.status} ${response.statusText}` +
@@ -349,6 +364,14 @@ export class OpenRouterProvider implements LLMProvider {
     );
   }
 
+  private isToolChoiceUnsupportedError(status: number | undefined, detail: string): boolean {
+    const normalized = String(detail || "").toLowerCase();
+    return (
+      status === 404 &&
+      normalized.includes("no endpoints found that support the provided 'tool_choice' value")
+    );
+  }
+
   private buildImageInputUnsupportedError(model: string): LLMProviderError {
     const detail = `No endpoints found that support image input for model ${model}`;
     const err = new Error(`OpenRouter API error: 404 Not Found - ${detail}`) as LLMProviderError;
@@ -360,6 +383,12 @@ export class OpenRouterProvider implements LLMProvider {
   }
 
   private async modelSupportsImageInput(model: string): Promise<boolean> {
+    const sharedHint = OpenRouterProvider.getImageSupportHint(model);
+    if (sharedHint != null) {
+      this.modelImageSupport.set(model, sharedHint);
+      return sharedHint;
+    }
+
     const cached = this.modelImageSupport.get(model);
     if (cached != null) {
       return cached;
@@ -378,8 +407,15 @@ export class OpenRouterProvider implements LLMProvider {
       await this.modelCatalogLoadPromise;
       return;
     }
+    if (
+      this.modelCatalogLastAttemptAt > 0 &&
+      Date.now() - this.modelCatalogLastAttemptAt < MODEL_CATALOG_RETRY_COOLDOWN_MS
+    ) {
+      return;
+    }
 
     this.modelCatalogLoadPromise = (async () => {
+      this.modelCatalogLastAttemptAt = Date.now();
       try {
         const response = await fetch(`${this.baseUrl}/models?output_modalities=all`, {
           headers: {
@@ -399,12 +435,14 @@ export class OpenRouterProvider implements LLMProvider {
           const inputModalities = Array.isArray(model?.architecture?.input_modalities)
             ? model.architecture.input_modalities
             : [];
-          this.modelImageSupport.set(modelId, inputModalities.includes("image"));
+          const supportsImageInput = inputModalities.includes("image");
+          this.modelImageSupport.set(modelId, supportsImageInput);
+          SHARED_MODEL_IMAGE_SUPPORT.set(modelId, supportsImageInput);
         }
+        this.modelCatalogLoaded = true;
       } catch (error) {
         logger.warn("Failed to fetch OpenRouter model capabilities:", error);
       } finally {
-        this.modelCatalogLoaded = true;
         this.modelCatalogLoadPromise = null;
       }
     })();
@@ -539,5 +577,15 @@ export class OpenRouterProvider implements LLMProvider {
       logger.error("Failed to fetch OpenRouter models:", error);
       return [];
     }
+  }
+
+  static getImageSupportHint(model: string): boolean | undefined {
+    const normalized = String(model || "").trim();
+    if (!normalized) return undefined;
+    const shared = SHARED_MODEL_IMAGE_SUPPORT.get(normalized);
+    if (shared != null) return shared;
+    return OPENROUTER_KNOWN_TEXT_ONLY_MODEL_PATTERNS.some((pattern) => pattern.test(normalized))
+      ? false
+      : undefined;
   }
 }

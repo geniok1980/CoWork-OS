@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { normalizeWhatsAppNaturalCommand } from "../whatsapp-command-utils";
 
-describe("WhatsApp natural command mapping for simplify/batch", () => {
+describe("WhatsApp natural command mapping for slash workflows", () => {
   it("maps simplify phrases", () => {
     expect(normalizeWhatsAppNaturalCommand("simplify this")).toBe("/simplify");
     expect(normalizeWhatsAppNaturalCommand("run simplify tighten this memo")).toBe(
@@ -18,10 +18,18 @@ describe("WhatsApp natural command mapping for simplify/batch", () => {
     );
   });
 
+  it("maps llm-wiki phrases", () => {
+    expect(normalizeWhatsAppNaturalCommand("llm wiki agent memory systems")).toBe(
+      "/llm-wiki agent memory systems",
+    );
+    expect(normalizeWhatsAppNaturalCommand("build a research vault on ai agents")).toBe(
+      "/llm-wiki on ai agents",
+    );
+  });
+
   it("does not misclassify URLs", () => {
     expect(
       normalizeWhatsAppNaturalCommand("check https://example.com/batch before we decide"),
     ).toBeUndefined();
   });
 });
-

@@ -9,15 +9,15 @@ CoWork OS is a local-first desktop runtime for AI-assisted task execution, backg
 - **Tool and connector layer**: file, shell, browser, web, native integrations, MCP connectors, remote execution, and **macOS computer use** (`computer_*`) as a governed desktop-GUI lane (session overlay, per-app consent, policy-gated routing). See [Computer use (macOS)](computer-use.md).
 - **Automation/event layer**: scheduled tasks, webhooks, channel events, and MCP connector/resource notifications all flow through the same trigger engine
 - **Turn and tool orchestration**: a session-scoped `SessionRuntime` owns task-session state, session checklists, permission state, turn coordination, resume/snapshot persistence, and task projection, while a lower-level `TurnKernel` handles the active step, follow-up, or text turn; a metadata-driven `ToolScheduler` batches concurrency-safe reads, serializes conflicting writes, and keeps tool-result ordering stable
-- **Prompt stack and tool guidance**: execution prompts are assembled from named session- and turn-scoped sections with explicit budgets; stable session sections form a provider-cacheable prefix, volatile turn sections stay uncached, and visible tools receive prompt-aware descriptions rendered only after policy and mode filtering
+- **Prompt stack and tool guidance**: execution prompts are assembled from named session- and turn-scoped sections with explicit budgets; stable session sections form a provider-cacheable prefix, volatile turn sections stay uncached, layered memory injects only `L0 Identity` + `L1 Essential Story` by default while `L2 Topic Packs` and `L3 Deep Recall` remain tool-driven, retry-aware recovery guidance can inject attempt/retry state plus recent session evidence, and visible tools receive prompt-aware descriptions rendered only after policy and mode filtering
 - **Additive skill runtime**: canonical task text remains immutable for skill routing purposes, while `use_skill` attaches structured `SkillApplication` context plus scoped runtime directives instead of rewriting the task prompt
 - **Delegation graph**: delegated work now runs through a normalized orchestration graph engine so spawned agents, team work, workflow phases, and ACP tasks share one run/node/event model
 - **Worker roles and verification**: built-in worker roles (`researcher`, `implementer`, `verifier`, `synthesizer`) carry hard tool scopes, delegated work receives a structured brief instead of raw prompt passthrough, and verification runs use both early nudges and a dedicated verdict/report contract
 - **Adaptive model routing**: the executor can switch into a workflow-pipeline path where decomposed phases run as child tasks with per-phase model overrides or capability-based auto-selection
 - **Federated agent orchestration**: ACP registry + remote invocation let orchestrators target local roles or remote A2A-compatible agents under shared approval and policy controls
-- **Local persistence**: SQLite, local files, knowledge graph state, run records, orchestration graph nodes/events, ACP agent registrations and ACP task state, usage telemetry, feedback events, `session_runtime_v2` task snapshots, and workspace-kit contracts in `.cowork/`
-- **Permission engine**: layered tool approval decisions combine workspace capabilities, explicit rules, hard guardrails, session grants, and workspace-local policy files, with workspace rule browsing/removal in Settings
-- **Runtime visibility surfaces**: the task runtime emits learning progression, unified recall, persistent shell, live routing events, semantic tool-batch summaries, session-checklist events, and follow-up completion events into Mission Control and the renderer so operator state stays visible instead of hidden in services
+- **Local persistence**: SQLite, local files, curated hot-memory entries, archive memory rows and summaries, transcript spans/checkpoints with structured summaries + verbatim evidence packets, knowledge graph state including temporal edge validity, run records, orchestration graph nodes/events, ACP agent registrations and ACP task state, usage telemetry, feedback events, `session_runtime_v2` task snapshots, `.cowork/memory/topics`, and workspace-kit contracts in `.cowork/`
+- **Permission engine**: layered tool approval decisions combine workspace capabilities, explicit rules, hard guardrails, session grants, workspace-local policy files, and mode defaults including `dangerous_only`, with workspace rule browsing/removal in Settings
+- **Runtime visibility surfaces**: the task runtime emits learning progression, unified recall, persistent shell, live routing events, semantic tool-batch summaries, curated external progress relays for text-first channels, session-checklist events, and follow-up completion events into Mission Control and the renderer so operator state stays visible instead of hidden in services
 - **Lifecycle reconciliation**: completion persists terminal task state before emitting terminal events, and resume paths re-derive canonical persisted status before writing `executing`, so late approval or follow-up resumes cannot reopen completed tasks
 - **Completion hardening**: verified-mode evidence bundles, step-intent alignment/decomposition heuristics, read-only entropy sweeps, and verifier verdict/report projection make completion checks more explicit without mutating the task's final result
 
@@ -48,6 +48,7 @@ The `.cowork/` workspace kit holds durable human-edited operating context.
 
 - `BOOTSTRAP.md` is a one-time onboarding checklist
 - `HEARTBEAT.md` is reserved for recurring heartbeat checklist work
+- `USER.md` and `MEMORY.md` can contain both human-authored content and auto-managed curated-memory blocks
 - project-scoped context lives under `.cowork/projects/<projectId>/`
 
 ## Skills Runtime Model
@@ -57,7 +58,7 @@ The skill system now follows an additive contract:
 - the canonical user request is resolved as `rawPrompt -> userPrompt -> prompt`
 - task creation normalizes prompt fields centrally so new tasks always persist canonical prompt data
 - skill routing works as shortlist-and-hint guidance, not prompt takeover
-- slash commands can still invoke skills deterministically, but the result is applied additively
+- slash commands can still invoke skills deterministically, including first-class bundled workflows such as `/simplify`, `/batch`, and `/llm-wiki`, but the result is applied additively
 - `use_skill` returns structured context plus scoped directives, not a replacement task definition
 - the executor builds runtime context from canonical prompt + task notes + applied skill content
 - the renderer always shows canonical task text and renders applied skills separately

@@ -89,7 +89,7 @@ the permission engine still evaluates explicit rules, guardrails, and mode defau
 | Write | Create/modify files | Yes |
 | Delete | Delete files (usually approval-gated, unless a matching rule allows it) | No |
 | Shell | Run shell commands (usually approval-gated, unless a matching rule allows it) | No |
-| Network | Browser/web access | Yes |
+| Network | Allow network-capable tools to run at all. Export-sensitive requests may still prompt, and domain guardrails/rules may still block specific destinations. | Yes |
 
 ### Allowed Paths
 
@@ -110,15 +110,52 @@ Enable broader file access for development:
 
 ### Permission Rules
 
-For explicit tool, path, command-prefix, and MCP-server rules:
+For explicit tool, domain, path, command-prefix, and MCP-server rules:
 
 1. Open **Settings > System & Security**
 2. Set the default permission mode if needed
 3. Add profile rules for global policy
 4. Use the workspace-local rule list to review or remove rules for the active workspace
 
+Available rule scopes:
+
+| Scope | What it matches | Typical use |
+|-------|------------------|-------------|
+| `tool` | One tool name | Always ask or always allow a specific tool |
+| `domain` | A destination hostname, optionally for one tool | Allow `web_fetch` or `http_request` only for `api.example.com` |
+| `path` | Absolute path prefix, optionally for one tool | Allow a tool only under a shared folder |
+| `command_prefix` | Normalized shell prefix | Auto-approve trusted read/test commands |
+| `mcp_server` | One MCP backend | Narrow access to a specific connector/server |
+
+Common mode choices:
+
+- `default` - safe reads auto-run; writes, deletes, shell, data export, and external effects prompt
+- `dangerous_only` - recommended when you want fewer interruptions without fully disabling review; safe reads/edits and conservative read/test shell commands auto-run, while risky or ambiguous actions still prompt
+- `dont_ask` / `bypass_permissions` - high-autonomy modes for trusted environments only, but export-sensitive actions still require explicit approval
+
 Workspace-local rules are stored in SQLite and mirrored to `.cowork/policy/permissions.json`.
 Removing a workspace rule updates both storage locations when possible.
+
+### Export-Sensitive Operations
+
+The permission engine now distinguishes ordinary network reads from outbound data export.
+
+- `web_fetch` is a normal network read
+- `http_request` stays a normal network read only for simple `GET` or `HEAD` requests with no body and no custom headers
+- mutating or payload-carrying `http_request` calls are treated as `data_export`
+- `analyze_image` and `read_pdf_visual` are also treated as `data_export` because file bytes leave the local machine
+
+This means:
+
+- enabling workspace `Network` does not automatically suppress approval for these export paths
+- `dont_ask` and `bypass_permissions` still pause on `data_export`
+- the session-level "Approve all" shortcut does not auto-approve export either
+
+Practical examples:
+
+- use a `domain` allow rule for `http_request` if a workspace should talk only to `api.example.com`
+- keep `web_fetch` open to a docs domain while still requiring approval for raw API posts
+- expect imports, drag-and-drop files, and channel attachments to show up as untrusted sources in later export prompts
 
 ## Sandbox Configuration
 

@@ -18,6 +18,9 @@ import {
   ComparisonSession,
   ComparisonSessionStatus,
   ComparisonResult,
+  CuratedMemoryEntry,
+  CuratedMemoryKind,
+  CuratedMemoryTarget,
 } from "../../shared/types";
 import { isActiveTaskStatus, normalizeTaskLifecycleState } from "../../shared/task-status";
 import { isTimelineEventType, normalizeTaskEventToTimelineV2 } from "../../shared/timeline-v2";
@@ -122,6 +125,14 @@ export class WorkspaceRepository {
   updateLastUsedAt(id: string, lastUsedAt: number = Date.now()): void {
     const stmt = this.db.prepare("UPDATE workspaces SET last_used_at = ? WHERE id = ?");
     stmt.run(lastUsedAt, id);
+  }
+
+  /**
+   * Update workspace path after the folder is moved.
+   */
+  updatePath(id: string, nextPath: string): void {
+    const stmt = this.db.prepare("UPDATE workspaces SET path = ? WHERE id = ?");
+    stmt.run(nextPath, id);
   }
 
   /**
@@ -1533,7 +1544,11 @@ export class WorkspacePermissionRuleRepository {
       "toolName" in rule.scope ? rule.scope.toolName || null : null,
       "path" in rule.scope ? rule.scope.path || null : null,
       "prefix" in rule.scope ? rule.scope.prefix || null : null,
-      "serverName" in rule.scope ? rule.scope.serverName || null : null,
+      "serverName" in rule.scope
+        ? rule.scope.serverName || null
+        : "domain" in rule.scope
+          ? rule.scope.domain || null
+          : null,
       JSON.stringify(rule.metadata ?? {}),
       now,
       now,
@@ -1572,6 +1587,15 @@ export class WorkspacePermissionRuleRepository {
     const scopeKind = String(row.scope_kind || "");
     let scope: PersistedPermissionRule["scope"];
     switch (scopeKind) {
+      case "domain":
+        scope = {
+          kind: "domain",
+          domain: String(row.scope_server_name || ""),
+          ...(typeof row.scope_tool_name === "string" && row.scope_tool_name
+            ? { toolName: row.scope_tool_name }
+            : {}),
+        };
+        break;
       case "path":
         scope = {
           kind: "path",
@@ -1868,7 +1892,7 @@ interface ChannelConfigReadResult {
 
 /**
  * Encrypt a channel config JSON string using OS keychain via safeStorage.
- * Falls back to storing plain JSON if encryption is unavailable (e.g. in tests).
+ * Refuses to persist secrets when secure storage is unavailable.
  */
 function encryptChannelConfig(json: string): string {
   try {
@@ -1876,10 +1900,15 @@ function encryptChannelConfig(json: string): string {
     if (safeStorage?.isEncryptionAvailable()) {
       return CHANNEL_CONFIG_ENCRYPTED_PREFIX + safeStorage.encryptString(json).toString("base64");
     }
+    throw new Error(
+      "Secure storage is unavailable. Refusing to store channel credentials in plaintext.",
+    );
   } catch (error) {
-    channelRepoLogger.warn("Failed to encrypt channel config, storing plaintext:", error);
+    channelRepoLogger.error("Failed to encrypt channel config:", error);
+    throw error instanceof Error
+      ? error
+      : new Error("Failed to encrypt channel config with secure storage.");
   }
-  return json;
 }
 
 /**
@@ -3199,6 +3228,8 @@ export interface Memory {
   updatedAt: number;
 }
 
+export interface CuratedMemoryEntryRecord extends CuratedMemoryEntry {}
+
 export interface MemorySummary {
   id: string;
   workspaceId: string;
@@ -3925,6 +3956,201 @@ export class MemoryRepository {
       isPrivate: row.is_private === 1,
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,
+    };
+  }
+}
+
+export class CuratedMemoryRepository {
+  constructor(private db: Database.Database) {}
+
+  create(
+    input: Omit<CuratedMemoryEntryRecord, "id" | "createdAt" | "updatedAt"> & {
+      id?: string;
+      createdAt?: number;
+      updatedAt?: number;
+    },
+  ): CuratedMemoryEntryRecord {
+    const now = Date.now();
+    const entry: CuratedMemoryEntryRecord = {
+      ...input,
+      id: input.id || uuidv4(),
+      createdAt: input.createdAt ?? now,
+      updatedAt: input.updatedAt ?? now,
+    };
+
+    this.db
+      .prepare(
+        `INSERT INTO curated_memory_entries (
+          id, workspace_id, task_id, target, kind, content, normalized_key, source,
+          confidence, status, created_at, updated_at, last_confirmed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        entry.id,
+        entry.workspaceId,
+        entry.taskId || null,
+        entry.target,
+        entry.kind,
+        entry.content,
+        entry.normalizedKey,
+        entry.source,
+        entry.confidence,
+        entry.status,
+        entry.createdAt,
+        entry.updatedAt,
+        entry.lastConfirmedAt ?? null,
+      );
+
+    return entry;
+  }
+
+  update(
+    id: string,
+    updates: Partial<
+      Pick<
+        CuratedMemoryEntryRecord,
+        "kind" | "content" | "normalizedKey" | "confidence" | "status" | "lastConfirmedAt"
+      >
+    >,
+  ): CuratedMemoryEntryRecord | undefined {
+    const fields: string[] = [];
+    const values: unknown[] = [];
+
+    if (updates.kind !== undefined) {
+      fields.push("kind = ?");
+      values.push(updates.kind);
+    }
+    if (updates.content !== undefined) {
+      fields.push("content = ?");
+      values.push(updates.content);
+    }
+    if (updates.normalizedKey !== undefined) {
+      fields.push("normalized_key = ?");
+      values.push(updates.normalizedKey);
+    }
+    if (updates.confidence !== undefined) {
+      fields.push("confidence = ?");
+      values.push(updates.confidence);
+    }
+    if (updates.status !== undefined) {
+      fields.push("status = ?");
+      values.push(updates.status);
+    }
+    if (updates.lastConfirmedAt !== undefined) {
+      fields.push("last_confirmed_at = ?");
+      values.push(updates.lastConfirmedAt ?? null);
+    }
+    if (fields.length === 0) return this.findById(id);
+
+    fields.push("updated_at = ?");
+    values.push(Date.now(), id);
+
+    this.db
+      .prepare(`UPDATE curated_memory_entries SET ${fields.join(", ")} WHERE id = ?`)
+      .run(...values);
+
+    return this.findById(id);
+  }
+
+  findById(id: string): CuratedMemoryEntryRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM curated_memory_entries WHERE id = ?")
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : undefined;
+  }
+
+  findByNormalizedKey(
+    workspaceId: string,
+    target: CuratedMemoryTarget,
+    kind: CuratedMemoryKind,
+    normalizedKey: string,
+  ): CuratedMemoryEntryRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM curated_memory_entries
+         WHERE workspace_id = ?
+           AND target = ?
+           AND kind = ?
+           AND normalized_key = ?
+           AND status = 'active'
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+      )
+      .get(workspaceId, target, kind, normalizedKey) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : undefined;
+  }
+
+  findFirstMatching(workspaceId: string, target: CuratedMemoryTarget, match: string) {
+    const token = `%${match}%`;
+    const row = this.db
+      .prepare(
+        `SELECT * FROM curated_memory_entries
+         WHERE workspace_id = ?
+           AND target = ?
+           AND status = 'active'
+           AND content LIKE ?
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+      )
+      .get(workspaceId, target, token) as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : undefined;
+  }
+
+  list(params: {
+    workspaceId: string;
+    target?: CuratedMemoryTarget;
+    kind?: CuratedMemoryKind;
+    status?: "active" | "archived";
+    limit?: number;
+  }): CuratedMemoryEntryRecord[] {
+    const clauses = ["workspace_id = ?"];
+    const values: unknown[] = [params.workspaceId];
+    if (params.target) {
+      clauses.push("target = ?");
+      values.push(params.target);
+    }
+    if (params.kind) {
+      clauses.push("kind = ?");
+      values.push(params.kind);
+    }
+    if (params.status) {
+      clauses.push("status = ?");
+      values.push(params.status);
+    }
+    values.push(Math.max(1, params.limit ?? 100));
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM curated_memory_entries
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY
+           CASE target WHEN 'user' THEN 0 ELSE 1 END,
+           confidence DESC,
+           updated_at DESC
+         LIMIT ?`,
+      )
+      .all(...values) as Record<string, unknown>[];
+    return rows.map((row) => this.mapRow(row));
+  }
+
+  archive(id: string): CuratedMemoryEntryRecord | undefined {
+    return this.update(id, { status: "archived" });
+  }
+
+  private mapRow(row: Record<string, unknown>): CuratedMemoryEntryRecord {
+    return {
+      id: row.id as string,
+      workspaceId: row.workspace_id as string,
+      taskId: (row.task_id as string) || undefined,
+      target: row.target as CuratedMemoryTarget,
+      kind: row.kind as CuratedMemoryKind,
+      content: row.content as string,
+      normalizedKey: row.normalized_key as string,
+      source: row.source as CuratedMemoryEntryRecord["source"],
+      confidence: Number(row.confidence || 0),
+      status: row.status as CuratedMemoryEntryRecord["status"],
+      createdAt: Number(row.created_at || 0),
+      updatedAt: Number(row.updated_at || 0),
+      lastConfirmedAt: row.last_confirmed_at ? Number(row.last_confirmed_at) : undefined,
     };
   }
 }

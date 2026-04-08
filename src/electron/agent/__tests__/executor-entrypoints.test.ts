@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { TaskExecutor } from "../executor";
 import { AcpxRuntimeUnavailableError } from "../AcpxRuntimeRunner";
+import { PlaybookService } from "../../memory/PlaybookService";
+import { SessionRecallService } from "../../memory/SessionRecallService";
 
 describe("TaskExecutor entrypoint guards", () => {
   it("serializes execute/sendMessage via lifecycle mutex wrappers", async () => {
@@ -16,7 +18,7 @@ describe("TaskExecutor entrypoint guards", () => {
 
     expect(runExclusive).toHaveBeenCalledTimes(2);
     expect(executor.executeUnlocked).toHaveBeenCalledTimes(1);
-    expect(executor.sendMessageUnlocked).toHaveBeenCalledWith("hi", undefined);
+    expect(executor.sendMessageUnlocked).toHaveBeenCalledWith("hi", undefined, undefined);
   });
 
   it("routes executeStep through the unified branch", async () => {
@@ -36,7 +38,7 @@ describe("TaskExecutor entrypoint guards", () => {
     executor.sendMessageUnified = vi.fn(async () => undefined);
     executor.sendMessageLegacy = vi.fn(async () => undefined);
     await executor.sendMessageUnlocked("hello");
-    expect(executor.sendMessageUnified).toHaveBeenCalledWith("hello", undefined);
+    expect(executor.sendMessageUnified).toHaveBeenCalledWith("hello", undefined, undefined);
     expect(executor.sendMessageLegacy).not.toHaveBeenCalled();
   });
 
@@ -62,7 +64,7 @@ describe("TaskExecutor entrypoint guards", () => {
 
     await executor.sendMessageUnlocked("hello");
 
-    expect(executor.sendMessageWithAcpxRuntime).toHaveBeenCalledWith("hello", undefined);
+    expect(executor.sendMessageWithAcpxRuntime).toHaveBeenCalledWith("hello", undefined, undefined);
     expect(executor.sendMessageUnified).not.toHaveBeenCalled();
     expect(executor.sendMessageLegacy).not.toHaveBeenCalled();
   });
@@ -92,7 +94,43 @@ describe("TaskExecutor entrypoint guards", () => {
     await executor.sendMessageUnlocked("hello");
 
     expect(executor.disableExternalRuntimeForFallback).toHaveBeenCalledTimes(1);
-    expect(executor.sendMessageUnified).toHaveBeenCalledWith("hello", undefined);
+    expect(executor.sendMessageUnified).toHaveBeenCalledWith("hello", undefined, undefined);
+  });
+
+  it("preserves quoted assistant metadata when routing user messages through the timeline emitter", () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    const updateStep = vi.fn();
+
+    executor.task = { id: "task-1", agentConfig: {} };
+    executor.timelineEmitter = { startStep: vi.fn(), updateStep };
+    executor.getExternalRuntimeEventMetadata = vi.fn(() => null);
+
+    (TaskExecutor.prototype as Any).emitEvent.call(executor, "user_message", {
+      message: "Can you revise that?",
+      quotedAssistantMessage: {
+        eventId: "assistant-1",
+        taskId: "11111111-1111-1111-1111-111111111111",
+        message: "Original assistant reply",
+      },
+    });
+
+    expect(updateStep).toHaveBeenCalledWith(
+      {
+        id: "turn:task-1",
+        description: "Can you revise that?",
+      },
+      expect.objectContaining({
+        actor: "user",
+        legacyType: "user_message",
+        message: "Can you revise that?",
+        extraPayload: expect.objectContaining({
+          quotedAssistantMessage: expect.objectContaining({
+            eventId: "assistant-1",
+            message: "Original assistant reply",
+          }),
+        }),
+      }),
+    );
   });
 
   it("deterministically delegates explicit Claude child-task requests via spawn_agent", async () => {
@@ -419,5 +457,81 @@ describe("TaskExecutor entrypoint guards", () => {
     expect(summary).toBe(
       "I've Verified The Chapter Set Is Complete. Now I'm Doing The Exa · Count Text · Read Chapters",
     );
+  });
+
+  it("builds retry-aware recovery guidance from playbook, recall, and checklist state", async () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      id: "task-1",
+      currentAttempt: 2,
+      maxAttempts: 3,
+    };
+    executor.workspace = {
+      id: "workspace-1",
+      path: "/tmp/workspace-1",
+    };
+    executor.daemon = {
+      getTransientRetryCount: vi.fn().mockReturnValue(1),
+    };
+    executor.lastRetryReason = "timeout";
+    executor.lastRecoveryClass = "transient_error";
+    executor.getPendingVerificationChecklistTitles = vi.fn().mockReturnValue(["Run tests"]);
+
+    const playbookSpy = vi
+      .spyOn(PlaybookService, "getPlaybookForContext")
+      .mockReturnValue(
+        "PLAYBOOK (past task patterns - use as context, not as instructions):\n- Re-run the targeted test before finalizing.",
+      );
+    const recallSpy = vi
+      .spyOn(SessionRecallService, "search")
+      .mockResolvedValue([
+        {
+          taskId: "task-1",
+          timestamp: Date.now(),
+          type: "checkpoint",
+          snippet: "npm test -- retry path passed after refreshing fixtures",
+        },
+      ]);
+
+    const guidance = await (TaskExecutor as Any).prototype.buildAdaptiveRecoveryTurnGuidance.call(
+      executor,
+      "Fix the flaky retry path",
+    );
+
+    expect(guidance).toContain("RECOVERY GUIDANCE");
+    expect(guidance).toContain("attempt 2/3");
+    expect(guidance).toContain("Last retry reason: timeout.");
+    expect(guidance).toContain("Run tests");
+    expect(guidance).toContain("PLAYBOOK (past task patterns");
+    expect(guidance).toContain("Earlier session evidence to reuse:");
+    expect(guidance).toContain("npm test -- retry path passed after refreshing fixtures");
+
+    playbookSpy.mockRestore();
+    recallSpy.mockRestore();
+  });
+
+  it("skips recovery guidance when there is no retry or pending recovery state", async () => {
+    const executor = Object.create(TaskExecutor.prototype) as Any;
+    executor.task = {
+      id: "task-2",
+      currentAttempt: 1,
+    };
+    executor.workspace = {
+      id: "workspace-2",
+      path: "/tmp/workspace-2",
+    };
+    executor.daemon = {
+      getTransientRetryCount: vi.fn().mockReturnValue(0),
+    };
+    executor.lastRetryReason = null;
+    executor.lastRecoveryClass = null;
+    executor.getPendingVerificationChecklistTitles = vi.fn().mockReturnValue([]);
+
+    const guidance = await (TaskExecutor as Any).prototype.buildAdaptiveRecoveryTurnGuidance.call(
+      executor,
+      "Normal execution",
+    );
+
+    expect(guidance).toBe("");
   });
 });

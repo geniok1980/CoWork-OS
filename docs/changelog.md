@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.26] - 2026-04-08
+
+### Added
+- **Release notes for 0.5.26**: see [Release Notes 0.5.26](release-notes-0.5.26.md).
+- **Core automation profiles**: automation profiles now own the always-on runtime surface, replacing the older heartbeat-centric ownership path.
+- **Core automation pipelines**: the runtime now persists traces, failures, failure clusters, eval cases, harness experiments, learnings, memory candidates, regression gates, and memory-distill runs as first-class data.
+- **Memory distillation**: core memory distillation now has a dedicated service layer, scoped memory resolution, and supporting repositories.
+- **Research vaults (`LLM Wiki`)**: workspace-local research vaults inspired by Andrej Karpathy's LLM Wiki concept now support deterministic source capture, vault search, graph reporting, and filed-back outputs.
+- **Programmatic video skill (`manim-video`)**: a bundled skill now plans and scaffolds Manim CE explainers, equation walkthroughs, algorithm visualizations, and animated architecture/data stories.
+- **Curated memory and recall**: new curated-memory, quote-recall, and session-recall services expand durable context handling.
+- **PDF text and workspace healing**: PDF text extraction and workspace-path healing are now handled by dedicated utility layers.
+- **File provenance tracking**: imported and exported files can now carry trust/provenance metadata through a dedicated registry.
+
+### Changed
+- **Mission Control and onboarding**: the UI now surfaces automation profiles, distillation controls, core failures, learnings, companion inbox state, and shared onboarding data more clearly.
+- **Renderer and completion UX**: task completion, disclosure handling, memory hub settings, permission settings, Slack settings, and onboarding screens were updated to fit the new runtime model.
+- **Gateway and messaging routing**: WhatsApp command handling, channel routing, and email/report delivery were updated to match the richer runtime and task-state model.
+- **Tooling and skill execution**: explicit skill invocation matching, runtime tool metadata, tool exposure, and tool-policy inference were refined across the executor and loader layers.
+- **Provider behavior**: OpenRouter and provider-factory behavior were tightened with better catalog loading, logging, and model-selection handling.
+- **Security and approval flows**: approval controls, workspace rule handling, control-plane sanitization, and export-permission context handling were strengthened.
+- **Documentation and tests**: release notes, changelog surfaces, architecture docs, feature docs, security docs, and onboarding guidance were refreshed alongside broader test coverage.
+
+### Fixed
+- **Legacy task migration**: fixed legacy task-event migration paths so older task data upgrades cleanly into the newer runtime model.
+- **Heartbeat compatibility**: preserved compatibility while routing dispatch state through automation profiles and handling deferred heartbeat state more carefully.
+- **Completion evidence**: fixed report-task contract inference and completion evidence handling so task finalization is more reliable.
+- **OpenRouter noise**: reduced noisy provider catalog loading and made structured logging more predictable.
+- **Tool-call sanitization**: tightened tool-call and task-message sanitization so malformed payloads are less likely to leak into runtime state.
+- **Workspace boundaries**: edits to workspace ignore files now respect workspace boundaries more strictly.
+- **Approval and runtime edge cases**: updated approval handling, tool exposure, and runtime policy decisions so guarded actions fail more predictably.
+- **Release artifacts**: release artifact naming and packaging logic were aligned with updater metadata so published assets stay consistent.
+
 ## [0.5.23] - 2026-04-05
 
 ### Added
@@ -882,7 +914,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | 0.1.0 | 2025-01-24 | First public release with core features |
 | 0.0.1 | 2025-01-20 | Initial development setup |
 
-[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.23...HEAD
+[Unreleased]: https://github.com/CoWork-OS/CoWork-OS/compare/v0.5.26...HEAD
+[0.5.26]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.26
 [0.5.23]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.23
 [0.5.19]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.19
 [0.5.18]: https://github.com/CoWork-OS/CoWork-OS/releases/tag/v0.5.18

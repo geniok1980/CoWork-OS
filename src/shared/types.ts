@@ -46,6 +46,14 @@ export interface MemoryFeaturesSettings {
   contextPackInjectionEnabled: boolean;
   /** Allow the heartbeat system to perform memory maintenance tasks. */
   heartbeatMaintenanceEnabled: boolean;
+  /** Capture structured + verbatim checkpoints during runtime lifecycle events. */
+  checkpointCaptureEnabled?: boolean;
+  /** Enable quote-first exact-span recall across transcripts, memories, and notes. */
+  verbatimRecallEnabled?: boolean;
+  /** Use explicit wake-up memory layers and inject only L0/L1 by default. */
+  wakeUpLayersEnabled?: boolean;
+  /** Track KG edge validity windows and time-aware historical recall. */
+  temporalKnowledgeEnabled?: boolean;
   /** Rebuild execution prompts from explicit prompt-stack layers. */
   promptStackV2Enabled?: boolean;
   /** Serve memory via file-backed index/topic layers under `.cowork/memory/`. */
@@ -58,6 +66,93 @@ export interface MemoryFeaturesSettings {
   queryOrchestratorEnabled?: boolean;
   /** Enable session lineage metadata and session forking flows. */
   sessionLineageEnabled?: boolean;
+  /** Keep a small curated hot-memory layer always available for prompt injection. */
+  curatedMemoryEnabled?: boolean;
+  /** Allow transcript/session recall as an explicit tool surface. */
+  sessionRecallEnabled?: boolean;
+  /** Allow explicit topic-pack loading from `.cowork/memory/topics`. */
+  topicMemoryEnabled?: boolean;
+  /** Keep legacy archive memory out of default prompt injection. */
+  defaultArchiveInjectionEnabled?: boolean;
+  /** Promote only explicit/high-signal facts into curated memory. */
+  autoPromoteToCuratedMemoryEnabled?: boolean;
+}
+
+export type MemoryWakeUpLayerId = "L0" | "L1" | "L2" | "L3";
+
+export interface MemoryLayerBudgetStatus {
+  usedTokens: number;
+  budgetTokens: number;
+  excludedCount: number;
+}
+
+export interface MemoryLayerPreview {
+  layer: MemoryWakeUpLayerId;
+  title: string;
+  description: string;
+  includedText: string;
+  excludedText?: string;
+  budget: MemoryLayerBudgetStatus;
+  injectedByDefault: boolean;
+}
+
+export interface MemoryLayerPreviewPayload {
+  workspaceId: string;
+  taskPrompt: string;
+  generatedAt: number;
+  injectedLayerIds: MemoryWakeUpLayerId[];
+  excludedLayerIds: MemoryWakeUpLayerId[];
+  layers: MemoryLayerPreview[];
+}
+
+export type VerbatimQuoteSourceType =
+  | "transcript_span"
+  | "task_message"
+  | "memory"
+  | "workspace_markdown";
+
+export interface VerbatimQuoteSearchResult {
+  id: string;
+  sourceType: VerbatimQuoteSourceType;
+  objectId: string;
+  taskId?: string;
+  timestamp: number;
+  path?: string;
+  excerpt: string;
+  relevanceScore: number;
+  sourcePriority: number;
+  rankingReason: string;
+  eventId?: string;
+  seq?: number;
+  startLine?: number;
+  endLine?: number;
+  memoryType?: string;
+}
+
+export type CuratedMemoryTarget = "user" | "workspace";
+
+export type CuratedMemoryKind =
+  | "identity"
+  | "preference"
+  | "constraint"
+  | "workflow_rule"
+  | "project_fact"
+  | "active_commitment";
+
+export interface CuratedMemoryEntry {
+  id: string;
+  workspaceId: string;
+  taskId?: string;
+  target: CuratedMemoryTarget;
+  kind: CuratedMemoryKind;
+  content: string;
+  normalizedKey: string;
+  source: "agent_tool" | "user_edit" | "migration" | "distill";
+  confidence: number;
+  status: "active" | "archived";
+  createdAt: number;
+  updatedAt: number;
+  lastConfirmedAt?: number;
 }
 
 export type AwarenessSource =
@@ -820,6 +915,7 @@ export type RuntimeToolApprovalKind =
   | "none"
   | "workspace_policy"
   | "external_service"
+  | "data_export"
   | "destructive"
   | "shell_sensitive";
 
@@ -922,6 +1018,7 @@ export interface ToolPolicyTrace {
 export type PermissionMode =
   | "default"
   | "plan"
+  | "dangerous_only"
   | "accept_edits"
   | "dont_ask"
   | "bypass_permissions";
@@ -945,6 +1042,11 @@ export type PermissionRuleScope =
   | {
       kind: "tool";
       toolName: string;
+    }
+  | {
+      kind: "domain";
+      domain: string;
+      toolName?: string;
     }
   | {
       kind: "path";
@@ -1039,6 +1141,49 @@ export interface PermissionPromptActionOption {
   effect: PermissionEffect;
 }
 
+export type FileProvenanceSourceKind =
+  | "user_imported_external"
+  | "clipboard_or_drag_data"
+  | "channel_attachment"
+  | "workspace_native"
+  | "unknown";
+
+export type FileTrustLevel = "trusted" | "untrusted";
+
+export interface FileProvenanceRecord {
+  path: string;
+  workspaceId?: string;
+  sourceKind: FileProvenanceSourceKind;
+  trustLevel: FileTrustLevel;
+  sourceLabel?: string;
+  recordedAt: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SensitiveSourceRef {
+  path: string;
+  sourceKind: FileProvenanceSourceKind;
+  trustLevel: FileTrustLevel;
+  sourceLabel?: string;
+  recordedAt?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ExportTargetRef {
+  toolName: string;
+  url?: string;
+  domain?: string;
+  method?: string;
+  provider?: string;
+}
+
+export interface PermissionSecurityContext {
+  exportTarget?: ExportTargetRef;
+  directSource?: SensitiveSourceRef | null;
+  recentSensitiveSources?: SensitiveSourceRef[];
+  recentUntrustedContentRead?: boolean;
+}
+
 export interface PermissionPromptDetails {
   scope?: PermissionRuleScope;
   reason: PermissionDecisionReason;
@@ -1046,6 +1191,7 @@ export interface PermissionPromptDetails {
   scopePreview: string;
   suggestedActions: PermissionPromptActionOption[];
   serverName?: string;
+  securityContext?: PermissionSecurityContext;
 }
 
 export interface PermissionEvaluationResult {
@@ -1178,6 +1324,10 @@ export type ToolType =
   | "scraping_status"
   // Memory tools
   | "memory_save"
+  | "memory_curate"
+  | "memory_curated_read"
+  | "search_sessions"
+  | "memory_topics_load"
   // Scratchpad tools (session-scoped agent notes)
   | "scratchpad_write"
   | "scratchpad_read"
@@ -1210,6 +1360,7 @@ export type ApprovalType =
   | "delete_multiple"
   | "bulk_rename"
   | "network_access"
+  | "data_export"
   | "external_service"
   | "run_command"
   | "risk_gate"
@@ -1328,6 +1479,7 @@ export const TOOL_GROUPS = {
     "browser_close",
     // Vision (image understanding via external provider)
     "analyze_image",
+    "read_pdf_visual",
     // Scraping (Scrapling integration)
     "scrape_page",
     "scrape_multiple",
@@ -1356,8 +1508,13 @@ export const TOOL_GROUPS = {
     "channel_download_discord_attachment",
     // Privacy-sensitive: can exfiltrate local files/images to a provider
     "analyze_image",
+    "read_pdf_visual",
     // Agent-initiated memory save
     "memory_save",
+    "memory_curate",
+    "memory_curated_read",
+    "search_sessions",
+    "memory_topics_load",
   ],
   // Image generation - requires API access
   "group:image": ["generate_image"],
@@ -1453,6 +1610,10 @@ export const TOOL_RISK_LEVELS: Record<ToolType, ToolRiskLevel> = {
   qa_cleanup: "network",
   // Memory
   memory_save: "write",
+  memory_curate: "write",
+  memory_curated_read: "read",
+  search_sessions: "read",
+  memory_topics_load: "read",
   // Scratchpad
   scratchpad_write: "write",
   scratchpad_read: "read",
@@ -2533,6 +2694,25 @@ export interface ImageAttachment {
   sizeBytes: number;
   /** Internal hint when filePath points to a file generated in-process and may be ephemeral */
   tempFile?: boolean;
+}
+
+/** Quoted assistant message attached to a follow-up so the backend can treat it as explicit context. */
+export interface QuotedAssistantMessage {
+  /** Source event id when the quoted text came from a persisted assistant event. */
+  eventId?: string;
+  /** Source task id for the quoted assistant message. */
+  taskId?: string;
+  /** Visible assistant text the user quoted. */
+  message: string;
+  /** Indicates the quoted text was truncated client-side before submission. */
+  truncated?: boolean;
+}
+
+/** Follow-up payload sent to an existing task. */
+export interface TaskFollowUpInput {
+  message: string;
+  images?: ImageAttachment[];
+  quotedAssistantMessage?: QuotedAssistantMessage;
 }
 
 export interface TaskEvent {
@@ -5284,6 +5464,7 @@ export const IPC_CHANNELS = {
   FILE_OPEN: "file:open",
   FILE_SHOW_IN_FINDER: "file:showInFinder",
   FILE_READ_FOR_VIEWER: "file:readForViewer",
+  LLM_WIKI_GET_VAULT_SUMMARY: "llmWiki:getVaultSummary",
   FILE_IMPORT_TO_WORKSPACE: "file:importToWorkspace",
   FILE_IMPORT_DATA_TO_WORKSPACE: "file:importDataToWorkspace",
   DOCUMENT_OPEN_EDITOR_SESSION: "document:openEditorSession",
@@ -5539,6 +5720,7 @@ export const IPC_CHANNELS = {
   // Workspace Kit (.cowork)
   KIT_GET_STATUS: "kit:getStatus",
   KIT_INIT: "kit:init",
+  KIT_APPLY_ONBOARDING_PROFILE: "kit:applyOnboardingProfile",
   KIT_PROJECT_CREATE: "kit:projectCreate",
   KIT_OPEN_FILE: "kit:openFile",
   KIT_RESET_ADAPTIVE_STYLE: "kit:resetAdaptiveStyle",
@@ -6059,6 +6241,7 @@ export const IPC_CHANNELS = {
   // Memory Features (Global Toggles)
   MEMORY_FEATURES_GET_SETTINGS: "memoryFeatures:getSettings",
   MEMORY_FEATURES_SAVE_SETTINGS: "memoryFeatures:saveSettings",
+  MEMORY_FEATURES_GET_LAYER_PREVIEW: "memoryFeatures:getLayerPreview",
 
   // Migration Status (for showing one-time notifications after app rename)
   MIGRATION_GET_STATUS: "migration:getStatus",
@@ -6579,6 +6762,7 @@ export interface ChannelData {
   config?: {
     selfChatMode?: boolean;
     supervisor?: DiscordSupervisorConfig;
+    progressRelayMode?: "minimal" | "curated";
     groupRoutingMode?:
       | "all"
       | "mentionsOnly"
@@ -6622,6 +6806,7 @@ export interface AddChannelRequest {
   // Slack-specific fields
   appToken?: string;
   signingSecret?: string;
+  progressRelayMode?: "minimal" | "curated";
   // WhatsApp-specific fields
   allowedNumbers?: string[];
   selfChatMode?: boolean;
@@ -6734,6 +6919,7 @@ export interface UpdateChannelRequest {
   config?: {
     selfChatMode?: boolean;
     supervisor?: DiscordSupervisorConfig;
+    progressRelayMode?: "minimal" | "curated";
     groupRoutingMode?:
       | "all"
       | "mentionsOnly"

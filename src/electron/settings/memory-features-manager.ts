@@ -10,12 +10,21 @@ import { MemoryFeaturesSettings } from "../../shared/types";
 const DEFAULT_SETTINGS: MemoryFeaturesSettings = {
   contextPackInjectionEnabled: true,
   heartbeatMaintenanceEnabled: true,
+  checkpointCaptureEnabled: true,
+  verbatimRecallEnabled: true,
+  wakeUpLayersEnabled: true,
+  temporalKnowledgeEnabled: true,
   promptStackV2Enabled: false,
   layeredMemoryEnabled: false,
   transcriptStoreEnabled: false,
   backgroundConsolidationEnabled: false,
   queryOrchestratorEnabled: false,
   sessionLineageEnabled: false,
+  curatedMemoryEnabled: true,
+  sessionRecallEnabled: true,
+  topicMemoryEnabled: true,
+  defaultArchiveInjectionEnabled: false,
+  autoPromoteToCuratedMemoryEnabled: false,
 };
 
 function isEnabled(value: boolean | undefined): boolean {
@@ -53,12 +62,21 @@ export class MemoryFeaturesManager {
     settings = {
       contextPackInjectionEnabled: !!settings.contextPackInjectionEnabled,
       heartbeatMaintenanceEnabled: !!settings.heartbeatMaintenanceEnabled,
+      checkpointCaptureEnabled: settings.checkpointCaptureEnabled !== false,
+      verbatimRecallEnabled: settings.verbatimRecallEnabled !== false,
+      wakeUpLayersEnabled: settings.wakeUpLayersEnabled !== false,
+      temporalKnowledgeEnabled: settings.temporalKnowledgeEnabled !== false,
       promptStackV2Enabled: isEnabled(settings.promptStackV2Enabled),
       layeredMemoryEnabled: isEnabled(settings.layeredMemoryEnabled),
       transcriptStoreEnabled: isEnabled(settings.transcriptStoreEnabled),
       backgroundConsolidationEnabled: isEnabled(settings.backgroundConsolidationEnabled),
       queryOrchestratorEnabled: isEnabled(settings.queryOrchestratorEnabled),
       sessionLineageEnabled: isEnabled(settings.sessionLineageEnabled),
+      curatedMemoryEnabled: settings.curatedMemoryEnabled !== false,
+      sessionRecallEnabled: settings.sessionRecallEnabled !== false,
+      topicMemoryEnabled: settings.topicMemoryEnabled !== false,
+      defaultArchiveInjectionEnabled: isEnabled(settings.defaultArchiveInjectionEnabled),
+      autoPromoteToCuratedMemoryEnabled: isEnabled(settings.autoPromoteToCuratedMemoryEnabled),
     };
 
     this.cachedSettings = settings;
@@ -73,12 +91,21 @@ export class MemoryFeaturesManager {
     const normalized: MemoryFeaturesSettings = {
       contextPackInjectionEnabled: !!settings.contextPackInjectionEnabled,
       heartbeatMaintenanceEnabled: !!settings.heartbeatMaintenanceEnabled,
+      checkpointCaptureEnabled: settings.checkpointCaptureEnabled !== false,
+      verbatimRecallEnabled: settings.verbatimRecallEnabled !== false,
+      wakeUpLayersEnabled: settings.wakeUpLayersEnabled !== false,
+      temporalKnowledgeEnabled: settings.temporalKnowledgeEnabled !== false,
       promptStackV2Enabled: isEnabled(settings.promptStackV2Enabled),
       layeredMemoryEnabled: isEnabled(settings.layeredMemoryEnabled),
       transcriptStoreEnabled: isEnabled(settings.transcriptStoreEnabled),
       backgroundConsolidationEnabled: isEnabled(settings.backgroundConsolidationEnabled),
       queryOrchestratorEnabled: isEnabled(settings.queryOrchestratorEnabled),
       sessionLineageEnabled: isEnabled(settings.sessionLineageEnabled),
+      curatedMemoryEnabled: settings.curatedMemoryEnabled !== false,
+      sessionRecallEnabled: settings.sessionRecallEnabled !== false,
+      topicMemoryEnabled: settings.topicMemoryEnabled !== false,
+      defaultArchiveInjectionEnabled: isEnabled(settings.defaultArchiveInjectionEnabled),
+      autoPromoteToCuratedMemoryEnabled: isEnabled(settings.autoPromoteToCuratedMemoryEnabled),
     };
 
     const repository = SecureSettingsRepository.getInstance();

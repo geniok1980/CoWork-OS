@@ -173,6 +173,8 @@ export interface ChannelConfig {
   defaultWorkspaceId?: string;
   /** Allowed agent role IDs (empty = all allowed) */
   allowedAgentRoleIds?: string[];
+  /** How much executor progress to relay back into text-first channels */
+  progressRelayMode?: "minimal" | "curated";
   /** Channel-specific settings */
   [key: string]: unknown;
 }
@@ -225,6 +227,8 @@ export interface SlackConfig extends ChannelConfig {
   appToken: string;
   /** Signing secret for verifying requests */
   signingSecret?: string;
+  /** Relay curated middle-step updates instead of suppressing all executor internals */
+  progressRelayMode?: "minimal" | "curated";
 }
 
 /**

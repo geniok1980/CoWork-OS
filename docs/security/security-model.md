@@ -67,10 +67,11 @@ Per-workspace controls:
 - **Write**: Allow creating/modifying files
 - **Delete**: Allow file deletion
 - **Shell**: Allow command execution
-- **Network**: Allow web/browser access
+- **Network**: Allow network-capable tools to run at all
 
 These remain coarse capability gates. They do not replace explicit rules, workspace policy files, or
-mode defaults.
+mode defaults. A workspace with `network: true` can still require approval for export-sensitive
+requests, and a workspace with `network: false` blocks both ordinary web access and outbound export.
 
 ### Layer 3: Context Restrictions
 
@@ -83,15 +84,46 @@ Based on message context (private/group/public):
 Individual tool permissions and approval decisions:
 - Destructive tools usually prompt unless an explicit allow rule or mode applies
 - Shell commands usually prompt unless an explicit allow rule or mode applies
+- Domain-scoped rules can allow or deny `web_fetch` / `http_request` per destination
 - Exact reasons and matched scopes are surfaced in the prompt when available
 
 ### Layer 5: Permission Modes And Fallback
 
 The selected mode and the denial fallback tracker finalize the decision:
 
-- `default`, `plan`, `accept_edits`, `dont_ask`, and `bypass_permissions` define baseline behavior
+- `default`, `plan`, `accept_edits`, `dangerous_only`, `dont_ask`, and `bypass_permissions` define baseline behavior
+- `dangerous_only` is the middle ground between `accept_edits` and full autonomy: it auto-allows safe reads, edits, and a conservative read/test shell subset, while still prompting for destructive actions, privacy-sensitive non-workspace access, MCP/external side effects, and ambiguous shell commands
+- `dont_ask` and `bypass_permissions` no longer suppress `data_export` prompts
 - soft denials can escalate to a direct prompt after repeated hits
 - hard guardrails and explicit deny rules are never bypassed
+
+## Outbound Data Movement
+
+CoWork now models outbound transfer separately from generic network reads.
+
+### Egress Classes
+
+- `web_fetch` is a network read and stays in the `network_access` lane
+- `http_request` stays in `network_access` only for plain `GET` or `HEAD` requests with no body and no custom headers
+- mutating or payload-carrying `http_request` calls are classified as `data_export`
+- `analyze_image` and `read_pdf_visual` are also classified as `data_export` because file bytes are sent to external model providers
+
+### Destination Controls
+
+- workspace `network` permission is still the first gate
+- allowed-domain guardrails still apply to raw web requests
+- permission rules can now target a specific domain, optionally scoped to one tool
+
+### Approval Context
+
+When CoWork asks for approval on export-sensitive actions, the prompt can include:
+
+- the target domain, method, or provider
+- the direct file source being exported
+- whether the task recently read untrusted imported content
+
+Session-wide "Approve all" and high-autonomy permission modes do not silently allow this class of
+action. Export stays fail-closed to an explicit prompt.
 
 ## Sandboxing
 
@@ -239,14 +271,18 @@ Post-processes LLM responses to detect potential:
 
 | Source | Protection |
 |--------|------------|
-| **Tool Results** | Injection patterns in web/file content annotated |
+| **Tool Results** | Injection patterns in web/file content annotated; imported file reads can also carry an explicit untrusted-content banner |
 | **Memory Context** | Stored memories sanitized before injection |
 | **Skill Guidelines** | Validated and filtered before system prompt injection |
+| **Imported Files / Attachments** | Provenance recorded so later export approvals can show what content recently entered from outside the workspace |
 
 ### Defense Philosophy
 
-These defenses are **transparent and non-blocking**:
-- Suspicious patterns are logged and flagged, not rejected
-- Security directives in the system prompt provide primary defense
-- Monitoring enables detection and forensics without limiting capabilities
-- The agent remains fully autonomous and capable
+These defenses are layered rather than purely reactive:
+- suspicious patterns are still logged and annotated instead of blindly discarded
+- system-prompt hardening and sanitization still provide the first line of defense
+- imported content is marked with provenance so the runtime can distinguish workspace-native data from externally supplied data
+- outbound transfer from that content is no longer treated as just another network read; it routes through export-sensitive approval with destination and source hints
+
+The result is intentionally asymmetric: reading rich external content stays easy, but moving local or
+recently imported content outward now fails closed to a review step.

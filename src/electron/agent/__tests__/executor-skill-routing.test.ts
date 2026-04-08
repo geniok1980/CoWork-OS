@@ -264,6 +264,137 @@ describe("TaskExecutor skill shortlist routing", () => {
     );
   });
 
+  it("deterministically routes natural research-vault prompts into llm-wiki", async () => {
+    listSkills.mockReturnValue([
+      {
+        id: "llm-wiki",
+        name: "LLM Wiki",
+        description: "Build and maintain a persistent research vault.",
+        enabled: true,
+        parameters: [
+          { name: "objective", type: "string", required: false, default: "" },
+          { name: "mode", type: "string", required: false, default: "auto" },
+          { name: "path", type: "string", required: false, default: "research/wiki" },
+          { name: "obsidian", type: "string", required: false, default: "auto" },
+        ],
+      },
+    ]);
+
+    const prompt = "Build a persistent Obsidian-friendly research vault for agent memory systems.";
+    const executor = createExecutor(prompt);
+    executor.toolRegistry.executeTool.mockImplementation(async (name: string, input: Any) => {
+      expect(name).toBe("Skill");
+      expect(input).toEqual({
+        skill: "llm-wiki",
+        args: '"agent memory systems" --obsidian on',
+        trigger: "explicit_hint",
+      });
+      const invocationId = "skill-invocation-llm-wiki";
+      executor.__resolvedInvocations.set(invocationId, {
+        skillId: "llm-wiki",
+        skillName: "LLM Wiki",
+        trigger: "explicit_hint",
+        args: '"agent memory systems" --obsidian on',
+        parameters: {
+          objective: "agent memory systems",
+          obsidian: "on",
+        },
+        content: "Expanded llm-wiki instructions",
+        reason: "Applied as additive skill context while preserving the original task.",
+        appliedAt: Date.now(),
+      });
+      return {
+        success: true,
+        skill: "llm-wiki",
+        skill_name: "LLM Wiki",
+        skill_invocation_id: invocationId,
+        message: "Loaded skill 'LLM Wiki' for this task.",
+      };
+    });
+
+    const handled = await (
+      TaskExecutor as Any
+    ).prototype.maybeHandleNaturalLlmWikiPrompt.call(executor);
+
+    expect(handled).toBe(true);
+    expect(executor.appliedSkills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          skillId: "llm-wiki",
+          trigger: "explicit_hint",
+          parameters: expect.objectContaining({
+            objective: "agent memory systems",
+            obsidian: "on",
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it("routes starter-style research-vault prompts even before the user supplies a topic", async () => {
+    listSkills.mockReturnValue([
+      {
+        id: "llm-wiki",
+        name: "LLM Wiki",
+        description: "Build and maintain a persistent research vault.",
+        enabled: true,
+        parameters: [
+          { name: "objective", type: "string", required: false, default: "" },
+          { name: "mode", type: "string", required: false, default: "auto" },
+          { name: "path", type: "string", required: false, default: "research/wiki" },
+          { name: "obsidian", type: "string", required: false, default: "auto" },
+        ],
+      },
+    ]);
+
+    const prompt =
+      "Build a persistent Obsidian-friendly research vault in this workspace. If I have not given the topic yet, ask me for it first.";
+    const executor = createExecutor(prompt);
+    executor.toolRegistry.executeTool.mockImplementation(async (name: string, input: Any) => {
+      expect(name).toBe("Skill");
+      expect(input).toEqual({
+        skill: "llm-wiki",
+        args: "--obsidian on",
+        trigger: "explicit_hint",
+      });
+      const invocationId = "skill-invocation-llm-wiki-starter";
+      executor.__resolvedInvocations.set(invocationId, {
+        skillId: "llm-wiki",
+        skillName: "LLM Wiki",
+        trigger: "explicit_hint",
+        args: "--obsidian on",
+        parameters: {
+          objective: "",
+          obsidian: "on",
+        },
+        content: "Expanded llm-wiki instructions",
+        reason: "Applied as additive skill context while preserving the original task.",
+        appliedAt: Date.now(),
+      });
+      return {
+        success: true,
+        skill: "llm-wiki",
+        skill_name: "LLM Wiki",
+        skill_invocation_id: invocationId,
+        message: "Loaded skill 'LLM Wiki' for this task.",
+      };
+    });
+
+    const handled = await (
+      TaskExecutor as Any
+    ).prototype.maybeHandleNaturalLlmWikiPrompt.call(executor);
+
+    expect(handled).toBe(true);
+    expect(executor.appliedSkills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          skillId: "llm-wiki",
+          trigger: "explicit_hint",
+        }),
+      ]),
+    );
+  });
+
   it("does not auto-apply a skill from planner tool transcript text embedded in a step", async () => {
     listSkills.mockReturnValue([
       {

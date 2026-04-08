@@ -3,6 +3,7 @@ import {
   validateInput,
   WorkspaceCreateSchema,
   TaskCreateSchema,
+  TaskMessageSchema,
   ApprovalResponseSchema,
   GuardrailSettingsSchema,
   ChannelConfigSchema,
@@ -157,6 +158,32 @@ describe("TaskCreateSchema", () => {
       budgetTokens: 50000,
     });
     expect(result.success).toBe(true);
+  });
+});
+
+describe("TaskMessageSchema", () => {
+  it("accepts a quoted assistant message payload", () => {
+    const result = TaskMessageSchema.safeParse({
+      taskId: "550e8400-e29b-41d4-a716-446655440000",
+      message: "Can you revise this?",
+      quotedAssistantMessage: {
+        eventId: "event-123",
+        taskId: "550e8400-e29b-41d4-a716-446655440000",
+        message: "Here is the earlier assistant reply.",
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an empty quoted assistant message", () => {
+    const result = TaskMessageSchema.safeParse({
+      taskId: "550e8400-e29b-41d4-a716-446655440000",
+      message: "Can you revise this?",
+      quotedAssistantMessage: {
+        message: "",
+      },
+    });
+    expect(result.success).toBe(false);
   });
 });
 

@@ -232,6 +232,7 @@ export function buildNormalizedToolResult(opts: {
   }
 
   const resultIsError = Boolean(opts.result && opts.result.success === false);
+  const advisoryFallbackFailure = isAdvisoryToolFailureResult(opts.result);
   const normalizedFailure = resultIsError
     ? normalizeToolFailureReason(opts.result, "Tool execution failed")
     : null;
@@ -241,7 +242,7 @@ export function buildNormalizedToolResult(opts: {
     toolResult: {
       type: "tool_result",
       tool_use_id: opts.toolUseId,
-      content: resultIsError
+      content: resultIsError && !advisoryFallbackFailure
         ? JSON.stringify({
             error: toolFailureReason,
             ...(normalizedFailure?.kind ? { kind: normalizedFailure.kind } : {}),
@@ -250,7 +251,7 @@ export function buildNormalizedToolResult(opts: {
             ...(opts.result?.url ? { url: opts.result.url } : {}),
           })
         : sanitizedResult,
-      is_error: resultIsError,
+      is_error: resultIsError && !advisoryFallbackFailure,
     },
     resultIsError,
     toolFailureReason,
@@ -586,6 +587,10 @@ export function isHardToolFailure(toolName: string, result: Any, failureReason =
     return false;
   }
 
+  if (result.nonBlocking === true || result.recoverableFallback === true) {
+    return false;
+  }
+
   if (result.disabled === true || result.unavailable === true || result.blocked === true) {
     return true;
   }
@@ -607,6 +612,14 @@ export function isHardToolFailure(toolName: string, result: Any, failureReason =
 
   return /not currently executable|blocked by|disabled|not available in this context|not configured/.test(
     message,
+  );
+}
+
+export function isAdvisoryToolFailureResult(result: Any): boolean {
+  return Boolean(
+    result &&
+      result.success === false &&
+      (result.nonBlocking === true || result.recoverableFallback === true),
   );
 }
 

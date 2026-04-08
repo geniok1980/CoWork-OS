@@ -332,6 +332,92 @@ describe("TaskExecutor /simplify and /batch normalization", () => {
     expect(executor.task.prompt).toBe(originalPrompt);
   });
 
+  it("normalizes `/llm-wiki` with flags into deterministic Skill execution", async () => {
+    const originalPrompt =
+      "/llm-wiki agent memory systems --mode ingest --path research/wiki/agents --obsidian on";
+    const executor = createExecutor(originalPrompt, (name, input) => {
+      expect(name).toBe("Skill");
+      expect(input).toEqual({
+        skill: "llm-wiki",
+        args: "agent memory systems --mode ingest --path research/wiki/agents --obsidian on",
+        trigger: "slash",
+      });
+      return buildSkillToolSuccess({
+          skillId: "llm-wiki",
+          skillName: "LLM Wiki",
+          trigger: "slash",
+          args: "agent memory systems --mode ingest --path research/wiki/agents --obsidian on",
+          parameters: {
+            objective: "agent memory systems",
+            mode: "ingest",
+            path: "research/wiki/agents",
+            obsidian: "on",
+          },
+          content: "LLM Wiki prompt expanded",
+          reason: "Applied via /llm-wiki",
+          appliedAt: Date.now(),
+        });
+    });
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
+      executor,
+    );
+
+    expect(handled).toBe(true);
+    expect(executor.task.prompt).toBe(originalPrompt);
+    expect(executor.appliedSkills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          skillId: "llm-wiki",
+          trigger: "slash",
+          content: "LLM Wiki prompt expanded",
+        }),
+      ]),
+    );
+  });
+
+  it("allows `/llm-wiki` maintenance modes without an objective", async () => {
+    const originalPrompt = '/llm-wiki --mode lint --path "Research Vault"';
+    const executor = createExecutor(originalPrompt, (name, input) => {
+      expect(name).toBe("Skill");
+      expect(input).toEqual({
+        skill: "llm-wiki",
+        args: '--mode lint --path "Research Vault"',
+        trigger: "slash",
+      });
+      return buildSkillToolSuccess({
+          skillId: "llm-wiki",
+          skillName: "LLM Wiki",
+          trigger: "slash",
+          args: '--mode lint --path "Research Vault"',
+          parameters: {
+            objective: "",
+            mode: "lint",
+            path: "Research Vault",
+          },
+          content: "LLM Wiki lint prompt expanded",
+          reason: "Applied via /llm-wiki",
+          appliedAt: Date.now(),
+        });
+    });
+
+    const handled = await (TaskExecutor as Any).prototype.maybeHandleSkillSlashCommandOrInlineChain.call(
+      executor,
+    );
+
+    expect(handled).toBe(true);
+    expect(executor.task.prompt).toBe(originalPrompt);
+    expect(executor.appliedSkills).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          skillId: "llm-wiki",
+          trigger: "slash",
+          content: "LLM Wiki lint prompt expanded",
+        }),
+      ]),
+    );
+  });
+
   it("rejects `/batch` without an objective", async () => {
     const executor = createExecutor("/batch", (_name, _input) => {
       throw new Error("Skill should not be called");

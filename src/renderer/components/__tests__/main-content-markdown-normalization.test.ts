@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   autolinkBareDomains,
+  createQuotedAssistantMessage,
   autolinkUrlsInBrackets,
   normalizeSourcesSection,
   shouldCreateFreshTaskForSend,
@@ -65,5 +66,16 @@ describe("MainContent markdown normalization helpers", () => {
         selectedTaskExecutionMode: "execute",
       }),
     ).toBe(false);
+  });
+
+  it("builds a quoted assistant payload from visible assistant text", () => {
+    expect(
+      createQuotedAssistantMessage("**Result:** done", "event-1", "550e8400-e29b-41d4-a716-446655440000"),
+    ).toEqual({
+      eventId: "event-1",
+      taskId: "550e8400-e29b-41d4-a716-446655440000",
+      message: "**Result:** done",
+    });
+    expect(createQuotedAssistantMessage("   ")).toBeNull();
   });
 });

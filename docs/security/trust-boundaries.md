@@ -161,33 +161,46 @@ Even after authentication, capabilities vary by context:
 |           CoWork OS                       |
 +------------------------------------------+
          |
-         | Network Permission
+         | Workspace Network Permission
          v
 +------------------------------------------+
-|         Browser / Web Tools               |
-|  - browser_navigate                       |
-|  - browser_get_content                    |
-|  - web_search                             |
+|   Network-Capable Tools / Requests        |
+|  - browser_*                              |
+|  - web_search / web_fetch                 |
+|  - read-only http_request                 |
 +------------------------------------------+
          |
-         | Domain Allowlist (optional)
+         | Export Approval Gate
+         v
++------------------------------------------+
+|     Export-Sensitive Operations           |
+|  - mutating http_request                  |
+|  - analyze_image                          |
+|  - read_pdf_visual                        |
++------------------------------------------+
+         |
+         | Domain Allowlist / Domain Rules
          v
 +------------------------------------------+
 |           External Networks               |
-|  - Internet (if network=true)            |
-|  - Localhost only (if network=false)     |
+|  - Internet / model providers            |
+|  - Blocked entirely if network=false     |
 +------------------------------------------+
 ```
 
 ### Network Controls
 
 **Workspace Level:**
-- `network: true` enables browser/web tools
-- `network: false` blocks all external network access
+- `network: true` enables network-capable tools to participate in permission evaluation
+- `network: false` blocks ordinary web access and export-sensitive actions
 
 **Guardrail Level:**
 - `enforceAllowedDomains: true` limits to specific domains
-- Domain allowlist restricts which sites can be accessed
+- Domain allowlist restricts which destinations can be accessed
+
+**Permission Rule Level:**
+- `domain` rules can allow or deny one destination hostname
+- those rules can optionally be scoped to a specific tool such as `web_fetch` or `http_request`
 
 **Sandbox Level:**
 - Docker: `--network none` by default
@@ -235,7 +248,8 @@ Even after authentication, capabilities vary by context:
 | Write | write_file, create_directory | Auto-allowed if write permission and no rule blocks it |
 | Destructive | delete_file, run_command | Usually prompts unless a rule or mode changes the outcome |
 | System | screenshot, clipboard | Context-dependent |
-| Network | browser_navigate | Requires network permission and may still prompt under default mode |
+| Network | browser_navigate, web_fetch | Requires network permission and may still prompt under default mode |
+| Export | mutating `http_request`, `analyze_image`, `read_pdf_visual` | Requires network permission and explicit export review unless an exact rule allows it |
 
 ### Approval Gates
 
@@ -244,15 +258,26 @@ Some operations usually require user approval:
 - File deletion
 - Destructive operations
 - External side effects without matching allow rules
+- Export-sensitive operations that could send local or recently imported content outward
 
 The approval shows:
 - Tool name and description
 - Parameters being used
 - Exact reason and matched rule when available
+- Export target and source provenance hints when available
 - Allows user to approve or deny
 
 Workspace-local rules can also be browsed and removed from Settings so the current policy is
 visible without waiting for the next prompt.
+
+### Imported Content Boundary
+
+Not all local files are equally trusted.
+
+- workspace-native files stay in the normal trust lane
+- user-imported files, drag-and-drop/clipboard files, and channel attachments are recorded as external provenance
+- reads from those sources add an explicit untrusted-content banner
+- later export approvals can reference those recent reads so hidden instructions in imported content do not silently trigger outbound transfer
 
 ## Trust Hierarchy
 

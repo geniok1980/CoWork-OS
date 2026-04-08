@@ -88,6 +88,7 @@ function createBaseState(): SessionRuntimeState {
       temporaryGrants: new Map(),
       denialTracking: new Map(),
       latestPromptContext: null,
+      recentSensitiveSources: [],
     },
     verification: {
       verificationEvidenceEntries: [],
@@ -202,6 +203,7 @@ function createV2Snapshot(
       temporaryGrants: [],
       denialTracking: [],
       latestPromptContext: null,
+      recentSensitiveSources: [],
     },
     verification: {
       verificationEvidenceEntries: [],

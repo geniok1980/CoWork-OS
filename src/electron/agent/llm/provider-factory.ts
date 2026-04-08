@@ -23,7 +23,10 @@ import { AnthropicProvider } from "./anthropic-provider";
 import { BedrockProvider } from "./bedrock-provider";
 import { OllamaProvider } from "./ollama-provider";
 import { GeminiProvider } from "./gemini-provider";
-import { OpenRouterProvider } from "./openrouter-provider";
+import {
+  OPENROUTER_DEFAULT_MODEL,
+  OpenRouterProvider,
+} from "./openrouter-provider";
 import { OpenAIProvider } from "./openai-provider";
 import { AzureOpenAIProvider } from "./azure-openai-provider";
 import { AzureAnthropicProvider } from "./azure-anthropic-provider";
@@ -1427,6 +1430,7 @@ export class LLMProviderFactory {
     options?: {
       forceProfile?: LlmProfile;
       isVerificationTask?: boolean;
+      requiresImageInput?: boolean;
     },
   ): ResolvedTaskModelSelection[] {
     if (taskAgentConfig?.providerType || taskAgentConfig?.modelKey) {
@@ -1461,7 +1465,21 @@ export class LLMProviderFactory {
       chain.push(selection);
     }
 
-    return chain;
+    if (!options?.requiresImageInput) {
+      return chain;
+    }
+
+    const imageCapableChain = chain.filter((selection) => this.selectionSupportsImageInput(selection));
+    return imageCapableChain.length > 0 ? imageCapableChain : [primarySelection];
+  }
+
+  private static selectionSupportsImageInput(
+    selection: Pick<ResolvedTaskModelSelection, "providerType" | "modelId">,
+  ): boolean {
+    if (selection.providerType !== "openrouter") {
+      return true;
+    }
+    return OpenRouterProvider.getImageSupportHint(selection.modelId) !== false;
   }
 
   /**
@@ -1940,7 +1958,7 @@ export class LLMProviderFactory {
 
     // For OpenRouter, use the specific model if provided or default
     if (providerType === "openrouter") {
-      return openrouterModel || "anthropic/claude-3.5-sonnet";
+      return openrouterModel || OPENROUTER_DEFAULT_MODEL;
     }
 
     // For OpenAI, use the specific model if provided or default
@@ -2369,7 +2387,7 @@ export class LLMProviderFactory {
 
       case "openrouter": {
         const currentModel =
-          settings.openrouter?.model || "anthropic/claude-3.5-sonnet";
+          settings.openrouter?.model || OPENROUTER_DEFAULT_MODEL;
         const modelList =
           settings.cachedOpenRouterModels &&
           settings.cachedOpenRouterModels.length > 0

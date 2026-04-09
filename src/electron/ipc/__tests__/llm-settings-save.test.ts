@@ -35,6 +35,42 @@ describe("buildSavedLLMSettings", () => {
     );
   });
 
+  it("preserves provider-specific failover settings while merging partial saves", () => {
+    const existingSettings: LLMSettingsData = {
+      providerType: "openai",
+      modelKey: "gpt-4o-mini",
+      openai: {
+        apiKey: "existing-openai-key",
+        model: "gpt-4o-mini",
+        fallbackProviders: [
+          { providerType: "anthropic", modelKey: "sonnet-4-5" },
+          { providerType: "openrouter", modelKey: "openai/gpt-4o" },
+        ],
+        failoverPrimaryRetryCooldownSeconds: 45,
+      },
+    };
+
+    const validated: LLMSettingsData = {
+      providerType: "openai",
+      modelKey: "gpt-4.1-mini",
+      openai: {
+        model: "gpt-4.1-mini",
+      },
+    };
+
+    const saved = buildSavedLLMSettings(validated, existingSettings);
+
+    expect(saved.openai).toEqual({
+      apiKey: "existing-openai-key",
+      model: "gpt-4.1-mini",
+      fallbackProviders: [
+        { providerType: "anthropic", modelKey: "sonnet-4-5" },
+        { providerType: "openrouter", modelKey: "openai/gpt-4o" },
+      ],
+      failoverPrimaryRetryCooldownSeconds: 45,
+    });
+  });
+
   it("preserves fallbackProviders and provider credentials when partial saves omit them", () => {
     const existingSettings: LLMSettingsData = {
       providerType: "openrouter",

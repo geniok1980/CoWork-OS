@@ -80,6 +80,7 @@ export type SettingsCategory =
   | "adaptive-style-engine"
   | "awareness-state"
   | "autonomy-chief-of-staff"
+  | "supermemory"
   | `plugin:${string}`;
 
 interface SecureSettingsRow {
@@ -543,18 +544,13 @@ export class SecureSettingsRepository {
       return this.machineId;
     }
 
-    // Fallback: Combine system properties (less stable, for backwards compatibility)
-    // This path is only taken if machine ID file operations failed
-// oxlint-disable-next-line typescript-eslint(no-require-imports)
-    const os = require("os");
+    // Fallback: derive from app-specific stable paths rather than volatile host metadata.
     const factors = [
-      os.hostname(),
-      os.platform(),
-      os.arch(),
-      os.homedir(),
-      process.env.USER || process.env.USERNAME || "default-user",
+      getUserDataDir(),
+      path.join(getUserDataDir(), MACHINE_ID_FILE),
+      "cowork-os-secure-settings-fallback-v2",
     ];
-    console.warn("[SecureSettingsRepository] Using volatile machine identifier as fallback");
+    console.warn("[SecureSettingsRepository] Using path-derived fallback machine identifier");
     return factors.join(":");
   }
 

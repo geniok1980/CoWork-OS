@@ -36,14 +36,9 @@ import { useAgentContext } from "../hooks/useAgentContext";
 import type { UiCopyKey } from "../utils/agentMessages";
 import { getEffectiveTaskEventType } from "../utils/task-event-compat";
 import { getEmojiIcon } from "../utils/emoji-icon-map";
+import { BOARD_COLUMNS } from "./mission-control/useMissionControlData";
 
 type AgentRole = AgentRoleData;
-type MissionColumn = {
-  id: string;
-  label: string;
-  color: string;
-  boardColumn: NonNullable<Task["boardColumn"]>;
-};
 
 interface HeartbeatStatusInfo {
   agentRoleId: string;
@@ -62,14 +57,6 @@ interface HeartbeatStatusInfo {
   dispatchesToday?: number;
   maxDispatchesPerDay?: number;
 }
-
-const BOARD_COLUMNS: MissionColumn[] = [
-  { id: "inbox", label: "INBOX", color: "#6b7280", boardColumn: "backlog" },
-  { id: "assigned", label: "ASSIGNED", color: "#f59e0b", boardColumn: "todo" },
-  { id: "in_progress", label: "IN PROGRESS", color: "#3b82f6", boardColumn: "in_progress" },
-  { id: "review", label: "REVIEW", color: "#8b5cf6", boardColumn: "review" },
-  { id: "done", label: "DONE", color: "#22c55e", boardColumn: "done" },
-];
 
 const AUTONOMY_BADGES: Record<string, { label: string; color: string }> = {
   lead: { label: "LEAD", color: "#f59e0b" },

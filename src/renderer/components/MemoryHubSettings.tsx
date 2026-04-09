@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import "./memory-hub-settings.css";
 import type {
   AutonomyConfig,
   AutonomyDecision,
@@ -10,10 +11,13 @@ import type {
   AwarenessSummary,
   MemoryLayerPreviewPayload,
   MemoryFeaturesSettings,
+  SupermemoryConfigStatus,
+  SupermemorySearchMode,
   Workspace,
   WorkspaceKitStatus,
 } from "../../shared/types";
 import { MemorySettings } from "./MemorySettings";
+import { createRendererLogger } from "../utils/logger";
 
 const DEFAULT_FEATURES: MemoryFeaturesSettings = {
   contextPackInjectionEnabled: true,
@@ -25,6 +29,7 @@ const DEFAULT_FEATURES: MemoryFeaturesSettings = {
 };
 
 type BadgeTone = "neutral" | "success" | "warning" | "error";
+const logger = createRendererLogger("MemoryHubSettings");
 
 function badgeClass(tone: BadgeTone) {
   return `settings-badge settings-badge--${tone}`;
@@ -75,6 +80,25 @@ export function MemoryHubSettings(props?: {
   const [autonomyDecisions, setAutonomyDecisions] = useState<AutonomyDecision[]>([]);
   const [autonomyActions, setAutonomyActions] = useState<AutonomyAction[]>([]);
   const [autonomySaving, setAutonomySaving] = useState(false);
+  const [supermemoryStatus, setSupermemoryStatus] = useState<SupermemoryConfigStatus | null>(null);
+  const [supermemoryEnabled, setSupermemoryEnabled] = useState(false);
+  const [supermemoryApiKey, setSupermemoryApiKey] = useState("");
+  const [supermemoryBaseUrl, setSupermemoryBaseUrl] = useState("https://api.supermemory.ai");
+  const [supermemoryContainerTemplate, setSupermemoryContainerTemplate] =
+    useState("cowork:{workspaceId}");
+  const [supermemoryIncludeProfile, setSupermemoryIncludeProfile] = useState(true);
+  const [supermemoryMirrorWrites, setSupermemoryMirrorWrites] = useState(true);
+  const [supermemorySearchMode, setSupermemorySearchMode] =
+    useState<SupermemorySearchMode>("hybrid");
+  const [supermemoryRerank, setSupermemoryRerank] = useState(true);
+  const [supermemoryThreshold, setSupermemoryThreshold] = useState("0.55");
+  const [supermemoryCustomContainers, setSupermemoryCustomContainers] = useState("");
+  const [supermemorySaving, setSupermemorySaving] = useState(false);
+  const [supermemoryTesting, setSupermemoryTesting] = useState(false);
+  const [supermemoryTestResult, setSupermemoryTestResult] = useState<{
+    success: boolean;
+    error?: string;
+  } | null>(null);
 
   const selectedWorkspace = useMemo(() => {
     return workspaces.find((w) => w.id === selectedWorkspaceId) || null;
@@ -129,12 +153,14 @@ export function MemoryHubSettings(props?: {
         tempWorkspace,
         loadedAwarenessConfig,
         loadedAutonomyConfig,
+        loadedSupermemoryStatus,
       ] = await Promise.all([
         window.electronAPI.getMemoryFeaturesSettings().catch(() => DEFAULT_FEATURES),
         window.electronAPI.listWorkspaces().catch(() => [] as Workspace[]),
         window.electronAPI.getTempWorkspace().catch(() => null as Workspace | null),
         window.electronAPI.getAwarenessConfig().catch(() => null as AwarenessConfig | null),
         window.electronAPI.getAutonomyConfig().catch(() => null as AutonomyConfig | null),
+        window.electronAPI.getSupermemoryStatus().catch(() => null as SupermemoryConfigStatus | null),
       ]);
 
       const combined: Workspace[] = [
@@ -145,6 +171,22 @@ export function MemoryHubSettings(props?: {
       setFeatures(loadedFeatures);
       setAwarenessConfig(loadedAwarenessConfig);
       setAutonomyConfig(loadedAutonomyConfig);
+      setSupermemoryStatus(loadedSupermemoryStatus);
+      setSupermemoryEnabled(loadedSupermemoryStatus?.enabled === true);
+      setSupermemoryBaseUrl(loadedSupermemoryStatus?.baseUrl || "https://api.supermemory.ai");
+      setSupermemoryContainerTemplate(
+        loadedSupermemoryStatus?.containerTagTemplate || "cowork:{workspaceId}",
+      );
+      setSupermemoryIncludeProfile(loadedSupermemoryStatus?.includeProfileInPrompt !== false);
+      setSupermemoryMirrorWrites(loadedSupermemoryStatus?.mirrorMemoryWrites !== false);
+      setSupermemorySearchMode(loadedSupermemoryStatus?.searchMode || "hybrid");
+      setSupermemoryRerank(loadedSupermemoryStatus?.rerank !== false);
+      setSupermemoryThreshold(String(loadedSupermemoryStatus?.threshold ?? 0.55));
+      setSupermemoryCustomContainers(
+        (loadedSupermemoryStatus?.customContainers || [])
+          .map((entry) => `${entry.tag}${entry.description ? ` | ${entry.description}` : ""}`)
+          .join("\n"),
+      );
       setWorkspaces(combined);
       setSelectedWorkspaceId((prev) => {
         const preferred = (props?.initialWorkspaceId || "").trim();
@@ -164,7 +206,7 @@ export function MemoryHubSettings(props?: {
       const status = await window.electronAPI.getWorkspaceKitStatus(selectedWorkspaceId);
       setKitStatus(status);
     } catch (error) {
-      console.error("Failed to load workspace kit status:", error);
+      logger.error("Failed to load workspace kit status:", error);
       setKitStatus(null);
     } finally {
       setKitLoading(false);
@@ -177,7 +219,7 @@ export function MemoryHubSettings(props?: {
       const preview = await window.electronAPI.getMemoryLayerPreview(selectedWorkspaceId);
       setLayerPreview(preview);
     } catch (error) {
-      console.error("Failed to load memory layer preview:", error);
+      logger.error("Failed to load memory layer preview:", error);
       setLayerPreview(null);
     }
   };
@@ -192,7 +234,7 @@ export function MemoryHubSettings(props?: {
       setAwarenessBeliefs(beliefs);
       setAwarenessSummary(summary);
     } catch (error) {
-      console.error("Failed to load awareness state:", error);
+      logger.error("Failed to load awareness state:", error);
     }
   };
 
@@ -208,7 +250,7 @@ export function MemoryHubSettings(props?: {
       setAutonomyDecisions(decisions);
       setAutonomyActions(actions);
     } catch (error) {
-      console.error("Failed to load autonomy state:", error);
+      logger.error("Failed to load autonomy state:", error);
     }
   };
 
@@ -223,7 +265,7 @@ export function MemoryHubSettings(props?: {
       });
       setKitStatus(status);
     } catch (error) {
-      console.error("Failed to initialize workspace kit:", error);
+      logger.error("Failed to initialize workspace kit:", error);
     } finally {
       setKitBusy(false);
     }
@@ -242,7 +284,7 @@ export function MemoryHubSettings(props?: {
       setNewProjectId("");
       await refreshKit();
     } catch (error) {
-      console.error("Failed to create project folder:", error);
+      logger.error("Failed to create project folder:", error);
     } finally {
       setKitBusy(false);
     }
@@ -255,7 +297,7 @@ export function MemoryHubSettings(props?: {
       setSaving(true);
       await window.electronAPI.saveMemoryFeaturesSettings(next);
     } catch (error) {
-      console.error("Failed to save memory feature settings:", error);
+      logger.error("Failed to save memory feature settings:", error);
     } finally {
       setSaving(false);
     }
@@ -268,7 +310,7 @@ export function MemoryHubSettings(props?: {
       const saved = await window.electronAPI.saveAwarenessConfig(nextConfig);
       setAwarenessConfig(saved);
     } catch (error) {
-      console.error("Failed to save awareness config:", error);
+      logger.error("Failed to save awareness config:", error);
     } finally {
       setAwarenessSaving(false);
     }
@@ -296,7 +338,7 @@ export function MemoryHubSettings(props?: {
       await window.electronAPI.updateAwarenessBelief(belief.id, patch);
       await refreshAwareness();
     } catch (error) {
-      console.error("Failed to update awareness belief:", error);
+      logger.error("Failed to update awareness belief:", error);
     }
   };
 
@@ -305,7 +347,7 @@ export function MemoryHubSettings(props?: {
       await window.electronAPI.deleteAwarenessBelief(beliefId);
       await refreshAwareness();
     } catch (error) {
-      console.error("Failed to delete awareness belief:", error);
+      logger.error("Failed to delete awareness belief:", error);
     }
   };
 
@@ -316,7 +358,7 @@ export function MemoryHubSettings(props?: {
       const saved = await window.electronAPI.saveAutonomyConfig(nextConfig);
       setAutonomyConfig(saved);
     } catch (error) {
-      console.error("Failed to save autonomy config:", error);
+      logger.error("Failed to save autonomy config:", error);
     } finally {
       setAutonomySaving(false);
     }
@@ -327,7 +369,63 @@ export function MemoryHubSettings(props?: {
       await window.electronAPI.updateAutonomyDecision(decisionId, patch);
       await refreshAutonomy();
     } catch (error) {
-      console.error("Failed to update autonomy decision:", error);
+      logger.error("Failed to update autonomy decision:", error);
+    }
+  };
+
+  const saveSupermemorySettings = async () => {
+    try {
+      setSupermemorySaving(true);
+      setSupermemoryTestResult(null);
+      await window.electronAPI.saveSupermemorySettings({
+        enabled: supermemoryEnabled,
+        apiKey: supermemoryApiKey || undefined,
+        baseUrl: supermemoryBaseUrl,
+        containerTagTemplate: supermemoryContainerTemplate,
+        includeProfileInPrompt: supermemoryIncludeProfile,
+        mirrorMemoryWrites: supermemoryMirrorWrites,
+        searchMode: supermemorySearchMode,
+        rerank: supermemoryRerank,
+        threshold: Number(supermemoryThreshold),
+        customContainers: supermemoryCustomContainers
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            const [tag, ...descriptionParts] = line.split("|");
+            return {
+              tag: tag.trim(),
+              description: descriptionParts.join("|").trim() || undefined,
+            };
+          }),
+      });
+      setSupermemoryApiKey("");
+      const refreshed = await window.electronAPI.getSupermemoryStatus();
+      setSupermemoryStatus(refreshed);
+    } catch (error) {
+      logger.error("Failed to save Supermemory settings:", error);
+    } finally {
+      setSupermemorySaving(false);
+    }
+  };
+
+  const testSupermemoryConnection = async () => {
+    try {
+      setSupermemoryTesting(true);
+      setSupermemoryTestResult(null);
+      const result = await window.electronAPI.testSupermemoryConnection();
+      setSupermemoryTestResult(result);
+      const refreshed = await window.electronAPI.getSupermemoryStatus().catch(() => null);
+      if (refreshed) {
+        setSupermemoryStatus(refreshed);
+      }
+    } catch (error: unknown) {
+      setSupermemoryTestResult({
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to reach Supermemory",
+      });
+    } finally {
+      setSupermemoryTesting(false);
     }
   };
 
@@ -350,24 +448,17 @@ export function MemoryHubSettings(props?: {
         <h3>Global Toggles</h3>
 
         <div className="settings-form-group">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: "12px",
-            }}
-          >
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+          <div className="memory-hub-toggle-row">
+            <div className="memory-hub-grow">
+              <div className="memory-hub-primary-label">
                 Enable Workspace Context Pack Injection
               </div>
-              <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: 0 }}>
+              <p className="settings-form-hint memory-hub-hint-tight">
                 When enabled, the app may inject redacted notes from <code>.cowork/</code> into
                 agent context to improve continuity.
               </p>
             </div>
-            <label className="settings-toggle" style={{ flexShrink: 0, marginTop: "2px" }}>
+            <label className="settings-toggle memory-hub-toggle">
               <input
                 type="checkbox"
                 checked={features.contextPackInjectionEnabled}
@@ -380,25 +471,18 @@ export function MemoryHubSettings(props?: {
         </div>
 
         <div className="settings-form-group">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: "12px",
-            }}
-          >
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+          <div className="memory-hub-toggle-row">
+            <div className="memory-hub-grow">
+              <div className="memory-hub-primary-label">
                 Enable Maintenance Heartbeats
               </div>
-              <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: 0 }}>
+              <p className="settings-form-hint memory-hub-hint-tight">
                 When enabled, lead agents treat <code>.cowork/HEARTBEAT.md</code> as the recurring
                 checks contract for proactive maintenance, while staying silent unless they find
                 something actionable.
               </p>
             </div>
-            <label className="settings-toggle" style={{ flexShrink: 0, marginTop: "2px" }}>
+            <label className="settings-toggle memory-hub-toggle">
               <input
                 type="checkbox"
                 checked={features.heartbeatMaintenanceEnabled}
@@ -411,24 +495,17 @@ export function MemoryHubSettings(props?: {
         </div>
 
         <div className="settings-form-group">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: "12px",
-            }}
-          >
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+          <div className="memory-hub-toggle-row">
+            <div className="memory-hub-grow">
+              <div className="memory-hub-primary-label">
                 Enable Checkpoint Capture
               </div>
-              <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: 0 }}>
+              <p className="settings-form-hint memory-hub-hint-tight">
                 Writes structured summaries plus verbatim evidence packets on snapshots, periodic
                 exchange checkpoints, and meaningful task completions.
               </p>
             </div>
-            <label className="settings-toggle" style={{ flexShrink: 0, marginTop: "2px" }}>
+            <label className="settings-toggle memory-hub-toggle">
               <input
                 type="checkbox"
                 checked={features.checkpointCaptureEnabled !== false}
@@ -441,24 +518,17 @@ export function MemoryHubSettings(props?: {
         </div>
 
         <div className="settings-form-group">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: "12px",
-            }}
-          >
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+          <div className="memory-hub-toggle-row">
+            <div className="memory-hub-grow">
+              <div className="memory-hub-primary-label">
                 Enable Verbatim Recall
               </div>
-              <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: 0 }}>
+              <p className="settings-form-hint memory-hub-hint-tight">
                 Exposes the quote-first recall lane so the agent can retrieve exact wording instead
                 of summarized memory when precision matters.
               </p>
             </div>
-            <label className="settings-toggle" style={{ flexShrink: 0, marginTop: "2px" }}>
+            <label className="settings-toggle memory-hub-toggle">
               <input
                 type="checkbox"
                 checked={features.verbatimRecallEnabled !== false}
@@ -471,24 +541,17 @@ export function MemoryHubSettings(props?: {
         </div>
 
         <div className="settings-form-group">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: "12px",
-            }}
-          >
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+          <div className="memory-hub-toggle-row">
+            <div className="memory-hub-grow">
+              <div className="memory-hub-primary-label">
                 Enable Wake-Up Layers
               </div>
-              <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: 0 }}>
+              <p className="settings-form-hint memory-hub-hint-tight">
                 Makes prompt-visible memory explicit: inject only L0 Identity and L1 Essential
                 Story by default, while keeping L2 Topic Packs and L3 Deep Recall tool-driven.
               </p>
             </div>
-            <label className="settings-toggle" style={{ flexShrink: 0, marginTop: "2px" }}>
+            <label className="settings-toggle memory-hub-toggle">
               <input
                 type="checkbox"
                 checked={features.wakeUpLayersEnabled !== false}
@@ -501,24 +564,17 @@ export function MemoryHubSettings(props?: {
         </div>
 
         <div className="settings-form-group">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: "12px",
-            }}
-          >
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+          <div className="memory-hub-toggle-row">
+            <div className="memory-hub-grow">
+              <div className="memory-hub-primary-label">
                 Enable Temporal Knowledge
               </div>
-              <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: 0 }}>
+              <p className="settings-form-hint memory-hub-hint-tight">
                 Tracks start and end validity on KG edges so current context ignores stale facts
                 while historical lookups can still recover past truths.
               </p>
             </div>
-            <label className="settings-toggle" style={{ flexShrink: 0, marginTop: "2px" }}>
+            <label className="settings-toggle memory-hub-toggle">
               <input
                 type="checkbox"
                 checked={features.temporalKnowledgeEnabled !== false}
@@ -528,6 +584,250 @@ export function MemoryHubSettings(props?: {
               <span className="toggle-slider" />
             </label>
           </div>
+        </div>
+      </div>
+
+      <div className="settings-subsection">
+        <h3>Supermemory</h3>
+        <p className="settings-form-hint">
+          External memory provider integration inspired by Hermes: workspace-scoped profile
+          fetches, explicit search/remember/forget tools, and optional background mirroring of
+          CoWork memory captures.
+        </p>
+
+        <div className="settings-card">
+          <div className="settings-form-group">
+            <div className="memory-hub-toggle-row">
+              <div className="memory-hub-grow">
+                <div className="memory-hub-primary-label">
+                  Enable Supermemory
+                </div>
+                <p className="settings-form-hint memory-hub-hint-tight">
+                  When enabled, CoWork can fetch scoped profile context from Supermemory and mirror
+                  non-private memory captures into the configured container.
+                </p>
+              </div>
+              <label className="settings-toggle memory-hub-toggle">
+                <input
+                  type="checkbox"
+                  checked={supermemoryEnabled}
+                  onChange={(e) => setSupermemoryEnabled(e.target.checked)}
+                  disabled={supermemorySaving}
+                />
+                <span className="toggle-slider" />
+              </label>
+            </div>
+          </div>
+
+          <div className="settings-field">
+            <label>API Key</label>
+            <input
+              type="password"
+              className="settings-input"
+              placeholder={
+                supermemoryStatus?.apiKeyConfigured ? "••••••••••••••••" : "sm_..."
+              }
+              value={supermemoryApiKey}
+              onChange={(e) => setSupermemoryApiKey(e.target.value)}
+            />
+            <p className="settings-hint">
+              Get your API key from{" "}
+              <a
+                href="https://console.supermemory.ai"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                console.supermemory.ai
+              </a>
+            </p>
+          </div>
+
+          <div className="settings-field">
+            <label>Base URL</label>
+            <input
+              className="settings-input"
+              value={supermemoryBaseUrl}
+              onChange={(e) => setSupermemoryBaseUrl(e.target.value)}
+              placeholder="https://api.supermemory.ai"
+            />
+          </div>
+
+          <div className="settings-field">
+            <label>Container Tag Template</label>
+            <input
+              className="settings-input"
+              value={supermemoryContainerTemplate}
+              onChange={(e) => setSupermemoryContainerTemplate(e.target.value)}
+              placeholder="cowork:{workspaceId}"
+            />
+            <p className="settings-hint">
+              Supports <code>{"{workspaceId}"}</code> and <code>{"{workspaceName}"}</code>. The
+              current workspace defaults to a scoped namespace like <code>cowork:&lt;workspace&gt;</code>.
+            </p>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+              gap: "10px",
+            }}
+          >
+            <div className="settings-field">
+              <label>Search Mode</label>
+              <select
+                className="settings-select"
+                value={supermemorySearchMode}
+                onChange={(e) => setSupermemorySearchMode(e.target.value as SupermemorySearchMode)}
+              >
+                <option value="hybrid">Hybrid</option>
+                <option value="memories">Memories only</option>
+              </select>
+            </div>
+
+            <div className="settings-field">
+              <label>Threshold</label>
+              <input
+                className="settings-input"
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={supermemoryThreshold}
+                onChange={(e) => setSupermemoryThreshold(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="settings-form-group">
+            <div className="memory-hub-toggle-row">
+              <div className="memory-hub-grow">
+                <div className="memory-hub-primary-label">
+                  Inject Supermemory Profile Into Prompts
+                </div>
+                <p className="settings-form-hint memory-hub-hint-tight">
+                  Fetches the workspace-scoped profile at prompt-build time and appends it as soft
+                  context for chat, execution, and follow-up turns.
+                </p>
+              </div>
+              <label className="settings-toggle memory-hub-toggle">
+                <input
+                  type="checkbox"
+                  checked={supermemoryIncludeProfile}
+                  onChange={(e) => setSupermemoryIncludeProfile(e.target.checked)}
+                  disabled={supermemorySaving}
+                />
+                <span className="toggle-slider" />
+              </label>
+            </div>
+          </div>
+
+          <div className="settings-form-group">
+            <div className="memory-hub-toggle-row">
+              <div className="memory-hub-grow">
+                <div className="memory-hub-primary-label">
+                  Mirror Memory Writes
+                </div>
+                <p className="settings-form-hint memory-hub-hint-tight">
+                  Mirrors non-private CoWork memory captures into Supermemory as indexed documents.
+                </p>
+              </div>
+              <label className="settings-toggle memory-hub-toggle">
+                <input
+                  type="checkbox"
+                  checked={supermemoryMirrorWrites}
+                  onChange={(e) => setSupermemoryMirrorWrites(e.target.checked)}
+                  disabled={supermemorySaving}
+                />
+                <span className="toggle-slider" />
+              </label>
+            </div>
+          </div>
+
+          <div className="settings-form-group">
+            <div className="memory-hub-toggle-row">
+              <div className="memory-hub-grow">
+                <div className="memory-hub-primary-label">
+                  Rerank Search Results
+                </div>
+                <p className="settings-form-hint memory-hub-hint-tight">
+                  Uses Supermemory reranking to improve relevance for explicit search tool calls.
+                </p>
+              </div>
+              <label className="settings-toggle memory-hub-toggle">
+                <input
+                  type="checkbox"
+                  checked={supermemoryRerank}
+                  onChange={(e) => setSupermemoryRerank(e.target.checked)}
+                  disabled={supermemorySaving}
+                />
+                <span className="toggle-slider" />
+              </label>
+            </div>
+          </div>
+
+          <div className="settings-field">
+            <label>Custom Containers</label>
+            <textarea
+              className="settings-textarea"
+              rows={4}
+              value={supermemoryCustomContainers}
+              onChange={(e) => setSupermemoryCustomContainers(e.target.value)}
+              placeholder={"work | Work projects\npersonal | Personal context"}
+            />
+            <p className="settings-hint">
+              Optional one container per line. Format: <code>tag | description</code>.
+            </p>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              gap: "8px",
+              flexWrap: "wrap",
+              alignItems: "center",
+              marginTop: "8px",
+            }}
+          >
+            <button
+              className="settings-button primary"
+              onClick={() => void saveSupermemorySettings()}
+              disabled={supermemorySaving}
+            >
+              {supermemorySaving ? "Saving..." : "Save Supermemory Settings"}
+            </button>
+            <button
+              className="settings-button"
+              onClick={() => void testSupermemoryConnection()}
+              disabled={supermemoryTesting}
+            >
+              {supermemoryTesting ? "Testing..." : "Test Connection"}
+            </button>
+            {supermemoryStatus?.apiKeyConfigured && (
+              <span className={badgeClass("success")}>API key configured</span>
+            )}
+            {supermemoryStatus?.circuitBreakerUntil ? (
+              <span className={badgeClass("warning")}>
+                Paused until {formatTimestamp(supermemoryStatus.circuitBreakerUntil) || "later"}
+              </span>
+            ) : null}
+          </div>
+
+          {supermemoryTestResult && (
+            <div
+              className={`settings-feedback ${supermemoryTestResult.success ? "success" : "error"} memory-hub-top-gap`}
+            >
+              {supermemoryTestResult.success
+                ? "Supermemory connection succeeded."
+                : supermemoryTestResult.error || "Supermemory connection failed."}
+            </div>
+          )}
+
+          {supermemoryStatus?.lastError && (
+            <p className="settings-form-hint memory-hub-top-gap">
+              Last provider error: {supermemoryStatus.lastError}
+            </p>
+          )}
         </div>
       </div>
 
@@ -548,18 +848,18 @@ export function MemoryHubSettings(props?: {
           >
             {layerPreview.layers.map((layer) => (
               <div key={layer.layer} className="settings-card">
-                <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
-                  <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>
+                <div className="memory-hub-row">
+                  <div className="memory-hub-section-title">
                     {layer.title}
                   </div>
                   <span className={badgeClass(layer.injectedByDefault ? "success" : "neutral")}>
                     {layer.injectedByDefault ? "Injected" : "Tool-driven"}
                   </span>
                 </div>
-                <p className="settings-form-hint" style={{ marginTop: "6px" }}>
+                <p className="settings-form-hint memory-hub-hint">
                   {layer.description}
                 </p>
-                <div style={{ fontSize: "11px", color: "var(--color-text-secondary)" }}>
+                <div className="memory-hub-caption">
                   {layer.budget.usedTokens} tokens used
                   {layer.budget.excludedCount > 0
                     ? ` • ${layer.budget.excludedCount} fragment${layer.budget.excludedCount === 1 ? "" : "s"} excluded by budget`
@@ -582,7 +882,7 @@ export function MemoryHubSettings(props?: {
                     {layer.includedText}
                   </pre>
                 ) : (
-                  <div className="settings-empty" style={{ marginTop: "10px" }}>
+                  <div className="settings-empty memory-hub-top-gap">
                     No inline payload.
                   </div>
                 )}
@@ -612,24 +912,17 @@ export function MemoryHubSettings(props?: {
           </p>
 
           <div className="settings-form-group">
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "flex-start",
-                gap: "12px",
-              }}
-            >
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+            <div className="memory-hub-toggle-row">
+              <div className="memory-hub-grow">
+                <div className="memory-hub-primary-label">
                   Private Mode
                 </div>
-                <p className="settings-form-hint" style={{ marginTop: "4px", marginBottom: 0 }}>
+                <p className="settings-form-hint memory-hub-hint-tight">
                   Suspends higher-sensitivity collectors like browser, clipboard, and notifications
                   while keeping task execution available.
                 </p>
               </div>
-              <label className="settings-toggle" style={{ flexShrink: 0, marginTop: "2px" }}>
+              <label className="settings-toggle memory-hub-toggle">
                 <input
                   type="checkbox"
                   checked={awarenessConfig.privateModeEnabled}
@@ -658,8 +951,8 @@ export function MemoryHubSettings(props?: {
             {Object.entries(awarenessConfig.sources).map(([source, policy]) => (
               <div key={source} className="awareness-grid-row">
                 <div>
-                  <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>{source}</div>
-                  <div style={{ color: "var(--color-text-secondary)", marginTop: "4px" }}>
+                  <div className="memory-hub-section-title">{source}</div>
+                  <div className="memory-hub-inline-secondary-gap">
                     TTL {policy.ttlMinutes} min
                   </div>
                 </div>
@@ -739,16 +1032,16 @@ export function MemoryHubSettings(props?: {
             }}
           >
             <div className="settings-card">
-              <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>
+              <div className="memory-hub-section-title">
                 What CoWork Currently Believes
               </div>
-              <p className="settings-form-hint" style={{ marginTop: "6px" }}>
+              <p className="settings-form-hint memory-hub-hint">
                 Stable beliefs promoted from conversation and local computer context.
               </p>
               {awarenessBeliefs.length === 0 ? (
                 <div className="settings-empty">No promoted beliefs yet for this workspace.</div>
               ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                <div className="memory-hub-column">
                   {awarenessBeliefs.slice(0, 12).map((belief) => (
                     <div
                       key={belief.id}
@@ -762,14 +1055,14 @@ export function MemoryHubSettings(props?: {
                           alignItems: "center",
                         }}
                       >
-                        <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+                        <div className="memory-hub-primary-label">
                           {belief.subject}
                         </div>
                         <span className={badgeClass(belief.promotionStatus === "confirmed" ? "success" : "neutral")}>
                           {belief.promotionStatus}
                         </span>
                       </div>
-                      <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--color-text-primary)" }}>
+                      <div className="memory-hub-text-block-primary">
                         {belief.value}
                       </div>
                       <div
@@ -786,7 +1079,7 @@ export function MemoryHubSettings(props?: {
                         <span>confidence {formatConfidence(belief.confidence)}</span>
                         <span>source {belief.source}</span>
                       </div>
-                      <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      <div className="memory-hub-chip-row">
                         <button
                           className="settings-button"
                           onClick={() =>
@@ -822,22 +1115,22 @@ export function MemoryHubSettings(props?: {
             </div>
 
             <div className="settings-card">
-              <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>
+              <div className="memory-hub-section-title">
                 Current Awareness Summary
               </div>
-              <p className="settings-form-hint" style={{ marginTop: "6px" }}>
+              <p className="settings-form-hint memory-hub-hint">
                 Live summary of focus, high-signal context changes, and due-soon items.
               </p>
-              <div style={{ fontSize: "12px", color: "var(--color-text-primary)" }}>
+              <div className="memory-hub-inline-primary">
                 <strong>Current focus:</strong> {awarenessSummary?.currentFocus || "Unknown"}
               </div>
-              <div style={{ marginTop: "10px" }}>
-                <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>What matters now</div>
+              <div className="memory-hub-top-gap">
+                <div className="memory-hub-primary-label">What matters now</div>
                 {(awarenessSummary?.whatMattersNow || []).slice(0, 5).map((item) => (
-                  <div key={item.id} style={{ marginTop: "8px", fontSize: "12px" }}>
-                    <div style={{ color: "var(--color-text-primary)" }}>{item.title}</div>
+                  <div key={item.id} className="memory-hub-text-block">
+                    <div className="memory-hub-text-primary">{item.title}</div>
                     {item.detail && (
-                      <div style={{ color: "var(--color-text-secondary)", marginTop: "2px" }}>
+                      <div className="memory-hub-inline-secondary-top">
                         {item.detail}
                       </div>
                     )}
@@ -847,13 +1140,13 @@ export function MemoryHubSettings(props?: {
                   <p className="settings-form-hint">No current high-signal awareness items.</p>
                 )}
               </div>
-              <div style={{ marginTop: "12px" }}>
-                <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>Due soon</div>
+              <div className="memory-hub-top-gap-md">
+                <div className="memory-hub-primary-label">Due soon</div>
                 {(awarenessSummary?.dueSoon || []).slice(0, 5).map((item) => (
-                  <div key={item.id} style={{ marginTop: "8px", fontSize: "12px" }}>
-                    <div style={{ color: "var(--color-text-primary)" }}>{item.title}</div>
+                  <div key={item.id} className="memory-hub-text-block">
+                    <div className="memory-hub-text-primary">{item.title}</div>
                     {item.detail && (
-                      <div style={{ color: "var(--color-text-secondary)", marginTop: "2px" }}>
+                      <div className="memory-hub-inline-secondary-top">
                         {item.detail}
                       </div>
                     )}
@@ -867,19 +1160,19 @@ export function MemoryHubSettings(props?: {
           </div>
 
           {autonomyConfig && (
-            <div style={{ marginTop: "12px" }}>
+            <div className="memory-hub-top-gap-md">
               <div className="settings-card">
-                <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>
+                <div className="memory-hub-section-title">
                   Chief of Staff Mode
                 </div>
-                <p className="settings-form-hint" style={{ marginTop: "6px" }}>
+                <p className="settings-form-hint memory-hub-hint">
                   Controls goal-driven planning, intervention generation, and bounded local
                   execution.
                 </p>
-                <div style={{ display: "grid", gap: "10px" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px" }}>
-                    <span style={{ fontSize: "13px", color: "var(--color-text-primary)" }}>Enable chief-of-staff engine</span>
-                    <label className="settings-toggle" style={{ flexShrink: 0 }}>
+                <div className="memory-hub-grid">
+                  <div className="memory-hub-row-center">
+                    <span className="memory-hub-inline-primary-sm">Enable chief-of-staff engine</span>
+                    <label className="settings-toggle memory-hub-toggle-shrink">
                       <input
                         type="checkbox"
                         checked={autonomyConfig.enabled}
@@ -894,9 +1187,9 @@ export function MemoryHubSettings(props?: {
                       <span className="toggle-slider" />
                     </label>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px" }}>
-                    <span style={{ fontSize: "13px", color: "var(--color-text-primary)" }}>Auto-evaluate on ambient changes</span>
-                    <label className="settings-toggle" style={{ flexShrink: 0 }}>
+                  <div className="memory-hub-row-center">
+                    <span className="memory-hub-inline-primary-sm">Auto-evaluate on ambient changes</span>
+                    <label className="settings-toggle memory-hub-toggle-shrink">
                       <input
                         type="checkbox"
                         checked={autonomyConfig.autoEvaluate}
@@ -920,10 +1213,10 @@ export function MemoryHubSettings(props?: {
                   >
                     {Object.entries(autonomyConfig.actionPolicies).map(([actionType, policy]) => (
                       <div key={actionType} className="settings-card">
-                        <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+                        <div className="memory-hub-primary-label">
                           {actionType}
                         </div>
-                        <div style={{ marginTop: "8px" }}>
+                        <div className="memory-hub-top-gap-sm">
                           <select
                             className="settings-select"
                             value={policy.level}
@@ -951,7 +1244,7 @@ export function MemoryHubSettings(props?: {
                       </div>
                     ))}
                   </div>
-                  <div style={{ display: "flex", gap: "8px" }}>
+                  <div className="memory-hub-stack-gap">
                     <button
                       className="settings-button"
                       onClick={() => void refreshAutonomy()}
@@ -982,72 +1275,72 @@ export function MemoryHubSettings(props?: {
                 }}
               >
                 <div className="settings-card">
-                  <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>
+                  <div className="memory-hub-section-title">
                     World Model
                   </div>
-                  <p className="settings-form-hint" style={{ marginTop: "6px" }}>
+                  <p className="settings-form-hint memory-hub-hint">
                     What CoWork thinks is active right now.
                   </p>
-                  <div style={{ fontSize: "12px", color: "var(--color-text-primary)" }}>
+                  <div className="memory-hub-inline-primary">
                     <strong>Focus:</strong> {autonomyState?.focusSession?.focusLabel || "Unknown"}
                   </div>
-                  <div style={{ marginTop: "10px" }}>
-                    <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>Goals</div>
+                  <div className="memory-hub-top-gap">
+                    <div className="memory-hub-primary-label">Goals</div>
                     {(autonomyState?.goals || []).slice(0, 4).map((goal) => (
-                      <div key={goal.id} style={{ marginTop: "8px", fontSize: "12px" }}>
+                      <div key={goal.id} className="memory-hub-text-block">
                         <div>{goal.title}</div>
-                        <div style={{ color: "var(--color-text-secondary)" }}>
+                        <div className="memory-hub-text-secondary">
                           {goal.status} • confidence {formatConfidence(goal.confidence)}
                         </div>
                       </div>
                     ))}
                   </div>
-                  <div style={{ marginTop: "10px" }}>
-                    <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>Open loops</div>
+                  <div className="memory-hub-top-gap">
+                    <div className="memory-hub-primary-label">Open loops</div>
                     {(autonomyState?.openLoops || []).slice(0, 4).map((loop) => (
-                      <div key={loop.id} style={{ marginTop: "8px", fontSize: "12px" }}>
+                      <div key={loop.id} className="memory-hub-text-block">
                         <div>{loop.title}</div>
-                        <div style={{ color: "var(--color-text-secondary)" }}>
+                        <div className="memory-hub-text-secondary">
                           {loop.dueAt ? formatTimestamp(loop.dueAt) : "No due date"}
                         </div>
                       </div>
                     ))}
                   </div>
-                  <div style={{ marginTop: "10px" }}>
-                    <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>Routines</div>
+                  <div className="memory-hub-top-gap">
+                    <div className="memory-hub-primary-label">Routines</div>
                     {(autonomyState?.routines || []).slice(0, 3).map((routine) => (
-                      <div key={routine.id} style={{ marginTop: "8px", fontSize: "12px" }}>
+                      <div key={routine.id} className="memory-hub-text-block">
                         <div>{routine.title}</div>
-                        <div style={{ color: "var(--color-text-secondary)" }}>{routine.description}</div>
+                        <div className="memory-hub-text-secondary">{routine.description}</div>
                       </div>
                     ))}
                   </div>
                 </div>
 
                 <div className="settings-card">
-                  <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>
+                  <div className="memory-hub-section-title">
                     Pending Interventions
                   </div>
-                  <p className="settings-form-hint" style={{ marginTop: "6px" }}>
+                  <p className="settings-form-hint memory-hub-hint">
                     What chief-of-staff mode wants to do next and why.
                   </p>
                   {(autonomyDecisions || []).slice(0, 8).map((decision) => (
-                    <div key={decision.id} className="settings-card" style={{ marginTop: "8px" }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: "8px" }}>
-                        <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+                    <div key={decision.id} className="settings-card memory-hub-top-gap-sm">
+                      <div className="memory-hub-row">
+                        <div className="memory-hub-primary-label">
                           {decision.title}
                         </div>
                         <span className={badgeClass(decision.priority === "high" ? "warning" : "neutral")}>
                           {decision.status}
                         </span>
                       </div>
-                      <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--color-text-primary)" }}>
+                      <div className="memory-hub-text-block-primary">
                         {decision.description}
                       </div>
                       <div style={{ marginTop: "6px", fontSize: "11px", color: "var(--color-text-secondary)" }}>
                         {decision.actionType} • {decision.policyLevel} • {decision.reason}
                       </div>
-                      <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      <div className="memory-hub-chip-row">
                         {decision.status !== "done" && (
                           <button className="settings-button" onClick={() => void updateDecision(decision.id, { status: "done" })}>
                             Mark done
@@ -1067,16 +1360,16 @@ export function MemoryHubSettings(props?: {
                 </div>
 
                 <div className="settings-card">
-                  <div style={{ fontWeight: 600, color: "var(--color-text-primary)" }}>
+                  <div className="memory-hub-section-title">
                     Recent Actions
                   </div>
-                  <p className="settings-form-hint" style={{ marginTop: "6px" }}>
+                  <p className="settings-form-hint memory-hub-hint">
                     Local actions the engine already attempted.
                   </p>
                   {(autonomyActions || []).slice(0, 8).map((action) => (
-                    <div key={action.id} style={{ marginTop: "8px", fontSize: "12px" }}>
-                      <div style={{ color: "var(--color-text-primary)" }}>{action.summary}</div>
-                      <div style={{ color: "var(--color-text-secondary)" }}>
+                    <div key={action.id} className="memory-hub-text-block">
+                      <div className="memory-hub-text-primary">{action.summary}</div>
+                      <div className="memory-hub-text-secondary">
                         {action.actionType} • {action.status} • {formatTimestamp(action.createdAt)}
                       </div>
                     </div>
@@ -1115,7 +1408,7 @@ export function MemoryHubSettings(props?: {
                 Path: <code>{selectedWorkspace.path}</code>
               </p>
             )}
-            <div style={{ marginTop: "10px" }}>
+            <div className="memory-hub-top-gap">
               <label className="settings-label">Kit Preset</label>
               <select
                 value={kitPreset}
@@ -1138,7 +1431,7 @@ export function MemoryHubSettings(props?: {
         )}
 
         {selectedWorkspaceId && (
-          <div className="settings-form-group" style={{ marginTop: "10px" }}>
+          <div className="settings-form-group memory-hub-top-gap">
             <div
               style={{
                 display: "flex",
@@ -1148,14 +1441,14 @@ export function MemoryHubSettings(props?: {
               }}
             >
               <div>
-                <div style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>
+                <div className="memory-hub-primary-label">
                   Workspace Kit
                 </div>
                 <p className="settings-form-hint" style={{ margin: 0 }}>
                   Creates recommended <code>.cowork/</code> files for shared, durable context.
                 </p>
               </div>
-              <div style={{ display: "flex", gap: "8px" }}>
+              <div className="memory-hub-stack-gap">
                 <button
                   className="settings-button"
                   onClick={() => void refreshKit()}
@@ -1174,7 +1467,7 @@ export function MemoryHubSettings(props?: {
             </div>
 
             {kitStatus && (
-              <div style={{ marginTop: "10px" }}>
+              <div className="memory-hub-top-gap">
                 <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
                   <span className={badgeClass(kitStatus.hasKitDir ? "success" : "warning")}>
                     {kitStatus.hasKitDir ? ".cowork ready" : ".cowork missing"}
@@ -1230,7 +1523,7 @@ export function MemoryHubSettings(props?: {
                 </div>
 
                 {kitStatus.files.length > 0 && (
-                  <details style={{ marginTop: "8px" }}>
+                  <details className="memory-hub-top-gap-sm">
                     <summary
                       style={{
                         cursor: "pointer",
@@ -1267,7 +1560,7 @@ export function MemoryHubSettings(props?: {
                                 alignItems: "flex-start",
                               }}
                             >
-                              <div style={{ minWidth: 0, flex: 1 }}>
+                              <div className="memory-hub-grow">
                                 <div
                                   style={{
                                     display: "flex",

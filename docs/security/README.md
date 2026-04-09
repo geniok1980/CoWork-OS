@@ -28,4 +28,4 @@ CoWork OS is designed with security in mind. By default:
 ## Need Help?
 
 - For security questions, see the [FAQ section](./best-practices.md#faq)
-- To report a security issue, please email security@cowork.dev
+- To report a security issue, please email info@coworkosapp.com

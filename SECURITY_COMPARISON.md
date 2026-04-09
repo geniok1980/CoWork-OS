@@ -151,6 +151,6 @@ If you discover a security vulnerability in CoWork OS:
 
 1. **Do NOT** report via public GitHub issues
 2. Use GitHub Security Advisories (preferred)
-3. Or email: coworkoss@icloud.com
+3. Or email: info@coworkosapp.com
 
 See [SECURITY.md](SECURITY.md) for full details on our security policy and response timeline.

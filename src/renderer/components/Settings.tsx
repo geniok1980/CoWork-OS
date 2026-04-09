@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useCallback,
   useRef,
   type ReactNode,
   type SetStateAction,
@@ -123,6 +124,7 @@ import { CompaniesPanel } from "./CompaniesPanel";
 import { HealthPanel } from "./HealthPanel";
 import { CouncilSettings } from "./CouncilSettings";
 import { ContactIdentitySettings } from "./ContactIdentitySettings";
+import { TaskTraceDebuggerPanel } from "./TaskTraceDebuggerPanel";
 import {
   buildClaudeCredentialInput,
   resolveClaudeAuthMethod,
@@ -167,6 +169,7 @@ type SettingsTab =
   | "git"
   | "insights"
   | "suggestions"
+  | "traces"
   | "customize"
   | "digitaltwins"
   | "triggers"
@@ -229,6 +232,8 @@ interface ProviderInfo {
 }
 
 interface ProviderRoutingConfig {
+  fallbackProviders?: LLMProviderFallbackConfig[];
+  failoverPrimaryRetryCooldownSeconds?: number;
   profileRoutingEnabled?: boolean;
   strongModelKey?: string;
   cheapModelKey?: string;
@@ -639,6 +644,12 @@ const sidebarItems: Array<{
     label: "Suggestions",
     group: "Advanced",
     icon: <Lightbulb {...I} />,
+  },
+  {
+    tab: "traces",
+    label: "Trace Debugger",
+    group: "Advanced",
+    icon: <MessagesSquare {...I} />,
   },
   {
     tab: "updates",
@@ -1111,6 +1122,26 @@ export function Settings({
     }));
   };
 
+  const sanitizeFailoverProviders = (
+    providers?: LLMProviderFallbackConfig[],
+  ): LLMProviderFallbackConfig[] => {
+    const normalized: LLMProviderFallbackConfig[] = [];
+    const seen = new Set<string>();
+    for (const entry of providers || []) {
+      const providerType = resolveCustomProviderId(entry.providerType);
+      const modelKey = entry.modelKey?.trim();
+      if (!providerType) continue;
+      const dedupeKey = `${providerType}:${modelKey || ""}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      normalized.push({
+        providerType,
+        ...(modelKey ? { modelKey } : {}),
+      });
+    }
+    return normalized.slice(0, 5);
+  };
+
   const sanitizeCustomProviders = (
     providers: Record<string, CustomProviderConfig>,
   ) => {
@@ -1139,6 +1170,24 @@ export function Settings({
       const strongModelKey = value.strongModelKey?.trim();
       const cheapModelKey = value.cheapModelKey?.trim();
       const automatedTaskModelKey = value.automatedTaskModelKey?.trim();
+      const hasFallbackProviders = Object.prototype.hasOwnProperty.call(
+        value,
+        "fallbackProviders",
+      );
+      const fallbackProviders = sanitizeFailoverProviders(
+        value.fallbackProviders,
+      );
+      const failoverPrimaryRetryCooldownSeconds =
+        typeof value.failoverPrimaryRetryCooldownSeconds === "number" &&
+        Number.isFinite(value.failoverPrimaryRetryCooldownSeconds)
+          ? Math.max(
+              0,
+              Math.min(
+                3600,
+                Math.floor(value.failoverPrimaryRetryCooldownSeconds),
+              ),
+            )
+          : undefined;
       const profileRoutingEnabled = value.profileRoutingEnabled === true;
       const preferStrongForVerification =
         typeof value.preferStrongForVerification === "boolean"
@@ -1152,6 +1201,8 @@ export function Settings({
         strongModelKey ||
         cheapModelKey ||
         automatedTaskModelKey ||
+        hasFallbackProviders ||
+        typeof failoverPrimaryRetryCooldownSeconds === "number" ||
         profileRoutingEnabled ||
         typeof preferStrongForVerification === "boolean"
       ) {
@@ -1163,6 +1214,10 @@ export function Settings({
           ...(strongModelKey ? { strongModelKey } : {}),
           ...(cheapModelKey ? { cheapModelKey } : {}),
           ...(automatedTaskModelKey ? { automatedTaskModelKey } : {}),
+          ...(hasFallbackProviders ? { fallbackProviders } : {}),
+          ...(typeof failoverPrimaryRetryCooldownSeconds === "number"
+            ? { failoverPrimaryRetryCooldownSeconds }
+            : {}),
           ...(profileRoutingEnabled ? { profileRoutingEnabled: true } : {}),
           ...(typeof preferStrongForVerification === "boolean"
             ? { preferStrongForVerification }
@@ -1261,6 +1316,80 @@ export function Settings({
       default:
         return {};
     }
+  };
+
+  const getProviderFailoverConfig = (
+    providerType: LLMProviderType,
+  ): Pick<
+    ProviderRoutingConfig,
+    "fallbackProviders" | "failoverPrimaryRetryCooldownSeconds"
+  > => {
+    const resolvedType = resolveCustomProviderId(providerType);
+    const customEntry = CUSTOM_PROVIDER_MAP.get(resolvedType);
+    if (customEntry) {
+      const config = customProviders[resolvedType] || {};
+      return {
+        fallbackProviders:
+          Object.prototype.hasOwnProperty.call(config, "fallbackProviders")
+            ? config.fallbackProviders
+            : settings.fallbackProviders,
+        failoverPrimaryRetryCooldownSeconds:
+          Object.prototype.hasOwnProperty.call(
+            config,
+            "failoverPrimaryRetryCooldownSeconds",
+          )
+            ? config.failoverPrimaryRetryCooldownSeconds
+            : settings.failoverPrimaryRetryCooldownSeconds,
+      };
+    }
+
+    const routing =
+      (() => {
+        switch (providerType) {
+          case "anthropic":
+            return settings.anthropic;
+          case "bedrock":
+            return settings.bedrock;
+          case "ollama":
+            return settings.ollama;
+          case "gemini":
+            return settings.gemini;
+          case "openrouter":
+            return settings.openrouter;
+          case "openai":
+            return settings.openai;
+          case "azure":
+            return settings.azure;
+          case "azure-anthropic":
+            return settings.azureAnthropic;
+          case "groq":
+            return settings.groq;
+          case "xai":
+            return settings.xai;
+          case "kimi":
+            return settings.kimi;
+          case "pi":
+            return settings.pi;
+          case "openai-compatible":
+            return settings.openaiCompatible;
+          default:
+            return undefined;
+        }
+      })() || {};
+
+    return {
+      fallbackProviders:
+        Object.prototype.hasOwnProperty.call(routing, "fallbackProviders")
+          ? routing.fallbackProviders
+          : settings.fallbackProviders,
+      failoverPrimaryRetryCooldownSeconds:
+        Object.prototype.hasOwnProperty.call(
+          routing,
+          "failoverPrimaryRetryCooldownSeconds",
+        )
+          ? routing.failoverPrimaryRetryCooldownSeconds
+          : settings.failoverPrimaryRetryCooldownSeconds,
+    };
   };
 
   const setProviderRoutingConfig = (
@@ -1411,7 +1540,7 @@ export function Settings({
     return Array.from(deduped.values());
   };
 
-  const loadProviderModelsForType = async (
+  const loadProviderModelsForType = useCallback(async (
     providerType: LLMProviderType,
     claudeCredentials?: ReturnType<typeof buildClaudeCredentialInput>,
   ): Promise<ModelOption[]> => {
@@ -1447,7 +1576,7 @@ export function Settings({
       }));
       return [];
     }
-  };
+  }, [anthropicApiKey, anthropicAuthMethod, anthropicSubscriptionToken]);
 
   const loadProviderRoutingModels = async (
     providerType: LLMProviderType,
@@ -1532,15 +1661,6 @@ export function Settings({
     return Array.from(deduped.values());
   };
 
-  const updateFallbackProviders = (
-    updater: (prev: LLMProviderFallbackConfig[]) => LLMProviderFallbackConfig[],
-  ) => {
-    setSettings((prev) => ({
-      ...prev,
-      fallbackProviders: updater(prev.fallbackProviders || []),
-    }));
-  };
-
   const configuredFallbackProviderOptions = providers.filter(
     (provider) => provider.configured,
   );
@@ -1562,14 +1682,6 @@ export function Settings({
       }
     }
   }, [azureAnthropicDeploymentsText, azureAnthropicDeployment]);
-
-  useEffect(() => {
-    for (const entry of settings.fallbackProviders || []) {
-      if (!providerModelOptionsByType[entry.providerType]) {
-        void loadProviderModelsForType(entry.providerType);
-      }
-    }
-  }, [settings.fallbackProviders, providerModelOptionsByType]);
 
   const loadConfigStatus = async () => {
     try {
@@ -2678,27 +2790,41 @@ export function Settings({
           automatedTaskModelKey: automatedTaskModelKey || undefined,
           preferStrongForVerification:
             typeof routing.preferStrongForVerification === "boolean"
-              ? routing.preferStrongForVerification
-              : true,
+            ? routing.preferStrongForVerification
+            : true,
         };
       };
-      const sanitizedFallbackProviders = (
-        currentSettings.fallbackProviders || []
-      )
-        .map((entry) => ({
-          providerType: resolveCustomProviderId(entry.providerType),
-          modelKey: entry.modelKey?.trim() || undefined,
-        }))
-        .filter((entry, index, array) => {
-          if (!entry.providerType) return false;
-          return (
-            array.findIndex(
-              (candidate) =>
-                candidate.providerType === entry.providerType &&
-                (candidate.modelKey || "") === (entry.modelKey || ""),
-            ) === index
-          );
-        });
+      const failoverFor = (
+        providerType: LLMProviderType,
+      ): Pick<
+        ProviderRoutingConfig,
+        "fallbackProviders" | "failoverPrimaryRetryCooldownSeconds"
+      > => {
+        const failover = getProviderFailoverConfig(providerType);
+        const fallbackProviders =
+          failover.fallbackProviders !== undefined
+            ? sanitizeFailoverProviders(failover.fallbackProviders)
+            : undefined;
+        const cooldown =
+          typeof failover.failoverPrimaryRetryCooldownSeconds === "number" &&
+          Number.isFinite(failover.failoverPrimaryRetryCooldownSeconds)
+            ? Math.max(
+                0,
+                Math.min(
+                  3600,
+                  Math.floor(failover.failoverPrimaryRetryCooldownSeconds),
+                ),
+              )
+            : undefined;
+        return {
+          ...(fallbackProviders !== undefined
+            ? { fallbackProviders }
+            : {}),
+          ...(typeof cooldown === "number"
+            ? { failoverPrimaryRetryCooldownSeconds: cooldown }
+            : {}),
+        };
+      };
       const anthropicCredentialSettings = {
         apiKey: anthropicApiKey || undefined,
         subscriptionToken: anthropicSubscriptionToken || undefined,
@@ -2709,14 +2835,11 @@ export function Settings({
       // when switching between providers
       const settingsToSave: LLMSettingsData = {
         ...currentSettings,
-        fallbackProviders:
-          sanitizedFallbackProviders.length > 0
-            ? sanitizedFallbackProviders
-            : undefined,
         // Always include anthropic settings
         anthropic: {
           ...anthropicCredentialSettings,
           ...routingFor("anthropic"),
+          ...failoverFor("anthropic"),
         },
         // Always include bedrock settings
         bedrock: {
@@ -2724,6 +2847,7 @@ export function Settings({
           useDefaultCredentials,
           model: bedrockModel || undefined,
           ...routingFor("bedrock"),
+          ...failoverFor("bedrock"),
           ...(useDefaultCredentials
             ? {
                 profile: awsProfile || undefined,
@@ -2739,12 +2863,14 @@ export function Settings({
           model: ollamaModel || undefined,
           apiKey: ollamaApiKey || undefined,
           ...routingFor("ollama"),
+          ...failoverFor("ollama"),
         },
         // Always include gemini settings
         gemini: {
           apiKey: geminiApiKey || undefined,
           model: geminiModel || undefined,
           ...routingFor("gemini"),
+          ...failoverFor("gemini"),
         },
         // Always include openrouter settings
         openrouter: {
@@ -2752,6 +2878,7 @@ export function Settings({
           model: openrouterModel || undefined,
           baseUrl: openrouterBaseUrl || undefined,
           ...routingFor("openrouter"),
+          ...failoverFor("openrouter"),
         },
         // Always include openai settings
         openai: {
@@ -2762,6 +2889,7 @@ export function Settings({
           model: openaiModel || undefined,
           authMethod: openaiAuthMethod,
           ...routingFor("openai"),
+          ...failoverFor("openai"),
         },
         // Always include Azure OpenAI settings
         azure: {
@@ -2772,6 +2900,7 @@ export function Settings({
           apiVersion: azureApiVersion || undefined,
           reasoningEffort: azureReasoningEffort,
           ...routingFor("azure"),
+          ...failoverFor("azure"),
         },
         // Always include Azure Anthropic settings
         azureAnthropic: {
@@ -2781,6 +2910,7 @@ export function Settings({
           deployments: azureAnthropicSettings.deployments,
           apiVersion: azureAnthropicApiVersion || undefined,
           ...routingFor("azure-anthropic"),
+          ...failoverFor("azure-anthropic"),
         },
         // Always include Groq settings
         groq: {
@@ -2788,6 +2918,7 @@ export function Settings({
           model: groqModel || undefined,
           baseUrl: groqBaseUrl || undefined,
           ...routingFor("groq"),
+          ...failoverFor("groq"),
         },
         // Always include xAI settings
         xai: {
@@ -2795,6 +2926,7 @@ export function Settings({
           model: xaiModel || undefined,
           baseUrl: xaiBaseUrl || undefined,
           ...routingFor("xai"),
+          ...failoverFor("xai"),
         },
         // Always include Kimi settings
         kimi: {
@@ -2802,6 +2934,7 @@ export function Settings({
           model: kimiModel || undefined,
           baseUrl: kimiBaseUrl || undefined,
           ...routingFor("kimi"),
+          ...failoverFor("kimi"),
         },
         // Always include Pi settings
         pi: {
@@ -2809,6 +2942,7 @@ export function Settings({
           apiKey: piApiKey || undefined,
           model: piModel || undefined,
           ...routingFor("pi"),
+          ...failoverFor("pi"),
         },
         // Always include OpenAI-compatible settings
         openaiCompatible: {
@@ -2816,6 +2950,7 @@ export function Settings({
           apiKey: openaiCompatApiKey || undefined,
           model: openaiCompatModel || undefined,
           ...routingFor("openai-compatible"),
+          ...failoverFor("openai-compatible"),
         },
         imageGeneration:
           imageGenDefaultModel || imageGenBackupModel
@@ -3049,7 +3184,19 @@ export function Settings({
     ? customProviders[resolvedProviderType] || {}
     : {};
   const selectedCustomModels = selectedCustomConfig.cachedModels || [];
+  const currentProviderLabel =
+    providers.find((provider) => provider.type === currentProviderType)?.name ||
+    currentProviderType;
   const providerRouting = getProviderRoutingConfig(currentProviderType);
+  const providerFailover = getProviderFailoverConfig(currentProviderType);
+  const currentFailoverProviders = providerFailover.fallbackProviders || [];
+  const updateCurrentFailoverProviders = (
+    updater: (prev: LLMProviderFallbackConfig[]) => LLMProviderFallbackConfig[],
+  ) => {
+    setProviderRoutingConfig(currentProviderType, {
+      fallbackProviders: updater(currentFailoverProviders),
+    });
+  };
   const routingEnabled = providerRouting.profileRoutingEnabled === true;
   const providerPrimaryModel = getProviderPrimaryModel(currentProviderType);
   const strongRoutingModel =
@@ -3063,6 +3210,19 @@ export function Settings({
     !!strongRoutingModel &&
     !!cheapRoutingModel &&
     strongRoutingModel === cheapRoutingModel;
+
+  useEffect(() => {
+    for (const entry of providerFailover.fallbackProviders || []) {
+      if (!providerModelOptionsByType[entry.providerType]) {
+        void loadProviderModelsForType(entry.providerType);
+      }
+    }
+  }, [
+    currentProviderType,
+    providerFailover.fallbackProviders,
+    loadProviderModelsForType,
+    providerModelOptionsByType,
+  ]);
 
   const activeVideoTab = videoDefaultProvider || "openai";
 
@@ -5668,10 +5828,9 @@ export function Settings({
         <div className="settings-section">
           <h3>Provider Failover</h3>
           <p className="settings-description">
-            When the active provider hits quota, outages, or transient network
-            errors, automatically switch to the next configured provider/model
-            in this order. Task-level provider or model overrides skip automatic
-            failover.
+            Configure ordered fallback providers/models for {currentProviderLabel}.
+            Each LLM provider keeps its own failover chain and retry cooldown.
+            Task-level provider or model overrides skip automatic failover.
           </p>
 
           <div className="settings-subsection" style={{ marginBottom: "12px" }}>
@@ -5684,11 +5843,10 @@ export function Settings({
               min={0}
               max={3600}
               step={1}
-              value={settings.failoverPrimaryRetryCooldownSeconds ?? ""}
+              value={providerFailover.failoverPrimaryRetryCooldownSeconds ?? ""}
               placeholder="60"
               onChange={(e) =>
-                setSettings((prev) => ({
-                  ...prev,
+                setProviderRoutingConfig(currentProviderType, {
                   failoverPrimaryRetryCooldownSeconds:
                     e.target.value.trim().length === 0
                       ? undefined
@@ -5699,19 +5857,19 @@ export function Settings({
                             Math.floor(Number(e.target.value) || 0),
                           ),
                         ),
-                }))
+                })
               }
             />
             <p className="settings-hint">
-              How long to stay on a fallback route before trying the primary
-              route again. Leave blank for the default of 60 seconds. Set to 0
-              to retry the primary on the next route refresh.
+              How long to stay on a fallback route before trying this provider&apos;s
+              primary route again. Leave blank for the default of 60 seconds.
+              Set to 0 to retry the primary on the next route refresh.
             </p>
           </div>
 
-          {(settings.fallbackProviders || []).length > 0 ? (
+          {currentFailoverProviders.length > 0 ? (
             <div className="settings-subsection">
-              {(settings.fallbackProviders || []).map((entry, index) => (
+              {currentFailoverProviders.map((entry, index) => (
                 <div
                   key={`${entry.providerType}:${index}`}
                   style={{
@@ -5733,7 +5891,7 @@ export function Settings({
                       onChange={(e) => {
                         const nextProvider = e.target.value as LLMProviderType;
                         void loadProviderModelsForType(nextProvider);
-                        updateFallbackProviders((prev) =>
+                        updateCurrentFailoverProviders((prev) =>
                           prev.map((candidate, candidateIndex) =>
                             candidateIndex === index
                               ? {
@@ -5767,7 +5925,7 @@ export function Settings({
                       ]}
                       value={entry.modelKey || ""}
                       onChange={(value) =>
-                        updateFallbackProviders((prev) =>
+                        updateCurrentFailoverProviders((prev) =>
                           prev.map((candidate, candidateIndex) =>
                             candidateIndex === index
                               ? {
@@ -5795,7 +5953,7 @@ export function Settings({
                       className="button-small button-secondary"
                       type="button"
                       onClick={() =>
-                        updateFallbackProviders((prev) => {
+                        updateCurrentFailoverProviders((prev) => {
                           if (index === 0) return prev;
                           const next = [...prev];
                           [next[index - 1], next[index]] = [
@@ -5813,7 +5971,7 @@ export function Settings({
                       className="button-small button-secondary"
                       type="button"
                       onClick={() =>
-                        updateFallbackProviders((prev) => {
+                        updateCurrentFailoverProviders((prev) => {
                           if (index >= prev.length - 1) return prev;
                           const next = [...prev];
                           [next[index], next[index + 1]] = [
@@ -5823,9 +5981,7 @@ export function Settings({
                           return next;
                         })
                       }
-                      disabled={
-                        index >= (settings.fallbackProviders || []).length - 1
-                      }
+                      disabled={index >= currentFailoverProviders.length - 1}
                     >
                       Down
                     </button>
@@ -5833,7 +5989,7 @@ export function Settings({
                       className="button-small button-secondary"
                       type="button"
                       onClick={() =>
-                        updateFallbackProviders((prev) =>
+                        updateCurrentFailoverProviders((prev) =>
                           prev.filter(
                             (_, candidateIndex) => candidateIndex !== index,
                           ),
@@ -5848,8 +6004,8 @@ export function Settings({
             </div>
           ) : (
             <p className="settings-hint">
-              No backup providers configured yet. Add at least one to enable
-              ordered failover beyond the primary route.
+              No backup providers configured yet for {currentProviderLabel}. Add
+              at least one to enable ordered failover for this provider.
             </p>
           )}
 
@@ -5859,24 +6015,22 @@ export function Settings({
               type="button"
               onClick={() => {
                 const usedProviders = new Set(
-                  (settings.fallbackProviders || []).map(
-                    (entry) => entry.providerType,
-                  ),
+                  currentFailoverProviders.map((entry) => entry.providerType),
                 );
                 const nextProvider =
                   configuredFallbackProviderOptions.find(
                     (provider) =>
-                      provider.type !== settings.providerType &&
+                      provider.type !== currentProviderType &&
                       !usedProviders.has(provider.type),
                   ) ||
                   configuredFallbackProviderOptions.find(
-                    (provider) => provider.type !== settings.providerType,
+                    (provider) => provider.type !== currentProviderType,
                   );
                 if (!nextProvider) {
                   return;
                 }
                 void loadProviderModelsForType(nextProvider.type);
-                updateFallbackProviders((prev) => [
+                updateCurrentFailoverProviders((prev) => [
                   ...prev,
                   {
                     providerType: nextProvider.type,
@@ -5887,8 +6041,8 @@ export function Settings({
               }}
               disabled={
                 configuredFallbackProviderOptions.filter(
-                  (provider) => provider.type !== settings.providerType,
-                ).length === 0 || (settings.fallbackProviders || []).length >= 5
+                  (provider) => provider.type !== currentProviderType,
+                ).length === 0 || currentFailoverProviders.length >= 5
               }
             >
               Add backup provider
@@ -6521,6 +6675,11 @@ export function Settings({
               <SuggestionsPanel
                 workspaceId={workspaceId}
                 onCreateTask={onCreateTask}
+              />
+            ) : activeTab === "traces" ? (
+              <TaskTraceDebuggerPanel
+                workspaceId={workspaceId}
+                onOpenTask={onOpenTask}
               />
             ) : activeTab === "customize" ? (
               <CustomizePanel

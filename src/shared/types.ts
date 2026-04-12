@@ -7809,9 +7809,12 @@ export interface MigrationStatus {
 }
 
 // Task Queue types
+export const MIN_QUEUE_TASK_TIMEOUT_MINUTES = 5;
+export const MAX_QUEUE_TASK_TIMEOUT_MINUTES = 24 * 60;
+
 export interface QueueSettings {
   maxConcurrentTasks: number; // Default: 8, min: 1, max: 20
-  taskTimeoutMinutes: number; // Default: 60, min: 5, max: 240 (4 hours). Auto-clear stuck tasks after this time.
+  taskTimeoutMinutes: number; // Default: 24 hours, min: 5 min, max: 24 hours. Last-resort watchdog for stuck tasks.
 }
 
 export interface QueueStatus {
@@ -7824,7 +7827,7 @@ export interface QueueStatus {
 
 export const DEFAULT_QUEUE_SETTINGS: QueueSettings = {
   maxConcurrentTasks: 8,
-  taskTimeoutMinutes: 60,
+  taskTimeoutMinutes: MAX_QUEUE_TASK_TIMEOUT_MINUTES,
 };
 
 // Toast notification types for UI

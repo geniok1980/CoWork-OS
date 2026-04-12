@@ -14,6 +14,8 @@ import {
   QueueSettings,
   QueueStatus,
   DEFAULT_QUEUE_SETTINGS,
+  MAX_QUEUE_TASK_TIMEOUT_MINUTES,
+  MIN_QUEUE_TASK_TIMEOUT_MINUTES,
 } from "../../shared/types";
 import { SecureSettingsRepository } from "../database/SecureSettingsRepository";
 import { getUserDataDir } from "../utils/user-data-dir";
@@ -26,6 +28,11 @@ const PREVIOUS_DEFAULTS = {
   maxConcurrentTasks: 5,
   taskTimeoutMinutes: 30,
 };
+
+// The old in-app default was 60 minutes, which is too short for long-running
+// interactive sessions. Upgrade it to the new 24h watchdog unless the user
+// explicitly chose something else.
+const PRE_CLAUDE_STYLE_TIMEOUT_DEFAULT_MINUTES = 60;
 
 // Hard ceiling for total running tasks (top-level + sub-agents) to prevent
 // runaway resource consumption. Set to 2× the max configurable concurrency.
@@ -138,6 +145,18 @@ export class TaskQueueManager {
     if (upgraded) {
       console.log(
         "[TaskQueueManager] Upgraded legacy queue settings from old defaults to new defaults",
+        settings,
+      );
+    }
+
+    return settings;
+  }
+
+  private upgradeStoredQueueDefaults(settings: QueueSettings): QueueSettings {
+    if (settings.taskTimeoutMinutes === PRE_CLAUDE_STYLE_TIMEOUT_DEFAULT_MINUTES) {
+      settings.taskTimeoutMinutes = DEFAULT_QUEUE_SETTINGS.taskTimeoutMinutes;
+      console.log(
+        "[TaskQueueManager] Upgraded stored queue timeout from legacy 60-minute default to 24-hour watchdog",
         settings,
       );
     }
@@ -352,9 +371,12 @@ export class TaskQueueManager {
       newSettings.maxConcurrentTasks = Math.max(1, Math.min(20, newSettings.maxConcurrentTasks));
     }
 
-    // Validate taskTimeoutMinutes (5 min to 4 hours)
+    // Validate taskTimeoutMinutes (5 min to 24 hours)
     if (newSettings.taskTimeoutMinutes !== undefined) {
-      newSettings.taskTimeoutMinutes = Math.max(5, Math.min(240, newSettings.taskTimeoutMinutes));
+      newSettings.taskTimeoutMinutes = Math.max(
+        MIN_QUEUE_TASK_TIMEOUT_MINUTES,
+        Math.min(MAX_QUEUE_TASK_TIMEOUT_MINUTES, newSettings.taskTimeoutMinutes),
+      );
     }
 
     this.settings = { ...this.settings, ...newSettings };
@@ -483,7 +505,10 @@ export class TaskQueueManager {
         const stored = repository.load<QueueSettings>("queue");
         if (stored) {
           console.log("[TaskQueueManager] Loaded settings from encrypted database");
-          const merged = { ...DEFAULT_QUEUE_SETTINGS, ...stored };
+          const merged = this.upgradeStoredQueueDefaults({ ...DEFAULT_QUEUE_SETTINGS, ...stored });
+          if (merged.taskTimeoutMinutes !== stored.taskTimeoutMinutes) {
+            repository.save("queue", merged);
+          }
           return merged;
         }
       }

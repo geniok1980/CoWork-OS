@@ -1,5 +1,9 @@
 import { useState, useEffect } from "react";
-import { QueueSettings as QueueSettingsType, DEFAULT_QUEUE_SETTINGS } from "../../shared/types";
+import {
+  QueueSettings as QueueSettingsType,
+  DEFAULT_QUEUE_SETTINGS,
+  MAX_QUEUE_TASK_TIMEOUT_MINUTES,
+} from "../../shared/types";
 
 export function QueueSettings() {
   const [settings, setSettings] = useState<QueueSettingsType | null>(null);
@@ -44,6 +48,8 @@ export function QueueSettings() {
     return <div className="settings-loading">Loading queue settings...</div>;
   }
 
+  const timeoutHours = Math.max(1, Math.round(settings.taskTimeoutMinutes / 60));
+
   return (
     <>
       {/* Parallel Execution Section */}
@@ -77,6 +83,44 @@ export function QueueSettings() {
         </p>
       </div>
 
+      <div className="settings-section">
+        <h3>Task Session Watchdog</h3>
+        <p className="settings-description">
+          This timeout is a last-resort watchdog for genuinely stuck task sessions. It is not a
+          per-step or per-message limit.
+        </p>
+
+        <div className="settings-slider-group">
+          <label>Watchdog timeout:</label>
+          <div className="slider-with-value">
+            <input
+              type="range"
+              className="settings-slider"
+              min={1}
+              max={24}
+              value={timeoutHours}
+              onChange={(e) =>
+                setSettings({
+                  ...settings,
+                  taskTimeoutMinutes: Math.min(
+                    MAX_QUEUE_TASK_TIMEOUT_MINUTES,
+                    parseInt(e.target.value) * 60,
+                  ),
+                })
+              }
+            />
+            <span className="slider-value">
+              {timeoutHours} {timeoutHours === 1 ? "hour" : "hours"}
+            </span>
+          </div>
+        </div>
+
+        <p className="settings-hint">
+          Default: 24 hours. Long-running interactive tasks can continue across multiple follow-ups
+          without being cut off by the old 60-minute timeout.
+        </p>
+      </div>
+
       {/* Queue Behavior Info Section */}
       <div className="settings-section">
         <h3>Queue Behavior</h3>
@@ -100,6 +144,10 @@ export function QueueSettings() {
           <li>
             <strong>Cancel Anytime:</strong> You can cancel queued tasks from the queue panel before
             they start.
+          </li>
+          <li>
+            <strong>Stuck-Task Recovery:</strong> The session watchdog only exists to clean up runs
+            that hang for an unusually long time.
           </li>
         </ul>
       </div>

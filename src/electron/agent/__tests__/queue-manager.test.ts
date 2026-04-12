@@ -5,6 +5,11 @@
  */
 
 import { describe, it, expect } from "vitest";
+import {
+  DEFAULT_QUEUE_SETTINGS,
+  MAX_QUEUE_TASK_TIMEOUT_MINUTES,
+  MIN_QUEUE_TASK_TIMEOUT_MINUTES,
+} from "../../../shared/types";
 import type { Task, QueueStatus } from "../../../shared/types";
 
 // Mock helper functions that mirror queue-manager logic
@@ -145,5 +150,17 @@ describe("Queue status calculation", () => {
 
     expect(status.runningCount).toBe(5); // 2 main + 3 sub-agents
     expect(status.queuedCount).toBe(2);
+  });
+});
+
+describe("Queue timeout defaults", () => {
+  it("uses a 24-hour watchdog by default", () => {
+    expect(DEFAULT_QUEUE_SETTINGS.taskTimeoutMinutes).toBe(24 * 60);
+    expect(DEFAULT_QUEUE_SETTINGS.taskTimeoutMinutes).toBe(MAX_QUEUE_TASK_TIMEOUT_MINUTES);
+  });
+
+  it("keeps the configured timeout bounds aligned with the shared constants", () => {
+    expect(MIN_QUEUE_TASK_TIMEOUT_MINUTES).toBe(5);
+    expect(MAX_QUEUE_TASK_TIMEOUT_MINUTES).toBe(24 * 60);
   });
 });

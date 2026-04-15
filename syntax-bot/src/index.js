@@ -395,10 +395,25 @@ bot.on("callback_query", async (ctx) => {
       session.model = "GPT-4o";
       userSessions.set(ctx.from.id, session);
       await ctx.answerCallbackQuery("✅ GPT-4o выбран!");
-      await ctx.editMessageReplyMarkup({
+      await ctx.editMessageText(`✅ <b>Модель изменена!</b>
+
+💬 <b>GPT-4o</b> выбрана как активная модель.
+
+Напишите сообщение для начала чата!`, {
+        parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "💬 GPT-4o ✅", callback_data: "model_gpt" }]
+            [
+              { text: "💬 Чат с GPT-4o", callback_data: "model_gpt" },
+              { text: "🧠 Claude", callback_data: "model_claude" }
+            ],
+            [
+              { text: "✨ Gemini", callback_data: "model_gemini" },
+              { text: "⚙️ Настройки", callback_data: "settings" }
+            ],
+            [
+              { text: "🔙 Главное меню", callback_data: "back_to_start" }
+            ]
           ]
         }
       });
@@ -412,10 +427,25 @@ bot.on("callback_query", async (ctx) => {
       session.model = "Claude";
       userSessions.set(ctx.from.id, session);
       await ctx.answerCallbackQuery("✅ Claude 3.5 выбран!");
-      await ctx.editMessageReplyMarkup({
+      await ctx.editMessageText(`✅ <b>Модель изменена!</b>
+
+🧠 <b>Claude 3.5</b> выбран как активная модель.
+
+Напишите сообщение для начала чата!`, {
+        parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🧠 Claude ✅", callback_data: "model_claude" }]
+            [
+              { text: "💬 GPT-4o", callback_data: "model_gpt" },
+              { text: "🧠 Чат с Claude", callback_data: "model_claude" }
+            ],
+            [
+              { text: "✨ Gemini", callback_data: "model_gemini" },
+              { text: "⚙️ Настройки", callback_data: "settings" }
+            ],
+            [
+              { text: "🔙 Главное меню", callback_data: "back_to_start" }
+            ]
           ]
         }
       });
@@ -429,10 +459,25 @@ bot.on("callback_query", async (ctx) => {
       session.model = "Gemini";
       userSessions.set(ctx.from.id, session);
       await ctx.answerCallbackQuery("✅ Gemini 2.0 выбран!");
-      await ctx.editMessageReplyMarkup({
+      await ctx.editMessageText(`✅ <b>Модель изменена!</b>
+
+✨ <b>Gemini 2.0</b> выбран как активная модель.
+
+Напишите сообщение для начала чата!`, {
+        parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "✨ Gemini ✅", callback_data: "model_gemini" }]
+            [
+              { text: "💬 GPT-4o", callback_data: "model_gpt" },
+              { text: "🧠 Claude", callback_data: "model_claude" }
+            ],
+            [
+              { text: "✨ Чат с Gemini", callback_data: "model_gemini" },
+              { text: "⚙️ Настройки", callback_data: "settings" }
+            ],
+            [
+              { text: "🔙 Главное меню", callback_data: "back_to_start" }
+            ]
           ]
         }
       });

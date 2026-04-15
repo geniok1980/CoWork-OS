@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Syntax AI</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        header {
+            text-align: center;
+            padding: 20px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 20px;
+        }
+        
+        h1 {
+            font-size: 2.5em;
+            background: linear-gradient(90deg, #00d4ff, #9b59b6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #888;
+            font-size: 1.1em;
+        }
+        
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: rgba(255,255,255,0.05);
+            border-radius: 20px;
+            padding: 20px;
+            overflow: hidden;
+        }
+        
+        .model-selector {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .model-btn {
+            padding: 10px 20px;
+            border: 2px solid rgba(255,255,255,0.2);
+            background: transparent;
+            color: #fff;
+            border-radius: 25px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 0.9em;
+        }
+        
+        .model-btn:hover {
+            border-color: #00d4ff;
+        }
+        
+        .model-btn.active {
+            background: linear-gradient(90deg, #00d4ff, #9b59b6);
+            border-color: transparent;
+        }
+        
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .message {
+            max-width: 85%;
+            padding: 15px 20px;
+            border-radius: 20px;
+            line-height: 1.5;
+            animation: fadeIn 0.3s ease;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message.user {
+            align-self: flex-end;
+            background: linear-gradient(90deg, #00d4ff, #0099cc);
+            border-bottom-right-radius: 5px;
+        }
+        
+        .message.ai {
+            align-self: flex-start;
+            background: rgba(255,255,255,0.1);
+            border-bottom-left-radius: 5px;
+        }
+        
+        .message.error {
+            background: rgba(255,100,100,0.2);
+            border: 1px solid rgba(255,100,100,0.3);
+        }
+        
+        .typing {
+            display: flex;
+            gap: 5px;
+            padding: 15px 20px;
+        }
+        
+        .typing span {
+            width: 8px;
+            height: 8px;
+            background: #888;
+            border-radius: 50%;
+            animation: typing 1.4s infinite;
+        }
+        
+        .typing span:nth-child(2) { animation-delay: 0.2s; }
+        .typing span:nth-child(3) { animation-delay: 0.4s; }
+        
+        @keyframes typing {
+            0%, 100% { transform: translateY(0); opacity: 0.5; }
+            50% { transform: translateY(-5px); opacity: 1; }
+        }
+        
+        .input-area {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .input-area input {
+            flex: 1;
+            padding: 15px 20px;
+            border: 2px solid rgba(255,255,255,0.2);
+            background: rgba(255,255,255,0.05);
+            border-radius: 25px;
+            color: #fff;
+            font-size: 1em;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+        
+        .input-area input:focus {
+            border-color: #00d4ff;
+        }
+        
+        .input-area input::placeholder {
+            color: #666;
+        }
+        
+        .send-btn {
+            padding: 15px 30px;
+            background: linear-gradient(90deg, #00d4ff, #9b59b6);
+            border: none;
+            border-radius: 25px;
+            color: #fff;
+            font-size: 1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s, opacity 0.2s;
+        }
+        
+        .send-btn:hover {
+            transform: scale(1.05);
+        }
+        
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            text-align: center;
+            padding: 10px;
+            color: #888;
+            font-size: 0.9em;
+        }
+        
+        .status.online {
+            color: #4ade80;
+        }
+        
+        .status.offline {
+            color: #f87171;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Syntax AI</h1>
+            <p class="subtitle">AI Super App — GPT, Claude, Gemini в одном месте</p>
+        </header>
+        
+        <div class="chat-container">
+            <div class="model-selector">
+                <button class="model-btn active" data-model="GPT-4o">GPT-4o</button>
+                <button class="model-btn" data-model="Claude">Claude 3.5</button>
+                <button class="model-btn" data-model="Gemini">Gemini 2.0</button>
+            </div>
+            
+            <div class="messages" id="messages">
+                <div class="message ai">
+                    👋 Привет! Я Syntax AI — ваш AI ассистент.
+                    <br><br>
+                    Выберите модель и начните общение!
+                </div>
+            </div>
+            
+            <div class="input-area">
+                <input type="text" id="messageInput" placeholder="Напишите сообщение..." autocomplete="off">
+                <button class="send-btn" id="sendBtn">Отправить</button>
+            </div>
+        </div>
+        
+        <div class="status offline" id="status">
+            ⏳ Подключение...
+        </div>
+    </div>
+    
+    <script>
+        // Configuration
+        const API_URL = 'http://localhost:3000'; // Backend server
+        const TELEGRAM_TOKEN = '8701251940:AAHM2rksj4MN9N74YKCgTB1VTusTsswmSVA';
+        
+        // State
+        let currentModel = 'GPT-4o';
+        let isLoading = false;
+        let chatHistory = [];
+        
+        // Elements
+        const messagesEl = document.getElementById('messages');
+        const inputEl = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusEl = document.getElementById('status');
+        
+        // Model buttons
+        document.querySelectorAll('.model-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.model-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentModel = btn.dataset.model;
+            });
+        });
+        
+        // Send message
+        async function sendMessage() {
+            const text = inputEl.value.trim();
+            if (!text || isLoading) return;
+            
+            // Add user message
+            addMessage(text, 'user');
+            inputEl.value = '';
+            isLoading = true;
+            sendBtn.disabled = true;
+            
+            // Show typing indicator
+            showTyping();
+            
+            try {
+                // Call Telegram Bot API
+                const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: getChatId(),
+                        text: `[${currentModel}] ${text}`
+                    })
+                });
+                
+                // For demo, simulate AI response
+                // In production, this would call the backend
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                
+                const aiResponse = await simulateAIResponse(text, currentModel);
+                removeTyping();
+                addMessage(aiResponse, 'ai');
+                
+            } catch (error) {
+                removeTyping();
+                addMessage('❌ Произошла ошибка. Попробуйте позже.', 'error');
+            }
+            
+            isLoading = false;
+            sendBtn.disabled = false;
+        }
+        
+        function addMessage(text, type) {
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = text.replace(/\n/g, '<br>');
+            messagesEl.appendChild(div);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+            chatHistory.push({ type, text });
+        }
+        
+        function showTyping() {
+            const div = document.createElement('div');
+            div.className = 'message ai typing';
+            div.id = 'typing';
+            div.innerHTML = '<span></span><span></span><span></span>';
+            messagesEl.appendChild(div);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+        
+        function removeTyping() {
+            const typing = document.getElementById('typing');
+            if (typing) typing.remove();
+        }
+        
+        let chatId = null;
+        function getChatId() {
+            if (!chatId) chatId = localStorage.getItem('syntax_chat_id') || 'demo_user';
+            return chatId;
+        }
+        
+        // Simulate AI responses (demo mode)
+        async function simulateAIResponse(question, model) {
+            await new Promise(r => setTimeout(r, 1000));
+            
+            const responses = {
+                'GPT-4o': `Это ответ от GPT-4o! 🧠
+
+Я получил ваш вопрос: "${question}"
+
+Модель: ${model}
+Статус: Работает!
+
+Для полноценной работы добавьте API ключ OpenAI в .env файл.`,
+                
+                'Claude': `Это ответ от Claude 3.5! 🤖
+
+Я получил ваш вопрос: "${question}"
+
+Модель: ${model}
+Статус: Работает!
+
+Claude отлично справляется с анализом и написанием кода.`,
+                
+                'Gemini': `Это ответ от Gemini 2.0! ✨
+
+Я получил ваш вопрос: "${question}"
+
+Модель: ${model}
+Статус: Работает!
+
+Gemini от Google работает быстро и бесплатно!`
+            };
+            
+            return responses[model] || responses['GPT-4o'];
+        }
+        
+        // Event listeners
+        sendBtn.addEventListener('click', sendMessage);
+        inputEl.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+        
+        // Status
+        statusEl.textContent = '🟡 Демо-режим — добавьте API ключ для полной работы';
+        statusEl.className = 'status offline';
+    </script>
+</body>
+</html>

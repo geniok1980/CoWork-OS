@@ -83,7 +83,10 @@ bot.command("start", async (ctx) => {
             { text: "📚 Репетиторы", callback_data: "ai_tutors" }
           ],
           [
-            { text: "👨‍⚖️ Специалисты", callback_data: "ai_specialists" },
+            { text: "👨‍⚖️ Специалисты", callback_data: "ai_specialists" }
+          ],
+          [
+            { text: "🛒 Цифровые товары", callback_data: "digital_goods" },
         ],
         [
           { text: "📖 Помощь", callback_data: "help" },
@@ -612,7 +615,10 @@ bot.on("callback_query", async (ctx) => {
             { text: "📚 Репетиторы", callback_data: "ai_tutors" }
           ],
           [
-            { text: "👨‍⚖️ Специалисты", callback_data: "ai_specialists" },
+            { text: "👨‍⚖️ Специалисты", callback_data: "ai_specialists" }
+          ],
+          [
+            { text: "🛒 Цифровые товары", callback_data: "digital_goods" },
             ],
             [
               { text: "📖 Помощь", callback_data: "help" },
@@ -1274,6 +1280,133 @@ piano • orchestral • chill • upbeat
       });
       break;
 
+
+    case "digital_goods":
+      await ctx.answerCallbackQuery("🛒 Цифровые товары");
+      await ctx.editMessageText(`🛒 <b>Цифровые товары</b>
+
+Выберите категорию`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🔐 VPN сервисы", callback_data: "vpn_services" },
+              { text: "🌐 Прокси", callback_data: "proxy_services" }
+            ],
+            [
+              { text: "🤖 AI подписки", callback_data: "ai_subscriptions" }
+            ],
+            [
+              { text: "🔙 Назад", callback_data: "back_to_start" }
+            ]
+          ]
+        }
+      });
+      break;
+      
+    case "vpn_services":
+      await ctx.answerCallbackQuery("🔐 VPN сервисы");
+      await ctx.editMessageText(`🔐 <b>VPN сервисы</b>
+
+<b>Доступные VPN:</b>
+
+🔹 <b>NordVPN</b>
+• 1 месяц - 500₽
+• 6 месяцев - 2500₽
+• 1 год - 4000₽
+
+🔹 <b>ExpressVPN</b>
+• 1 месяц - 600₽
+• 6 месяцев - 3000₽
+• 1 год - 5000₽
+
+🔹 <b>Surfshark</b>
+• 1 месяц - 400₽
+• 6 месяцев - 2000₽
+• 1 год - 3500₽
+
+<i>Для заказа напишите: "Хочу NordVPN на 1 месяц"</i>`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Заказать", callback_data: "order_vpn" }],
+            [{ text: "🔙 К товарам", callback_data: "digital_goods" }]
+          ]
+        }
+      });
+      break;
+      
+    case "proxy_services":
+      await ctx.answerCallbackQuery("🌐 Прокси");
+      await ctx.editMessageText(`🌐 <b>Прокси сервисы</b>
+
+<b>Доступные прокси:</b>
+
+🔹 <b>Приватные прокси</b>
+• 10 IP - 500₽/мес
+• 50 IP - 2000₽/мес
+• 100 IP - 3500₽/мес
+
+🔹 <b>Резидентные прокси</b>
+• 5 GB - 800₽
+• 20 GB - 2500₽
+• 50 GB - 5000₽
+
+🔹 <b>Мобильные прокси</b>
+• 1 IP - 1500₽/мес
+• 5 IP - 6000₽/мес
+
+<i>Для заказа напишите: "Хочу 10 приватных прокси"</i>`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Заказать", callback_data: "order_proxy" }],
+            [{ text: "🔙 К товарам", callback_data: "digital_goods" }]
+          ]
+        }
+      });
+      break;
+      
+    case "ai_subscriptions":
+      await ctx.answerCallbackQuery("🤖 AI подписки");
+      await ctx.editMessageText(`🤖 <b>AI подписки</b>
+
+<b>Доступные подписки:</b>
+
+🔹 <b>ChatGPT Plus</b>
+• 1 месяц - 1500₽
+• 3 месяца - 4000₽
+
+🔹 <b>Claude Pro</b>
+• 1 месяц - 1500₽
+• 3 месяца - 4000₽
+
+🔹 <b>Midjourney</b>
+• Basic (1 мес) - 800₽
+• Standard (1 мес) - 2000₽
+• Pro (1 мес) - 4000₽
+
+🔹 <b>GitHub Copilot</b>
+• 1 месяц - 800₽
+• 6 месяцев - 4000₽
+
+<i>Для заказа напишите: "Хочу ChatGPT Plus на 1 месяц"</i>`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Заказать", callback_data: "order_ai" }],
+            [{ text: "🔙 К товарам", callback_data: "digital_goods" }]
+          ]
+        }
+      });
+      break;
+      
+    case "order_vpn":
+    case "order_proxy":
+    case "order_ai":
+      await ctx.answerCallbackQuery("💬 Напишите что хотите заказать");
+      await ctx.reply("💬 Напишите боту что вы хотите заказать, например:\n\n• Хочу NordVPN на 1 месяц\n• Хочу 10 приватных прокси\n• Хочу ChatGPT Plus на 1 месяц");
+      break;
     default:
       await ctx.answerCallbackQuery("Неизвестная команда");
   }

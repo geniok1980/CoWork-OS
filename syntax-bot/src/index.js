@@ -1,5 +1,5 @@
 /**
- * Syntax AI - Telegram Bot
+ * Geniok AI - Telegram Bot
  * AI Super App: ChatGPT, Claude, Gemini, Image/Video Generation
  */
 
@@ -57,7 +57,7 @@ const userSessions = new Map();
 // Command: /start
 bot.command("start", async (ctx) => {
   const welcome = `
-🤖 <b>Syntax AI Bot</b>
+🤖 <b>Geniok AI</b>
 
 Ваш AI ассистент в Telegram!
 
@@ -91,7 +91,7 @@ bot.command("start", async (ctx) => {
 // Command: /help
 bot.command("help", async (ctx) => {
   const help = `
-<b>📖 Справка по Syntax AI</b>
+<b>📖 Справка по Geniok AI</b>
 
 <b>AI Модели:</b>
 • GPT-4o - Универсальный, быстрый
@@ -467,7 +467,7 @@ bot.on("callback_query", async (ctx) => {
     case "help":
       await ctx.answerCallbackQuery("📖 Помощь");
       const help = `
-<b>📖 Справка по Syntax AI</b>
+<b>📖 Справка по Geniok AI</b>
 
 <b>AI Модели:</b>
 • GPT-4o - Универсальный, быстрый
@@ -499,7 +499,7 @@ bot.on("callback_query", async (ctx) => {
     case "back_to_start":
       await ctx.answerCallbackQuery("🏠 Главное меню");
       const welcome = `
-🤖 <b>Syntax AI Bot</b>
+🤖 <b>Geniok AI</b>
 
 Ваш AI ассистент в Telegram!
 
@@ -679,7 +679,7 @@ async function chatWithGPT(message, ctx) {
     messages: [
       {
         role: "system",
-        content: `Ты - Syntax AI, дружелюбный AI ассистент. 
+        content: `Ты - Geniok AI, дружелюбный AI ассистент. 
 Отвечай на русском языке.
 Будь полезным, вежливым и информативным.
 Используй форматирование HTML где уместно (<b>жирный</b>, <i>курсив</i>).`
@@ -704,7 +704,7 @@ async function chatWithClaude(message, ctx) {
   const response = await anthropic.messages.create({
     model: "claude-3-5-sonnet-20241022",
     max_tokens: 2000,
-    system: `Ты - Syntax AI, дружелюбный AI ассистент. 
+    system: `Ты - Geniok AI, дружелюбный AI ассистент. 
 Отвечай на русском языке.
 Будь полезным, вежливым и информативным.`,
     messages: [
@@ -728,7 +728,7 @@ async function chatWithGemini(message, ctx) {
   
   const model = gemini.getGenerativeModel({ 
     model: "gemini-2.0-flash",
-    systemInstruction: `Ты - Syntax AI, дружелюбный AI ассистент. 
+    systemInstruction: `Ты - Geniok AI, дружелюбный AI ассистент. 
 Отвечай на русском языке.
 Будь полезным, вежливым и информативным.`
   });
@@ -811,7 +811,7 @@ bot.catch((err) => {
 });
 
 // Start bot
-console.log("🚀 Syntax AI Bot starting...");
+console.log("🚀 Geniok AI starting...");
 
 if (!config.telegram.token) {
   console.error("❌ TELEGRAM_BOT_TOKEN not set!");
@@ -824,7 +824,7 @@ if (!config.telegram.token) {
 }
 
 bot.start();
-console.log("✅ Syntax AI Bot started!");
+console.log("✅ Geniok AI started!");
 console.log("\n📋 Available features:");
 if (openai) console.log("  ✅ GPT-4o");
 else console.log("  ❌ GPT-4o (need OPENAI_API_KEY)");

@@ -422,6 +422,24 @@ bot.on("callback_query", async (ctx) => {
     case "model_claude":
       if (!anthropic) {
         await ctx.answerCallbackQuery("❌ Claude не настроен", { show_alert: true });
+        await ctx.editMessageText(`❌ <b>Claude не настроен!</b>
+
+Для использования Claude добавьте API ключ.
+
+📝 <b>Как получить:</b>
+1. Зайдите на https://anthropic.com
+2. Создайте аккаунт и получите API ключ
+3. Добавьте в .env: ANTHROPIC_API_KEY=ваш_ключ
+
+⚠️ Пока используйте <b>GPT-4o</b> (требуется OPENAI_API_KEY)`, {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "💬 Использовать GPT-4o", callback_data: "model_gpt" }],
+              [{ text: "🔙 Главное меню", callback_data: "back_to_start" }]
+            ]
+          }
+        });
         return;
       }
       session.model = "Claude";
@@ -454,6 +472,24 @@ bot.on("callback_query", async (ctx) => {
     case "model_gemini":
       if (!gemini) {
         await ctx.answerCallbackQuery("❌ Gemini не настроен", { show_alert: true });
+        await ctx.editMessageText(`❌ <b>Gemini не настроен!</b>
+
+Для использования Gemini добавьте API ключ.
+
+📝 <b>Как получить:</b>
+1. Зайдите на https://aistudio.google.com
+2. Получите бесплатный API ключ
+3. Добавьте в .env: GEMINI_API_KEY=ваш_ключ
+
+⚠️ Пока используйте <b>GPT-4o</b> (требуется OPENAI_API_KEY)`, {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "💬 Использовать GPT-4o", callback_data: "model_gpt" }],
+              [{ text: "🔙 Главное меню", callback_data: "back_to_start" }]
+            ]
+          }
+        });
         return;
       }
       session.model = "Gemini";

@@ -1022,3 +1022,4 @@ piano • orchestral • chill • upbeat
       await ctx.answerCallbackQuery("Неизвестная команда");
   }
 });
+bot.start();

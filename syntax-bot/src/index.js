@@ -79,7 +79,10 @@ bot.command("start", async (ctx) => {
           { text: "📚 Документы", callback_data: "documents" }
         ],
         [
-          { text: "📖 Помощь", callback_data: "help" },
+          { text: "🤖 Разработка", callback_data: "ai_dev" },
+          { text: "📖 Помощь", callback_data: "help" }
+        ],
+        [
           { text: "⚙️ Профиль", callback_data: "profile" }
         ]
       ]
@@ -600,7 +603,10 @@ bot.on("callback_query", async (ctx) => {
               { text: "📚 Документы", callback_data: "documents" }
             ],
             [
-              { text: "📖 Помощь", callback_data: "help" },
+              { text: "🤖 Разработка", callback_data: "ai_dev" },
+              { text: "📖 Помощь", callback_data: "help" }
+            ],
+            [
               { text: "⚙️ Профиль", callback_data: "profile" }
             ]
           ]
@@ -1018,8 +1024,165 @@ piano • orchestral • chill • upbeat
       });
       break;
 
+    case "ai_dev":
+      await ctx.answerCallbackQuery("🤖 AI Разработка");
+      await ctx.editMessageText(`🤖 <b>AI Разработка</b>
+
+Создание игр и ботов с помощью AI`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🎮 Игры", callback_data: "ai_games" },
+              { text: "🤖 Боты", callback_data: "ai_bots" }
+            ],
+            [
+              { text: "🌐 Веб-сайты", callback_data: "ai_websites" },
+              { text: "📱 Приложения", callback_data: "ai_apps" }
+            ],
+            [
+              { text: "🔙 Назад", callback_data: "back_to_start" }
+            ]
+          ]
+        }
+      });
+      break;
+      
+    case "ai_games":
+      await ctx.answerCallbackQuery("🎮 AI Игры");
+      await ctx.editMessageText(`🎮 <b>AI Игры</b>
+
+<b>Примеры игр которые можно создать:</b>
+
+🎯 <b>Кликер</b>
+Простая игра с нажатием
+
+🏃 <b>Раннер</b>
+Бесконечный бегун
+
+🧩 <b>Головоломка</b>
+Логическая игра
+
+👾 <b>Аркада</b>
+Классические игры
+
+⚔️ <b>RPG</b>
+Текстовая RPG
+
+🃏 <b>Карточная</b>
+Blackjack, покер`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Создать игру", callback_data: "ai_chat_game" }],
+            [{ text: "🔙 К меню", callback_data: "ai_dev" }]
+          ]
+        }
+      });
+      break;
+      
+    case "ai_bots":
+      await ctx.answerCallbackQuery("🤖 AI Боты");
+      await ctx.editMessageText(`🤖 <b>AI Боты</b>
+
+<b>Примеры ботов которые можно создать:</b>
+
+💬 <b>Чат-бот</b>
+Telegram, Discord бот
+
+🎮 <b>Discord бот</b>
+Модерация, команды
+
+📊 <b>Telegram бот</b>
+Автоматизация, AI
+
+🎵 <b>Музыкальный бот</b>
+Воспроизведение музыки
+
+🏆 <b>Бот для игр</b>
+Викторины, конкурсы
+
+📈 <b>Трейдинг бот</b>
+Автоматическая торговля`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Создать бота", callback_data: "ai_chat_bot" }],
+            [{ text: "🔙 К меню", callback_data: "ai_dev" }]
+          ]
+        }
+      });
+      break;
+      
+    case "ai_websites":
+      await ctx.answerCallbackQuery("🌐 Веб-сайты");
+      await ctx.editMessageText(`🌐 <b>AI Веб-сайты</b>
+
+<b>Что можно создать:</b>
+
+🏠 <b>Landing Page</b>
+Продающая страница
+
+📝 <b>Блог</b>
+Персональный блог
+
+🛒 <b>Интернет-магазин</b>
+Каталог товаров
+
+📋 <b>Портфолио</b>
+Резюме разработчика
+
+📊 <b>Дашборд</b>
+Панель аналитики
+
+💼 <b>Лендинг</b>
+Рекламная страница`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Создать сайт", callback_data: "ai_chat_web" }],
+            [{ text: "🔙 К меню", callback_data: "ai_dev" }]
+          ]
+        }
+      });
+      break;
+      
+    case "ai_apps":
+      await ctx.answerCallbackQuery("📱 Приложения");
+      await ctx.editMessageText(`📱 <b>AI Приложения</b>
+
+<b>Типы приложений:</b>
+
+📝 <b>To-Do</b>
+Список задач
+
+📒 <b>Заметки</b>
+Записки и идеи
+
+📊 <b>Трекер</b>
+Отслеживание привычек
+
+💰 <b>Бюджет</b>
+Учёт расходов
+
+🏋️ <b>Фитнес</b>
+Тренировки и питание
+
+📚 <b>Обучение</b>
+Карточки для изучения`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Создать приложение", callback_data: "ai_chat_app" }],
+            [{ text: "🔙 К меню", callback_data: "ai_dev" }]
+          ]
+        }
+      });
+      break;
+
     default:
       await ctx.answerCallbackQuery("Неизвестная команда");
   }
 });
+
 bot.start();

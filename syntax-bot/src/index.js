@@ -59,9 +59,7 @@ bot.command("start", async (ctx) => {
   const welcome = `
 🤖 <b>Geniok AI</b>
 
-Ваш AI ассистент в Telegram!
-
-Выберите действие или просто напишите сообщение!
+ваш AI супер ассистент
   `;
   
   await ctx.reply(welcome, {
@@ -69,19 +67,20 @@ bot.command("start", async (ctx) => {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: "💬 Чат с GPT-4o", callback_data: "model_gpt" },
-          { text: "🧠 Чат с Claude", callback_data: "model_claude" }
+          { text: "💬 Чат", callback_data: "chat" },
+          { text: "🎨 Изображения", callback_data: "image_gen" }
         ],
         [
-          { text: "✨ Чат с Gemini", callback_data: "model_gemini" },
-          { text: "🎵 Генерация музыки", callback_data: "music_gen" }
+          { text: "🎵 Музыка", callback_data: "music_gen" },
+          { text: "🎬 Видео", callback_data: "video_gen" }
         ],
         [
-          { text: "🎨 Изображения", callback_data: "image_gen" },
-          { text: "⚙️ Настройки", callback_data: "settings" }
+          { text: "🎙️ Голос", callback_data: "voice" },
+          { text: "📚 Документы", callback_data: "documents" }
         ],
         [
-          { text: "📖 Помощь", callback_data: "help" }
+          { text: "📖 Помощь", callback_data: "help" },
+          { text: "⚙️ Профиль", callback_data: "profile" }
         ]
       ]
     }
@@ -582,28 +581,27 @@ bot.on("callback_query", async (ctx) => {
       const welcomeBack = `
 🤖 <b>Geniok AI</b>
 
-Ваш AI ассистент в Telegram!
-
-Выберите действие или просто напишите сообщение!
+ваш AI супер ассистент
       `;
       await ctx.editMessageText(welcomeBack, {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
             [
-              { text: "💬 Чат с GPT-4o", callback_data: "model_gpt" },
-              { text: "🧠 Чат с Claude", callback_data: "model_claude" }
+              { text: "💬 Чат", callback_data: "chat" },
+              { text: "🎨 Изображения", callback_data: "image_gen" }
             ],
             [
-              { text: "✨ Чат с Gemini", callback_data: "model_gemini" },
-              { text: "🎵 Музыка", callback_data: "music_gen" }
+              { text: "🎵 Музыка", callback_data: "music_gen" },
+              { text: "🎬 Видео", callback_data: "video_gen" }
             ],
             [
-              { text: "🎨 Изображения", callback_data: "image_gen" },
-              { text: "⚙️ Настройки", callback_data: "settings" }
+              { text: "🎙️ Голос", callback_data: "voice" },
+              { text: "📚 Документы", callback_data: "documents" }
             ],
             [
-              { text: "📖 Помощь", callback_data: "help" }
+              { text: "📖 Помощь", callback_data: "help" },
+              { text: "⚙️ Профиль", callback_data: "profile" }
             ]
           ]
         }
@@ -1092,3 +1090,170 @@ bot.command("imagine", async (ctx) => {
     await ctx.reply(`❌ Ошибка генерации изображения.\n\nПока используйте /imagine &lt;описание&gt; для генерации идей.`);
   }
 });
+
+    case "chat":
+      await ctx.answerCallbackQuery("💬 Выберите модель");
+      await ctx.editMessageText(`💬 <b>Выберите AI модель</b>
+
+Напишите сообщение боту или выберите модель:`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "💬 GPT-4o", callback_data: "model_gpt" },
+              { text: "🧠 Claude", callback_data: "model_claude" }
+            ],
+            [
+              { text: "✨ Gemini", callback_data: "model_gemini" }
+            ],
+            [
+              { text: "🔙 Назад", callback_data: "back_to_start" }
+            ]
+          ]
+        }
+      });
+      break;
+      
+    case "video_gen":
+      await ctx.answerCallbackQuery("🎬 Видео");
+      await ctx.editMessageText(`🎬 <b>Генерация видео</b>
+
+<b>Доступно скоро!</b>
+
+Скоро здесь будет генерация видео с помощью AI.
+
+🎬 Поддерживаемые форматы:
+• Текст в видео
+• Изображение в видео
+• Анимация
+
+⏳ Ожидайте обновление...`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🎨 Изображения", callback_data: "image_gen" },
+              { text: "🎵 Музыка", callback_data: "music_gen" }
+            ],
+            [
+              { text: "🔙 Назад", callback_data: "back_to_start" }
+            ]
+          ]
+        }
+      });
+      break;
+      
+    case "voice":
+      await ctx.answerCallbackQuery("🎙️ Голос");
+      await ctx.editMessageText(`🎙️ <b>Голос и синтез речи</b>
+
+<b>Доступно скоро!</b>
+
+Скоро здесь будет:
+• Синтез речи (TTS)
+• Клонирование голоса
+• Озвучка текста
+
+⏳ Ожидайте обновление...`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🎨 Изображения", callback_data: "image_gen" },
+              { text: "🎵 Музыка", callback_data: "music_gen" }
+            ],
+            [
+              { text: "🔙 Назад", callback_data: "back_to_start" }
+            ]
+          ]
+        }
+      });
+      break;
+      
+    case "documents":
+      await ctx.answerCallbackQuery("📚 Документы");
+      await ctx.editMessageText(`📚 <b>Документы</b>
+
+<b>Доступные функции:</b>
+
+• Создание документов
+• Редактирование PDF
+• Анализ документов
+• Перевод документов
+
+📝 Просто отправьте документ боту!`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "💬 Чат", callback_data: "chat" },
+              { text: "🎨 Изображения", callback_data: "image_gen" }
+            ],
+            [
+              { text: "🔙 Назад", callback_data: "back_to_start" }
+            ]
+          ]
+        }
+      });
+      break;
+      
+    case "profile":
+      await ctx.answerCallbackQuery("⚙️ Профиль");
+      const session = userSessions.get(ctx.from.id) || { model: "GPT-4o" };
+      await ctx.editMessageText(`⚙️ <b>Профиль</b>
+
+👤 <b>Пользователь:</b> ${ctx.from.first_name}
+🆔 <b>ID:</b> ${ctx.from.id}
+
+📊 <b>Настройки:</b>
+• Активная модель: ${session.model}
+• Статус: Активен
+
+💳 <b>Подписка:</b>
+• Тариф: Базовый
+• Доступно запросов: ∞
+
+🎁 Хотите больше возможностей?`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "💳 Тарифы", callback_data: "tariffs" },
+              { text: "⚙️ Настройки", callback_data: "settings" }
+            ],
+            [
+              { text: "🔙 Назад", callback_data: "back_to_start" }
+            ]
+          ]
+        }
+      });
+      break;
+      
+    case "tariffs":
+      await ctx.answerCallbackQuery("💳 Тарифы");
+      await ctx.editMessageText(`💳 <b>Тарифы</b>
+
+🆓 <b>Бесплатный:</b>
+• 100 запросов/день
+• GPT-4o mini
+• Базовая генерация
+
+⭐ <b>Про (299₽/мес):</b>
+• 1000 запросов/день
+• GPT-4o, Claude, Gemini
+• Генерация изображений
+
+💎 <b>Максимум (999₽/мес):</b>
+• Безлимит запросов
+• Все модели
+• Видео, музыка, голос
+• Приоритетная поддержка`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💳 Купить Про", callback_data: "buy_pro" }],
+            [{ text: "🔙 Назад", callback_data: "profile" }]
+          ]
+        }
+      });
+      break;

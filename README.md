@@ -2,13 +2,18 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="screenshots/cowork-os-sl-dark-logo.png">
     <source media="(prefers-color-scheme: light)" srcset="screenshots/cowork-os-sl-color-logo.png">
-    <img src="screenshots/cowork-os-sl-color-logo.png" alt="CoWork OS" width="600">
+    <img src="screenshots/cowork-os-sl-color-logo.png" alt="Syntax AI" width="600">
   </picture>
 </p>
 
 <p align="center">
-  <strong>CoWork OS is a local-first option for production workflows.</strong><br>
-  Security-hardened, local-first AI operating system — 34 LLM provider options, 17 messaging channels, 138 built-in skills
+  <strong>Syntax AI Edition — AI Super App в Вашем кармане</strong><br>
+  Генерируйте видео, изображения, музыку, клонируйте голоса. Общайтесь с ChatGPT, Claude, Gemini и ещё 90+ ИИ моделями через Telegram.
+</p>
+
+<p align="center">
+  🔥 <strong>Все AI модели в одном боте!</strong><br>
+  💬 Telegram • 🎬 Видео • 🖼️ Изображения • 🎙️ Голос • 🎵 Музыка
 </p>
 
 <p align="center">

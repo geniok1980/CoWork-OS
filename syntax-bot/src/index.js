@@ -393,6 +393,7 @@ bot.on("message", async (ctx) => {
 
 // Handle callback queries (inline button presses)
 bot.on("callback_query", async (ctx) => {
+  try {
   const callbackData = ctx.callbackQuery.data;
   const session = userSessions.get(ctx.from.id) || { model: "GPT-4o" };
   
@@ -1275,6 +1276,14 @@ piano • orchestral • chill • upbeat
 
     default:
       await ctx.answerCallbackQuery("Неизвестная команда");
+  }
+  } catch (error) {
+    // Ignore old callback queries
+    if (error.description?.includes('query is too old')) {
+      console.log('Skipping old callback query');
+    } else {
+      console.error('Callback error:', error);
+    }
   }
 });
 bot.start();

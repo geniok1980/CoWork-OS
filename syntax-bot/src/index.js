@@ -498,14 +498,14 @@ bot.on("callback_query", async (ctx) => {
       
     case "back_to_start":
       await ctx.answerCallbackQuery("🏠 Главное меню");
-      const welcome = `
+      const welcomeBack = `
 🤖 <b>Geniok AI</b>
 
 Ваш AI ассистент в Telegram!
 
 Выберите действие или просто напишите сообщение!
       `;
-      await ctx.editMessageText(welcome, {
+      await ctx.editMessageText(welcomeBack, {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
@@ -515,11 +515,14 @@ bot.on("callback_query", async (ctx) => {
             ],
             [
               { text: "✨ Чат с Gemini", callback_data: "model_gemini" },
+              { text: "🎵 Музыка", callback_data: "music_gen" }
+            ],
+            [
+              { text: "🎨 Изображения", callback_data: "image_gen" },
               { text: "⚙️ Настройки", callback_data: "settings" }
             ],
             [
-              { text: "📖 Помощь", callback_data: "help" },
-              { text: "🎨 Генерация изображений", callback_data: "image_gen" }
+              { text: "📖 Помощь", callback_data: "help" }
             ]
           ]
         }
@@ -527,22 +530,129 @@ bot.on("callback_query", async (ctx) => {
       break;
       
     case "image_gen":
-      await ctx.answerCallbackQuery("🎨 Генерация изображений", { show_alert: true });
-      await ctx.editMessageText(`
+      await ctx.answerCallbackQuery("🎨 Генерация изображений");
+      const imageHelp = `
 🎨 <b>Генерация изображений</b>
 
-<b>Доступно скоро!</b>
+<b>Использование:</b>
+/imagine &lt;описание&gt;
 
-Пока используйте текстовое описание для генерации идей.
+<b>Примеры:</b>
+/imagine красивый закат над океаном
+/imagine котик в стиле аниме
+/imagine логотип для стартапа
 
-<i>Пример: "Нарисуй красивый закат над океаном в стиле импрессионизма"</i>
+<b>Стили:</b>
+• photorealistic • anime • digital art
+• oil painting • 3d render • cartoon
+      `;
+      await ctx.editMessageText(imageHelp, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🌅 Пейзаж", callback_data: "img_landscape" },
+              { text: "🐱 Животные", callback_data: "img_animals" }
+            ],
+            [
+              { text: "🎨 Арт", callback_data: "img_art" },
+              { text: "🖼️ Аниме", callback_data: "img_anime" }
+            ],
+            [
+              { text: "🔙 Назад", callback_data: "back_to_start" }
+            ]
+          ]
+        }
+      });
+      break;
+      
+    case "img_landscape":
+      await ctx.answerCallbackQuery("🌅 Пейзаж");
+      await ctx.editMessageText(`
+🌅 <b>Пейзажи</b>
 
-Или попробуйте /imagine &lt;описание&gt;
+Популярные описания:
+
+• Горный пейзаж на закате
+• Тропический пляж с пальмами
+• Лес в тумане
+• Озеро с отражением гор
+
+<i>Используйте /imagine &lt;описание&gt;</i>
       `, {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🔙 Назад", callback_data: "back_to_start" }]
+            [{ text: "🔙 К меню", callback_data: "image_gen" }]
+          ]
+        }
+      });
+      break;
+      
+    case "img_animals":
+      await ctx.answerCallbackQuery("🐱 Животные");
+      await ctx.editMessageText(`
+🐱 <b>Животные</b>
+
+Популярные описания:
+
+• Милый котенок с большими глазами
+• Белая собака хаски в снегу
+• Пара лебедей на озере
+• Лев на закате
+
+<i>Используйте /imagine &lt;описание&gt;</i>
+      `, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🔙 К меню", callback_data: "image_gen" }]
+          ]
+        }
+      });
+      break;
+      
+    case "img_art":
+      await ctx.answerCallbackQuery("🎨 Арт");
+      await ctx.editMessageText(`
+🎨 <b>Арт</b>
+
+Популярные описания:
+
+• Портрет в стиле Пикассо
+• Абстракция с яркими цветами
+• Граффити на стене
+• Цифровой арт в стиле Pixar
+
+<i>Используйте /imagine &lt;описание&gt;</i>
+      `, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🔙 К меню", callback_data: "image_gen" }]
+          ]
+        }
+      });
+      break;
+      
+    case "img_anime":
+      await ctx.answerCallbackQuery("🖼️ Аниме");
+      await ctx.editMessageText(`
+🖼️ <b>Аниме</b>
+
+Популярные описания:
+
+• Девочка в школьной форме
+• Красивый закат в аниме стиле
+• Фэнтези персонаж с мечом
+• Кавайный кот
+
+<i>Используйте /imagine &lt;описание&gt;</i>
+      `, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🔙 К меню", callback_data: "image_gen" }]
           ]
         }
       });
@@ -837,3 +947,67 @@ else console.log("  ⚠️ Music (need MUBERT_TOKEN for full functionality)");
 console.log("\n🎵 Music commands:");
 console.log("  /music <description> - Generate music");
 console.log("  Example: /music relaxing ambient piano");
+
+// Command: /imagine (image generation)
+bot.command("imagine", async (ctx) => {
+  const args = ctx.message.text.replace("/imagine", "").trim();
+  
+  if (!args) {
+    await ctx.reply(`
+🎨 <b>Генерация изображений</b>
+
+Использование: /imagine &lt;описание&gt;
+
+<b>Примеры:</b>
+/imagine красивый закат над океаном
+/imagine котик в стиле аниме
+/imagine логотип для стартапа
+
+<b>Стили:</b>
+• photorealistic • anime • digital art
+• oil painting • 3d render • cartoon
+    `, { parse_mode: "HTML" });
+    return;
+  }
+  
+  await ctx.replyWithChatAction("typing");
+  
+  // For now, generate a description using GPT
+  if (!openai) {
+    await ctx.reply(`❌ Для генерации изображений нужен OPENAI_API_KEY\n\nПока используйте DALL-E, Midjourney или Stable Diffusion напрямую.`, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🔙 Назад", callback_data: "back_to_start" }]
+        ]
+      }
+    });
+    return;
+  }
+  
+  try {
+    // Create image with DALL-E if API key is available
+    const imageResponse = await openai.images.generate({
+      model: "dall-e-3",
+      prompt: args,
+      n: 1,
+      size: "1024x1024",
+    });
+    
+    const imageUrl = imageResponse.data[0].url;
+    
+    await ctx.replyWithPhoto(imageUrl, {
+      caption: `🎨 <b>Ваше изображение!</b>\n\n📝 Запрос: ${args}\n\n/imagine &lt;описание&gt; - новое изображение`,
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🎨 Ещё изображение", callback_data: "image_gen" }]
+        ]
+      }
+    });
+    
+  } catch (error) {
+    console.error("Image generation error:", error);
+    await ctx.reply(`❌ Ошибка генерации изображения.\n\nПока используйте /imagine &lt;описание&gt; для генерации идей.`);
+  }
+});

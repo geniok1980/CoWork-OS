@@ -76,13 +76,17 @@ bot.command("start", async (ctx) => {
         ],
         [
           { text: "🎙️ Голос", callback_data: "voice" },
-          { text: "📚 Документы", callback_data: "documents" }
+          { text: "📚 Документы", callback_data: "documents" },
+          ],
+          [
+            { text: "🤖 Разработка", callback_data: "ai_dev" },
+            { text: "📚 Репетиторы", callback_data: "ai_tutors" }
+          ],
+          [
+            { text: "👨‍⚖️ Специалисты", callback_data: "ai_specialists" },
         ],
         [
-          { text: "🤖 Разработка", callback_data: "ai_dev" },
-          { text: "📖 Помощь", callback_data: "help" }
-        ],
-        [
+          { text: "📖 Помощь", callback_data: "help" },
           { text: "⚙️ Профиль", callback_data: "profile" }
         ]
       ]
@@ -600,13 +604,17 @@ bot.on("callback_query", async (ctx) => {
             ],
             [
               { text: "🎙️ Голос", callback_data: "voice" },
-              { text: "📚 Документы", callback_data: "documents" }
+              { text: "📚 Документы", callback_data: "documents" },
+          ],
+          [
+            { text: "🤖 Разработка", callback_data: "ai_dev" },
+            { text: "📚 Репетиторы", callback_data: "ai_tutors" }
+          ],
+          [
+            { text: "👨‍⚖️ Специалисты", callback_data: "ai_specialists" },
             ],
             [
-              { text: "🤖 Разработка", callback_data: "ai_dev" },
-              { text: "📖 Помощь", callback_data: "help" }
-            ],
-            [
+              { text: "📖 Помощь", callback_data: "help" },
               { text: "⚙️ Профиль", callback_data: "profile" }
             ]
           ]
@@ -1024,21 +1032,25 @@ piano • orchestral • chill • upbeat
       });
       break;
 
-    case "ai_dev":
-      await ctx.answerCallbackQuery("🤖 AI Разработка");
-      await ctx.editMessageText(`🤖 <b>AI Разработка</b>
 
-Создание игр и ботов с помощью AI`, {
+    case "ai_tutors":
+      await ctx.answerCallbackQuery("📚 AI Репетиторы");
+      await ctx.editMessageText(`📚 <b>AI Репетиторы</b>
+
+Выберите предмет для обучения`, {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
             [
-              { text: "🎮 Игры", callback_data: "ai_games" },
-              { text: "🤖 Боты", callback_data: "ai_bots" }
+              { text: "🔢 Математика", callback_data: "tutor_math" },
+              { text: "📝 Русский язык", callback_data: "tutor_russian" }
             ],
             [
-              { text: "🌐 Веб-сайты", callback_data: "ai_websites" },
-              { text: "📱 Приложения", callback_data: "ai_apps" }
+              { text: "📖 Литература", callback_data: "tutor_literature" },
+              { text: "🏛️ Обществознание", callback_data: "tutor_social" }
+            ],
+            [
+              { text: "🌍 Английский язык", callback_data: "tutor_english" }
             ],
             [
               { text: "🔙 Назад", callback_data: "back_to_start" }
@@ -1048,133 +1060,214 @@ piano • orchestral • chill • upbeat
       });
       break;
       
-    case "ai_games":
-      await ctx.answerCallbackQuery("🎮 AI Игры");
-      await ctx.editMessageText(`🎮 <b>AI Игры</b>
+    case "tutor_math":
+      await ctx.answerCallbackQuery("🔢 Математика");
+      await ctx.editMessageText(`🔢 <b>Репетитор: Математика</b>
 
-<b>Примеры игр которые можно создать:</b>
+<b>Что могу помочь:</b>
 
-🎯 <b>Кликер</b>
-Простая игра с нажатием
+📐 <b>Алгебра</b> - Уравнения, неравенства
+📊 <b>Геометрия</b> - Фигуры, теоремы
+📈 <b>Матанализ</b> - Производные, интегралы
 
-🏃 <b>Раннер</b>
-Бесконечный бегун
-
-🧩 <b>Головоломка</b>
-Логическая игра
-
-👾 <b>Аркада</b>
-Классические игры
-
-⚔️ <b>RPG</b>
-Текстовая RPG
-
-🃏 <b>Карточная</b>
-Blackjack, покер`, {
+<i>Напишите тему или задачу!</i>`, {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "💬 Создать игру", callback_data: "ai_chat_game" }],
-            [{ text: "🔙 К меню", callback_data: "ai_dev" }]
+            [{ text: "💬 Начать урок", callback_data: "ai_chat_tutor_math" }],
+            [{ text: "🔙 К предметам", callback_data: "ai_tutors" }]
           ]
         }
       });
       break;
       
-    case "ai_bots":
-      await ctx.answerCallbackQuery("🤖 AI Боты");
-      await ctx.editMessageText(`🤖 <b>AI Боты</b>
+    case "tutor_russian":
+      await ctx.answerCallbackQuery("📝 Русский язык");
+      await ctx.editMessageText(`📝 <b>Репетитор: Русский язык</b>
 
-<b>Примеры ботов которые можно создать:</b>
+<b>Что могу помочь:</b>
 
-💬 <b>Чат-бот</b>
-Telegram, Discord бот
+✏️ <b>Орфография</b> - Правила и исключения
+📖 <b>Пунктуация</b> - Запятые, тире
+📚 <b>Грамматика</b> - Части речи
 
-🎮 <b>Discord бот</b>
-Модерация, команды
-
-📊 <b>Telegram бот</b>
-Автоматизация, AI
-
-🎵 <b>Музыкальный бот</b>
-Воспроизведение музыки
-
-🏆 <b>Бот для игр</b>
-Викторины, конкурсы
-
-📈 <b>Трейдинг бот</b>
-Автоматическая торговля`, {
+<i>Напишите тему или вопрос!</i>`, {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "💬 Создать бота", callback_data: "ai_chat_bot" }],
-            [{ text: "🔙 К меню", callback_data: "ai_dev" }]
+            [{ text: "💬 Начать урок", callback_data: "ai_chat_tutor_russian" }],
+            [{ text: "🔙 К предметам", callback_data: "ai_tutors" }]
           ]
         }
       });
       break;
       
-    case "ai_websites":
-      await ctx.answerCallbackQuery("🌐 Веб-сайты");
-      await ctx.editMessageText(`🌐 <b>AI Веб-сайты</b>
+    case "tutor_literature":
+      await ctx.answerCallbackQuery("📖 Литература");
+      await ctx.editMessageText(`📖 <b>Репетитор: Литература</b>
 
-<b>Что можно создать:</b>
+<b>Что могу помочь:</b>
 
-🏠 <b>Landing Page</b>
-Продающая страница
+📕 <b>Анализ текста</b> - Разбор произведений
+👤 <b>Характеристики</b> - Персонажи, образы
+📝 <b>Сочинения</b> - Вступление, аргументы
 
-📝 <b>Блог</b>
-Персональный блог
-
-🛒 <b>Интернет-магазин</b>
-Каталог товаров
-
-📋 <b>Портфолио</b>
-Резюме разработчика
-
-📊 <b>Дашборд</b>
-Панель аналитики
-
-💼 <b>Лендинг</b>
-Рекламная страница`, {
+<i>Напишите автора или произведение!</i>`, {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "💬 Создать сайт", callback_data: "ai_chat_web" }],
-            [{ text: "🔙 К меню", callback_data: "ai_dev" }]
+            [{ text: "💬 Начать урок", callback_data: "ai_chat_tutor_literature" }],
+            [{ text: "🔙 К предметам", callback_data: "ai_tutors" }]
           ]
         }
       });
       break;
       
-    case "ai_apps":
-      await ctx.answerCallbackQuery("📱 Приложения");
-      await ctx.editMessageText(`📱 <b>AI Приложения</b>
+    case "tutor_social":
+      await ctx.answerCallbackQuery("🏛️ Обществознание");
+      await ctx.editMessageText(`🏛️ <b>Репетитор: Обществознание</b>
 
-<b>Типы приложений:</b>
+<b>Что могу помочь:</b>
 
-📝 <b>To-Do</b>
-Список задач
+👥 <b>Общество</b> - Человек, культура
+⚖️ <b>Право</b> - Конституция, законы
+💼 <b>Экономика</b> - Спрос, предложение
 
-📒 <b>Заметки</b>
-Записки и идеи
-
-📊 <b>Трекер</b>
-Отслеживание привычек
-
-💰 <b>Бюджет</b>
-Учёт расходов
-
-🏋️ <b>Фитнес</b>
-Тренировки и питание
-
-📚 <b>Обучение</b>
-Карточки для изучения`, {
+<i>Напишите тему!</i>`, {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "💬 Создать приложение", callback_data: "ai_chat_app" }],
-            [{ text: "🔙 К меню", callback_data: "ai_dev" }]
+            [{ text: "💬 Начать урок", callback_data: "ai_chat_tutor_social" }],
+            [{ text: "🔙 К предметам", callback_data: "ai_tutors" }]
+          ]
+        }
+      });
+      break;
+      
+    case "tutor_english":
+      await ctx.answerCallbackQuery("🌍 Английский язык");
+      await ctx.editMessageText(`🌍 <b>Репетитор: Английский язык</b>
+
+<b>Что могу помочь:</b>
+
+📝 <b>Грамматика</b> - Времена, артикли
+💬 <b>Разговор</b> - Диалоги, практика
+📖 <b>Лексика</b> - Слова, идиомы
+
+<i>Напишите тему или вопрос!</i>`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Начать урок", callback_data: "ai_chat_tutor_english" }],
+            [{ text: "🔙 К предметам", callback_data: "ai_tutors" }]
+          ]
+        }
+      });
+      break;
+      
+    case "ai_specialists":
+      await ctx.answerCallbackQuery("👨‍⚖️ AI Специалисты");
+      await ctx.editMessageText(`👨‍⚖️ <b>AI Специалисты</b>
+
+Выберите консультацию`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "👨‍🍳 Шеф-повар", callback_data: "spec_chef" },
+              { text: "⚖️ Юрист", callback_data: "spec_lawyer" }
+            ],
+            [
+              { text: "🏥 Домашний доктор", callback_data: "spec_doctor" },
+              { text: "🚗 Автоинструктор", callback_data: "spec_instructor" }
+            ],
+            [
+              { text: "🔙 Назад", callback_data: "back_to_start" }
+            ]
+          ]
+        }
+      });
+      break;
+      
+    case "spec_chef":
+      await ctx.answerCallbackQuery("👨‍🍳 Шеф-повар");
+      await ctx.editMessageText(`👨‍🍳 <b>Консультация: Шеф-повар</b>
+
+<b>Чем могу помочь:</b>
+
+🍳 <b>Рецепты</b> - Завтрак, обед, ужин
+🥗 <b>Диеты</b> - ПП, веган
+🔪 <b>Техники</b> - Нарезка, жарка
+
+<i>Спросите: "Что приготовить на ужин?"</i>`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Задать вопрос", callback_data: "ai_chat_chef" }],
+            [{ text: "🔙 К специалистам", callback_data: "ai_specialists" }]
+          ]
+        }
+      });
+      break;
+      
+    case "spec_lawyer":
+      await ctx.answerCallbackQuery("⚖️ Юрист");
+      await ctx.editMessageText(`⚖️ <b>Консультация: Юрист</b>
+
+<b>Чем могу помочь:</b>
+
+📄 <b>Договоры</b> - Аренда, покупка
+🏠 <b>Недвижимость</b> - Ипотека
+👷 <b>Трудовые споры</b> - Увольнение
+
+<i>⚠️ Это AI-помощник, не замена юристу</i>`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Задать вопрос", callback_data: "ai_chat_lawyer" }],
+            [{ text: "🔙 К специалистам", callback_data: "ai_specialists" }]
+          ]
+        }
+      });
+      break;
+      
+    case "spec_doctor":
+      await ctx.answerCallbackQuery("🏥 Домашний доктор");
+      await ctx.editMessageText(`🏥 <b>Консультация: Домашний доктор</b>
+
+<b>Чем могу помочь:</b>
+
+🤒 <b>Симптомы</b> - Что может означать
+💊 <b>Лекарства</b> - Дозировки, аналоги
+🏃 <b>Здоровый образ</b> - Сон, питание
+
+<i>⚠️ Это AI-помощник, не замена врачу</i>`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Задать вопрос", callback_data: "ai_chat_doctor" }],
+            [{ text: "🔙 К специалистам", callback_data: "ai_specialists" }]
+          ]
+        }
+      });
+      break;
+      
+    case "spec_instructor":
+      await ctx.answerCallbackQuery("🚗 Автоинструктор");
+      await ctx.editMessageText(`🚗 <b>Консультация: Автоинструктор</b>
+
+<b>Чем могу помочь:</b>
+
+📚 <b>ПДД</b> - Правила дорожного движения
+🅿️ <b>Знаки</b> - Значение, штрафы
+🚦 <b>Ситуации</b> - Как действовать
+
+<i>Подготовка к экзамену в ГИБДД</i>`, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💬 Задать вопрос", callback_data: "ai_chat_instructor" }],
+            [{ text: "🔙 К специалистам", callback_data: "ai_specialists" }]
           ]
         }
       });
@@ -1184,5 +1277,4 @@ Telegram, Discord бот
       await ctx.answerCallbackQuery("Неизвестная команда");
   }
 });
-
 bot.start();
